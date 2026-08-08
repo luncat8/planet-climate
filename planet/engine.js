@@ -70,6 +70,7 @@ function defaultParams() {
     nightShading: 1,
     pointSize: 2.2,
     relief: 0.004,
+    equirect: 0,
   };
 }
 
@@ -220,6 +221,7 @@ Planet.prototype.compile = function () {
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
   this.prog.globe = new Prog(gl, GLOBE_VS, GLOBE_FS, 'globe');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
+  this.prog.equi = new Prog(gl, EQUI_VS, EQUI_FS, 'equi');
 };
 
 Planet.prototype.build = function (level) {
@@ -399,6 +401,15 @@ Planet.prototype.render = function () {
   gl.cullFace(gl.BACK);
   gl.frontFace(gl.CCW);
 
+  var equirect = P.equirect > 0.5;
+  var sun = this.sunDir();
+
+  if (equirect) {
+    this.renderEquirect(w, h, sun);
+    gl.bindVertexArray(null);
+    return;
+  }
+
   var c = this.cam;
   var eye = [
     c.dist * Math.cos(c.phi) * Math.sin(c.theta),
@@ -408,7 +419,6 @@ Planet.prototype.render = function () {
   var proj = m4.persp(0.9, w / h, 0.05, 40);
   var view = m4.look(eye, [0, 0, 0], [0, 1, 0]);
   var mvp = m4.mul(proj, view);
-  var sun = this.sunDir();
 
   var g = this.prog.globe.use();
   this.gridUniforms(g);
@@ -443,7 +453,7 @@ Planet.prototype.render = function () {
     this.gridUniforms(pp);
     pp.tex('uPart', this.partTex[this.partIdx]).tex('uLookup', this.texLookup)
       .tex('uLoA', this.A[2]).tex('uTop', this.A[0])
-      .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp)
+      .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp).f('uEquirect', 0.0)
       .f('uPointSize', P.pointSize * Math.min(2, dpr))
       .f('uOcean', P.particleOcean);
     gl.bindVertexArray(this.vaoEmpty);
@@ -453,6 +463,43 @@ Planet.prototype.render = function () {
     gl.enable(gl.CULL_FACE);
   }
   gl.bindVertexArray(null);
+};
+
+Planet.prototype.renderEquirect = function (w, h, sun) {
+  var gl = this.gl;
+  var P = this.params;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.BLEND);
+  gl.disable(gl.CULL_FACE);
+
+  var eq = this.prog.equi.use();
+  this.gridUniforms(eq);
+  eq.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uLoA', this.A[2])
+    .tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
+    .tex('uLookup', this.texLookup).i('uMode', P.mode)
+    .v3('uSun', sun[0], sun[1], sun[2])
+    .f('uShowLand', P.showLand).f('uNight', P.nightShading);
+  gl.bindVertexArray(this.vaoEmpty);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  if (P.showParticles) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.depthMask(false);
+    var pp = this.prog.points.use();
+    this.gridUniforms(pp);
+    pp.tex('uPart', this.partTex[this.partIdx]).tex('uLookup', this.texLookup)
+      .tex('uLoA', this.A[2]).tex('uTop', this.A[0])
+      .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
+      .f('uPointSize', P.pointSize * Math.min(2, window.devicePixelRatio || 1))
+      .f('uOcean', P.particleOcean);
+    gl.bindVertexArray(this.vaoEmpty);
+    gl.drawArrays(gl.POINTS, 0, this.PW * this.PH);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+  }
 };
 
 Planet.prototype.loop = function () {

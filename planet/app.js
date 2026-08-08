@@ -43,6 +43,7 @@ var ui = {
   panelEl: null,
   tuningToggleBtn: null,
   panelToggleBtn: null,
+  projBtn: null,
 };
 
 function el(tag, cls, txt) {
@@ -73,6 +74,9 @@ function refreshDynamic() {
     ui.runBtn.textContent = P.running ? '❚❚ pause' : '▶ run';
     ui.runBtn.className = 'btn flex1 ' + (P.running ? 'run on' : 'run off');
     ui.runBtn.style.flex = '1';
+  }
+  if (ui.projBtn) {
+    ui.projBtn.textContent = (P.equirect > 0.5 ? '🗺 map' : '🌐 globe');
   }
   ui.modeBtns.forEach(function (b, i) {
     b.className = 'mbtn' + (P.mode === i ? ' on' : '');
@@ -117,6 +121,17 @@ function buildUI() {
   ui.fpsEls = { cellSpan: cellSpan, lvlSpan: lvlSpan, fps: fpsEl, day: dayEl, yr: yrEl };
 
   hdr.appendChild(box);
+  var projBtn = el('button', 'btn', '🌐 globe');
+  projBtn.title = 'Toggle sphere / equirectangular (hover or press)';
+  var projOver = false;
+  function toggleProj() {
+    setParam('equirect', ui.planet.params.equirect > 0.5 ? 0 : 1);
+  }
+  projBtn.addEventListener('pointerenter', function () { projOver = true; toggleProj(); });
+  projBtn.addEventListener('pointerleave', function () { projOver = false; });
+  projBtn.addEventListener('pointerdown', function (e) { if (!projOver) toggleProj(); });
+  ui.projBtn = projBtn;
+  hdr.appendChild(projBtn);
   var panelToggle = el('button', 'btn', 'hide panel');
   panelToggle.onclick = function () {
     ui.panel = !ui.panel;

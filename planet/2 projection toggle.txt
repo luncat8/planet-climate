@@ -1,3 +1,135 @@
 implement button to switch
 	sphere | Equirectangular projection
 	button act on click or on pointer on. unicode ico changed globe | map
+
+pointer down and on mouse on it. i dont remember action name. it is similar to leave but antonym so i can without click
+
+same features as on sphere we just toggle view representation
+
+
+
+
+Implementation complete. All JS passes `node --check`. Here's what changed:
+
+**`engine.js`**
+- Added `equirect: 0` to `defaultParams()`.
+- Compiled new `equi` program (`engine.js:224`).
+- `render()` now branches on `P.equirect`: sphere path unchanged; equirect calls the new `renderEquirect()` which draws a fullscreen fragment pass (`EQUI_FS`) driven by `texLookup` for a **seam-free** flat map, plus projected particles. Reset `uEquirect` to `0.0` in the sphere particle pass so the uniform doesn't persist.
+
+**`shader.js`**
+- New `EQUI_VS` (fullscreen triangle emitting `vUv`).
+- New `EQUI_FS`: per-fragment `lon/lat → cell` lookup, identical `uMode` coloring/`pal()`/day-night as the globe, with clouds composited inline.
+- `PART_VS`: added `uEquirect` so streamlines map `(lon,lat)→uv` in map view.
+
+**`app.js`**
+- Added `🌐 globe` / `🗺 map` toggle button in the header (`ui.projBtn`).
+- Triggers on `pointerenter` (hover, the "antonym of leave" you meant) **and** `pointerdown`, guarded so one interaction toggles once (`app.js:130-132`). `refreshDynamic()` syncs the glyph/label.
+
+To verify: open `index.html`, hover or press the new header button to flip between the 3D sphere and the flat equirectangular map (continents, day/night, clouds, and streamlines all carry over). I couldn't run a live WebGL smoke test here (no browser in the sandbox), so please confirm in a browser that the `equi` shader links without console errors.
+
+
+
+
+# Plan: Sphere ⇄ Equirectangular projection toggle
+
+## Goal
+Add a button that toggles the visualization between the 3D **sphere** (perspective, current
+behavior) and a flat **Equirectangular** map. All existing features (continents, day/night,
+cloud overlay, wind/ocean streamlines) are shown in both views — only the projection changes.
+The button icon switches between a **globe** (🌐) and a **map** (🗺) glyph.
+
+## Why a fragment pass (not mesh reprojection)
+`geodesics.js:222` already builds `texLookup` (1024×512) mapping `(lon,lat)→cellIndex`. For the
+flat map we render a fullscreen triangle and, per fragment, derive `lon/lat` → look up the cell →
+fetch its field textures. This is **seam-free** (no triangulation across the antimeridian/poles)
+and reuses all existing simulation textures. No grid rebuild needed.
+
+## Files / changes
+
+### 1. `engine.js` — params
+- Add `equirect: 0` to `defaultParams()` (0 = sphere, 1 = equirectangular).
+
+### 2. `shader.js` — new/changed GLSL
+- **New `EQUI_VS`** = copy of `QUAD_VS` but adds `out vec2 vUv;` (`vUv = p * 0.5;` so screen 0..1).
+  Keep `QUAD_VS` untouched to avoid risk to sim shaders.
+- **New `EQUI_FS`** (`SHADER_HEAD + SHADER_COMMON + ...`):
+  - Uniforms: `uTop,uDeep,uLoA,uLoB,uHiA,uHiB,uLookup` (sampler2D), `uMode` (int), `uSun` (vec3),
+    `uShowLand`, `uNight` (float), `in vec2 vUv`.
+  - `lon = (vUv.x-0.5)*2π; lat = (vUv.y-0.5)*π; cell = int(texture(uLookup,vUv).r+0.5);`
+    bounds-check `cell` vs `uCount` → background fill if out of range.
+  - `texelFetch` the 6 field textures + `uCellB` at `cTex(cell)`; recompute `vVal` with the exact
+    same `uMode` ladder as `GLOBE_VS` (engine.js shader.js:463-472).
+  - `vLand = cb.w`; `vCloud = clamp(lb.y + hb.y*0.5, 0, 1)`.
+  - Color via `pal(vVal)` (copy `pal()` from `GLOBE_FS`), apply land mix and the **day/night**
+    term using `n = vec3(cos(lat)cos(lon), sin(lat), cos(lat)sin(lon))` dotted with `uSun`.
+  - Composite clouds: `col = mix(col, vec3(1.0)*lit, clamp(vCloud*0.9,0,1)*0.8)`.
+  - `o = vec4(col, 1.0)`. (No relief/rim — flat map.)
+- **`PART_VS`** (shader.js:414): add `uniform float uEquirect;`. When `uEquirect>0.5`, set
+  `gl_Position = vec4(vec2(lon/2π+0.5, lat/π+0.5)*2.0-1.0, 0.0, 1.0)` (uses existing `lon/lat`
+  already computed) instead of `uMVP*vec4(pos*1.012,1.0)`. Keep `vA`,`vSpd`,`gl_PointSize`.
+
+### 3. `engine.js` — compile + render
+- In `compile()` add: `this.prog.equi = new Prog(gl, EQUI_VS, EQUI_FS, 'equi');`
+- In `render()`, compute `var equirect = P.equirect > 0.5;` near the top (after canvas sizing/clear).
+- **Sphere branch (unchanged)** when `!equirect`: keep existing globe + cloud + particles passes
+  (only build `proj/view/mvp` in this branch).
+- **Equirectangular branch** when `equirect`:
+  - `gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0,0,w,h);`
+    `gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);`
+  - Surface: `var eq = this.prog.equi.use(); this.gridUniforms(eq);`
+    `.tex('uTop',this.A[0]).tex('uDeep',this.A[1]).tex('uLoA',this.A[2])`
+    `.tex('uLoB',this.A[3]).tex('uHiA',this.A[4]).tex('uHiB',this.A[5])`
+    `.tex('uLookup',this.texLookup).i('uMode',P.mode)`
+    `.v3('uSun',sun...).f('uShowLand',P.showLand).f('uNight',P.nightShading);`
+    `gl.bindVertexArray(this.vaoEmpty); gl.drawArrays(gl.TRIANGLES,0,3);`
+  - Particles (if `P.showParticles`): `gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE);`
+    `gl.depthMask(false); gl.disable(gl.CULL_FACE);`
+    `var pp = this.prog.points.use(); this.gridUniforms(pp);`
+    `.tex('uPart',this.partTex[this.partIdx]).tex('uLookup',this.texLookup)`
+    `.tex('uLoA',this.A[2]).tex('uTop',this.A[0])`
+    `.iv2('uPDim',this.PW,this.PH).f('uEquirect',1.0).f('uOcean',P.particleOcean);`
+    `gl.bindVertexArray(this.vaoEmpty); gl.drawArrays(gl.POINTS,0,this.PW*this.PH);`
+    restore `gl.depthMask(true); gl.disable(gl.BLEND); gl.enable(gl.CULL_FACE);`
+  - (Clouds are folded into `EQUI_FS`, so no separate cloud pass.)
+- Camera drag/wheel handlers (`bindInput`) stay bound but have no visual effect in equirect
+  (render ignores `this.cam`); acceptable. No change required.
+
+### 4. `app.js` — UI button
+- Add `projBtn: null` to `ui` object.
+- In `buildUI()`, in the header (`hdr`), create:
+  `var projBtn = el('button','btn','🌐 globe');` and append **before** `panelToggle`
+  (or right after `box`). Store `ui.projBtn = projBtn;`.
+- Toggle helper + guarded dual trigger:
+  ```js
+  function toggleProj(){
+    setParam('equirect', ui.planet.params.equirect > 0.5 ? 0 : 1);
+  }
+  var projOver = false;
+  projBtn.addEventListener('pointerenter', function(){ projOver = true; toggleProj(); });
+  projBtn.addEventListener('pointerleave', function(){ projOver = false; });
+  projBtn.addEventListener('pointerdown', function(e){ if(!projOver) toggleProj(); });
+  ```
+  (`pointerenter` = "antonym of leave" = hover; guard prevents a press that follows a hover from
+  double-toggling on mouse, while touch still toggles once since `pointerenter` fires before
+  `pointerdown`.)
+- In `refreshDynamic()`, update the button glyph/label:
+  ```js
+  if (ui.projBtn) ui.projBtn.textContent = (P.equirect > 0.5 ? '🗺 map' : '🌐 globe');
+  ```
+
+## Risks / notes
+- `vUv` mapping assumes screen covers the full map (stretches to canvas aspect, like the sphere
+  view stretches). Consistent with current behavior; no aspect letterboxing.
+- `pal()` and the `uMode` value ladder are duplicated from `GLOBE_*` — keep them in sync if modes
+  change.
+- Particle size/appearance in equirect is identical to sphere (additive points); positioning uses
+  the same `(lon,lat)→uv` math as the surface, so they align.
+
+## Validation
+1. Serve or open `index.html` (no build step; local scripts).
+2. Default = sphere with 🌐 globe button.
+3. Hover the button → switches to flat 🗺 map; hover off/on again toggles back. Pressing it also
+   toggles (without double-firing on a single press).
+4. In map view confirm: continents, day/night shading, cloud overlay, and streamlines all render
+   with **no antimeridian seam**; switching `Layer view` modes updates the map.
+5. Check browser console for shader link/compile errors (especially `equi` program).

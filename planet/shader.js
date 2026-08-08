@@ -33,6 +33,76 @@ void main(){
   gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
 }`;
 
+var EQUI_VS = SHADER_HEAD + `
+out vec2 vUv;
+void main(){
+  vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2));
+  vUv = p * 0.5;
+  gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
+}`;
+
+var EQUI_FS = SHADER_HEAD + SHADER_COMMON + `
+uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB, uLookup;
+uniform int   uMode;
+uniform vec3  uSun;
+uniform float uShowLand, uNight;
+in vec2 vUv;
+out vec4 o;
+vec3 pal(float t){
+  t = clamp(t,0.0,1.0);
+  vec3 c0=vec3(0.05,0.02,0.25), c1=vec3(0.05,0.35,0.75), c2=vec3(0.10,0.75,0.65),
+       c3=vec3(0.85,0.85,0.25), c4=vec3(0.90,0.35,0.10), c5=vec3(0.65,0.05,0.12);
+  if(t<0.2) return mix(c0,c1,t/0.2);
+  if(t<0.4) return mix(c1,c2,(t-0.2)/0.2);
+  if(t<0.6) return mix(c2,c3,(t-0.4)/0.2);
+  if(t<0.8) return mix(c3,c4,(t-0.6)/0.2);
+  return mix(c4,c5,(t-0.8)/0.2);
+}
+void main(){
+  vec2 uv = vUv;
+  float lon = (uv.x - 0.5) * 6.2831853;
+  float lat = (uv.y - 0.5) * 3.14159265;
+  int cell = int(texture(uLookup, uv).r + 0.5);
+  if(cell < 0 || cell >= uCount){ o = vec4(0.02,0.03,0.07,1.0); return; }
+
+  vec4 wt = texelFetch(uTop,  cTex(cell),0);
+  vec4 la = texelFetch(uLoA,  cTex(cell),0);
+  vec4 lb = texelFetch(uLoB,  cTex(cell),0);
+  vec4 ha = texelFetch(uHiA,  cTex(cell),0);
+  vec4 hb = texelFetch(uHiB,  cTex(cell),0);
+  vec4 cb = texelFetch(uCellB,cTex(cell),0);
+  vec4 wd = texelFetch(uDeep, cTex(cell),0);
+
+  float v = 0.0;
+  if(uMode==0) v = (la.z-238.0)/72.0;
+  else if(uMode==1) v = (wt.x-260.0)/50.0;
+  else if(uMode==2) v = (la.w-101325.0)/2600.0*0.5+0.5;
+  else if(uMode==3) v = lb.x/0.022;
+  else if(uMode==4) v = length(la.xy)/34.0;
+  else if(uMode==5) v = length(wt.yz)/1.1;
+  else if(uMode==6) v = hb.y/1.6;
+  else if(uMode==7) v = (wt.w-33.0)/4.0;
+  else if(uMode==8) v = (wd.x-272.0)/16.0;
+  else v = (ha.z-215.0)/45.0;
+  float vVal = clamp(v, 0.0, 1.0);
+  float vLand = cb.w;
+  float vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
+
+  vec3 base = pal(vVal);
+  if(uMode==4||uMode==5||uMode==6||uMode==3){
+    base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));
+  }
+  base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
+
+  vec3 n = vec3(cos(lat)*cos(lon), sin(lat), cos(lat)*sin(lon));
+  float d = max(0.0, dot(normalize(n), uSun));
+  float lit = mix(1.0, 0.16 + 0.9*d, uNight);
+
+  vec3 col = base*lit;
+  col = mix(col, vec3(1.0)*lit, clamp(vCloud*0.9, 0.0, 1.0)*0.8);
+  o = vec4(col, 1.0);
+}`;
+
 var OCEAN_FS = SHADER_HEAD + SHADER_COMMON + `
 layout(location=0) out vec4 oTop;
 layout(location=1) out vec4 oDeep;
@@ -415,7 +485,7 @@ var PART_VS = SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uPart, uLoA, uTop, uLookup;
 uniform mat4 uMVP;
 uniform ivec2 uPDim;
-uniform float uPointSize, uOcean;
+uniform float uPointSize, uOcean, uEquirect;
 out float vA;
 out float vSpd;
 void main(){
@@ -428,7 +498,12 @@ void main(){
                  texelFetch(uTop, cTex(cell),0).yz*6.0, uOcean);
   vSpd = length(uvw);
   vA = clamp(p.w,0.0,1.0)*clamp(1.5-abs(p.w-0.5)*2.0, 0.0, 1.0);
-  gl_Position = uMVP*vec4(pos*1.012, 1.0);
+  if(uEquirect > 0.5){
+    vec2 uv = vec2(lon/6.2831853 + 0.5, lat/3.14159265 + 0.5);
+    gl_Position = vec4(uv*2.0 - 1.0, 0.0, 1.0);
+  } else {
+    gl_Position = uMVP*vec4(pos*1.012, 1.0);
+  }
   gl_PointSize = uPointSize;
 }`;
 
