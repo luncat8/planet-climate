@@ -1,0 +1,3 @@
+implement button to switch
+	sphere | Equirectangular projection
+	button act on click or on pointer on. unicode ico changed globe | map

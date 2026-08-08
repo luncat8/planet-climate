@@ -1,4 +1,16 @@
+geodesics.js
+shader.js
+app.js
+engine.js
+
+
 Encapsulate all mesh generation math (icosahedron subdivision, vertex normalization, neighbor ring calculation, dual cell area computation, and terrain height noise) inside this new class.
 The class should expose a build(level, seed) method that returns an object containing all necessary data structures: vertices (pos), indices, neighbor maps (rings/nextMap), cell areas, land masks, and lookup tables.
 Move helper functions like mulberry32, norm, cross, and dot into the class as static or private methods to avoid polluting the global scope.
 Update the main Planet class constructor to instantiate this new grid generator instead of calling the standalone buildGrid function, ensuring full backward compatibility with existing WebGL texture bindings.
+
+
+implement
+should works via file://
+no ES modules (import/export) 
+actually Backward-compat is not need. just make it work good.
