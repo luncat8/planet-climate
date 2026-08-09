@@ -110,7 +110,7 @@ function Planet(canvas, level) {
   this.texCellA = null; this.texCellB = null;
   this.texNbrA = null; this.texNbrB = null;
   this.texLookup = null;
-  this.partTex = []; this.partIdx = 0;
+  this.part = [];
   this.PW = 160; this.PH = 160;
 
   this.fbo = {};
@@ -234,9 +234,20 @@ Planet.prototype.build = function (level) {
     pdata[j * 4] = r * Math.cos(a); pdata[j * 4 + 1] = z; pdata[j * 4 + 2] = r * Math.sin(a);
     pdata[j * 4 + 3] = Math.random();
   }
-  this.partTex = [this.mkTex(this.PW, this.PH, pdata), this.mkTex(this.PW, this.PH, pdata)];
-  this.fbo.p0 = this.mkFbo([this.partTex[0]]);
-  this.fbo.p1 = this.mkFbo([this.partTex[1]]);
+  var self = this;
+  var streamLayers = [
+    { velMode:2, velScale:1,  color:[1,0,0] },
+    { velMode:0, velScale:1,  color:[0,1,0] },
+    { velMode:1, velScale:6,  color:[0,0,1] },
+    { velMode:3, velScale:60, color:[1,1,1] },
+  ];
+  this.part = streamLayers.map(function (L, i) {
+    var a = self.mkTex(self.PW, self.PH, pdata), b = self.mkTex(self.PW, self.PH, pdata);
+    var fa = self.mkFbo([a]), fb = self.mkFbo([b]);
+    self.fbo['part' + i + 'a'] = fa; self.fbo['part' + i + 'b'] = fb;
+    return { tex:[a,b], idx:0, fboA:'part' + i + 'a', fboB:'part' + i + 'b',
+             velMode:L.velMode, velScale:L.velScale, color:L.color };
+  });
 
   this.ibo = gl.createBuffer();
   this.vaoGlobe = gl.createVertexArray();
@@ -251,14 +262,15 @@ Planet.prototype.build = function (level) {
 
 Planet.prototype.destroyGrid = function () {
   var gl = this.gl;
-  var all = this.A.concat(this.B, this.partTex, [this.texCellA, this.texCellB, this.texNbrA, this.texNbrB, this.texLookup]);
+  var partTexs = this.part.reduce(function (a, s) { return a.concat(s.tex); }, []);
+  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texNbrA, this.texNbrB, this.texLookup]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
   if (this.ibo) gl.deleteBuffer(this.ibo);
   if (this.vaoGlobe) gl.deleteVertexArray(this.vaoGlobe);
   if (this.vaoEmpty) gl.deleteVertexArray(this.vaoEmpty);
-  this.A = []; this.B = []; this.partTex = [];
+  this.A = []; this.B = []; this.part = [];
 };
 
 Planet.prototype.gridUniforms = function (p) {
@@ -351,17 +363,21 @@ Planet.prototype.step = function () {
 
 Planet.prototype.stepParticles = function (dt) {
   var gl = this.gl;
-  var src = this.partTex[this.partIdx];
-  var dstFbo = this.partIdx === 0 ? 'p1' : 'p0';
-  var p = this.prog.part.use();
-  this.gridUniforms(p);
-  p.tex('uPart', src).tex('uLookup', this.texLookup)
-    .tex('uLoA', this.A[2]).tex('uTop', this.A[0])
-    .iv2('uPDim', this.PW, this.PH)
-    .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', PLANET_R)
-    .f('uSeed', Math.random() * 1000).f('uOcean', this.params.particleOcean);
-  this.fullscreen(dstFbo, this.PW, this.PH);
-  this.partIdx = 1 - this.partIdx;
+  for (var i = 0; i < this.part.length; i++) {
+    var s = this.part[i];
+    var src = s.tex[s.idx];
+    var dstFbo = s.idx === 0 ? s.fboB : s.fboA;
+    var p = this.prog.part.use();
+    this.gridUniforms(p);
+    p.tex('uPart', src).tex('uLookup', this.texLookup)
+      .tex('uLoA', this.A[2]).tex('uTop', this.A[0]).tex('uHiA', this.A[4]).tex('uDeep', this.A[1])
+      .iv2('uPDim', this.PW, this.PH)
+      .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', PLANET_R)
+      .f('uSeed', Math.random() * 1000)
+      .i('uVelMode', s.velMode).f('uVelScale', s.velScale);
+    this.fullscreen(dstFbo, this.PW, this.PH);
+    s.idx = 1 - s.idx;
+  }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
 
@@ -427,24 +443,25 @@ Planet.prototype.render = function () {
     gl.disable(gl.BLEND);
   }
 
-  if (P.showParticles) {
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-    gl.depthMask(false);
-    gl.disable(gl.CULL_FACE);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
+  gl.disable(gl.CULL_FACE);
+  for (var pi = 0; pi < this.part.length; pi++) {
+    if (((P.streamline >> pi) & 1) === 0) continue;
+    var ps = this.part[pi];
     var pp = this.prog.points.use();
     this.gridUniforms(pp);
-    pp.tex('uPart', this.partTex[this.partIdx]).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[2]).tex('uTop', this.A[0])
+    pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
       .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp).f('uEquirect', 0.0)
       .f('uPointSize', P.pointSize * Math.min(2, dpr))
-      .f('uOcean', P.particleOcean);
+      .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
     gl.bindVertexArray(this.vaoEmpty);
     gl.drawArrays(gl.POINTS, 0, this.PW * this.PH);
-    gl.depthMask(true);
-    gl.disable(gl.BLEND);
-    gl.enable(gl.CULL_FACE);
   }
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.enable(gl.CULL_FACE);
   gl.bindVertexArray(null);
 };
 
@@ -482,22 +499,23 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     gl.disable(gl.BLEND);
   }
 
-  if (P.showParticles) {
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-    gl.depthMask(false);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
+  for (var pi = 0; pi < this.part.length; pi++) {
+    if (((P.streamline >> pi) & 1) === 0) continue;
+    var ps = this.part[pi];
     var pp = this.prog.points.use();
     this.gridUniforms(pp);
-    pp.tex('uPart', this.partTex[this.partIdx]).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[2]).tex('uTop', this.A[0])
+    pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
       .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
       .f('uPointSize', P.pointSize * Math.min(2, window.devicePixelRatio || 1))
-      .f('uOcean', P.particleOcean);
+      .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
     gl.bindVertexArray(this.vaoEmpty);
     gl.drawArrays(gl.POINTS, 0, this.PW * this.PH);
-    gl.depthMask(true);
-    gl.disable(gl.BLEND);
   }
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
 };
 
 Planet.prototype.loop = function () {

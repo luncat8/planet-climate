@@ -67,6 +67,7 @@ var ui = {
   // element refs
   runBtn: null,
   layerRadios: {},
+  streamlineChecks: {},
   levelBtns: [],
   knobVals: {},
   knobInputs: {},
@@ -120,6 +121,9 @@ function refreshDynamic() {
     var on = (P.mode === +m);
     inp.checked = on;
     inp.parentNode.classList.toggle('sel', on);
+  });
+  Object.keys(ui.streamlineChecks).forEach(function (i) {
+    ui.streamlineChecks[i].checked = ((P.streamline >> +i) & 1) !== 0;
   });
   ui.levelBtns.forEach(function (b, i) {
     var l = 4 + i;
@@ -210,10 +214,15 @@ function buildUI() {
     th.title = v.title;
     hrow.appendChild(th);
   });
+  var sth = el('th', 'stream', '≋');
+  sth.title = 'Streamlines';
+  hrow.appendChild(sth);
   thead.appendChild(hrow);
   table.appendChild(thead);
   var tbody = document.createElement('tbody');
-  LAYER_VIEW.layers.forEach(function (layer) {
+  var streamColors = ['#ff3b3b', '#27e36b', '#3b82f6', '#f5f5f5'];
+  function setStreamBit(mask, i, on) { return on ? (mask | (1 << i)) : (mask & ~(1 << i)); }
+  LAYER_VIEW.layers.forEach(function (layer, li) {
     var tr = document.createElement('tr');
     tr.appendChild(el('th', 'lname', layer.label));
     var row = LAYER_VIEW.map[layer.id] || {};
@@ -235,6 +244,21 @@ function buildUI() {
       tr.appendChild(td);
       ui.layerRadios[mode] = inp;
     });
+    var std = el('td', 'stream');
+    var sw = el('span', 'swatch');
+    sw.style.background = streamColors[li];
+    std.appendChild(sw);
+    var sinp = document.createElement('input');
+    sinp.type = 'checkbox';
+    sinp.className = 'accent-cyan-400';
+    sinp.title = layer.label + ' streamlines';
+    sinp.setAttribute('aria-label', layer.label + ' streamlines');
+    sinp.onchange = function () {
+      setParam('streamline', setStreamBit(ui.planet.params.streamline, li, this.checked));
+    };
+    std.appendChild(sinp);
+    tr.appendChild(std);
+    ui.streamlineChecks[li] = sinp;
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
@@ -250,8 +274,6 @@ function buildUI() {
   // checkboxes
   var chkDefs = [
     ['showClouds', 'Clouds & rain overlay'],
-    ['showParticles', 'Wind streamlines'],
-    ['particleOcean', 'Streamlines follow ocean'],
     ['dayNight', 'Day / night cycle'],
     ['nightShading', 'Night shading'],
     ['showLand', 'Show continents'],

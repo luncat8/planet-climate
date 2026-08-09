@@ -477,8 +477,9 @@ void main(){
 
 var PART_FS = SHADER_HEAD + SHADER_COMMON + `
 out vec4 oPart;
-uniform sampler2D uPart, uLookup, uLoA, uTop;
-uniform float uDt, uLife, uRadius, uSeed, uOcean;
+uniform sampler2D uPart, uLookup, uLoA, uTop, uHiA, uDeep;
+uniform float uDt, uLife, uRadius, uSeed, uVelScale;
+uniform int uVelMode;
 uniform ivec2 uPDim;
 
 vec3 randDir(float s){
@@ -504,8 +505,12 @@ void main(){
 
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 e1 = cb.xyz, e2 = cross(e1, pos);
-  vec2 uvw = mix(texelFetch(uLoA, cTex(cell),0).xy,
-                 texelFetch(uTop, cTex(cell),0).yz*6.0, uOcean);
+  vec2 vel;
+  if(uVelMode==0)      vel = texelFetch(uLoA, cTex(cell),0).xy;
+  else if(uVelMode==1) vel = texelFetch(uTop, cTex(cell),0).yz*uVelScale;
+  else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
+  else                 vel = texelFetch(uDeep, cTex(cell),0).yz*uVelScale;
+  vec2 uvw = vel;
   vec3 v3 = uvw.x*e1 + uvw.y*e2;
   pos = normalize(pos + v3*uDt/uRadius);
 
@@ -518,21 +523,17 @@ void main(){
 }`;
 
 var PART_VS = SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uPart, uLoA, uTop, uLookup;
+uniform sampler2D uPart, uLookup;
 uniform mat4 uMVP;
 uniform ivec2 uPDim;
-uniform float uPointSize, uOcean, uEquirect;
+uniform float uPointSize, uEquirect;
 out float vA;
-out float vSpd;
 void main(){
   ivec2 t = ivec2(gl_VertexID % uPDim.x, gl_VertexID / uPDim.x);
   vec4 p = texelFetch(uPart, t, 0);
   vec3 pos = normalize(p.xyz);
   float lon = atan(pos.z, pos.x), lat = asin(clamp(pos.y,-1.0,1.0));
   int cell = int(texture(uLookup, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).r + 0.5);
-  vec2 uvw = mix(texelFetch(uLoA, cTex(cell),0).xy,
-                 texelFetch(uTop, cTex(cell),0).yz*6.0, uOcean);
-  vSpd = length(uvw);
   vA = clamp(p.w,0.0,1.0)*clamp(1.5-abs(p.w-0.5)*2.0, 0.0, 1.0);
   if(uEquirect > 0.5){
     vec2 uv = vec2(lon/6.2831853 + 0.5, lat/3.14159265 + 0.5);
@@ -544,13 +545,11 @@ void main(){
 }`;
 
 var PART_PS = SHADER_HEAD + `
-in float vA; in float vSpd; out vec4 o;
+in float vA; uniform vec3 uColor; out vec4 o;
 void main(){
   vec2 d = gl_PointCoord-0.5;
   float m = smoothstep(0.5,0.15,length(d));
-  float s = clamp(vSpd/28.0,0.0,1.0);
-  vec3 c = mix(vec3(0.55,0.85,1.0), vec3(1.0,0.95,0.6), s);
-  o = vec4(c, m*vA*0.75);
+  o = vec4(uColor, m*vA*0.75);
 }`;
 
 function GLOBE_VS(m) {
