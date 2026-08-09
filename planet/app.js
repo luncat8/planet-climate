@@ -76,8 +76,8 @@ var ui = {
   planet: null,
   panel: true,
   tuning: false,
-  level: 5,
-  stats: { fps: 0, days: 0, cells: 0, level: 5 },
+  level: 6,
+  stats: { fps: 0, days: 0, cells: 0, level: 6 },
   err: null,
   // element refs
   runBtn: null,

@@ -6,8 +6,8 @@
    from this so there is exactly one definition. */
 var PARAMS = {
   // tunable (have min/max/step) -> become sliders
-  dt:        { label: 'Timestep dt',          default: 300,   min: 120, max: 1800, step: 60,   fmt: function (v) { return v + ' s'; } },
-  substeps:  { label: 'Substeps / frame',     default: 2,     min: 1,   max: 8,    step: 1 },
+  dt:        { label: 'Timestep dt',          default: 120,   min: 120, max: 1800, step: 60,   fmt: function (v) { return v + ' s'; } },
+  substeps:  { label: 'Substeps / frame',     default: 4,     min: 1,   max: 8,    step: 1 },
   omega:     { label: 'Rotation Ω',           default: 7.292e-5, min: 0, max: 3.6e-4, step: 1e-6, fmt: function (v) { return (v / 7.292e-5).toFixed(2) + '× Earth'; } },
   solar:     { label: 'Solar constant',       default: 1361,  min: 800, max: 2000, step: 10,   fmt: function (v) { return v + ' W/m²'; } },
   greenhouse:{ label: 'Greenhouse',           default: 0.55,  min: 0,   max: 1,    step: 0.01 },

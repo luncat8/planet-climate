@@ -1,0 +1,5 @@
+
+set default
+  Level 6
+  120s
+  4 substeps

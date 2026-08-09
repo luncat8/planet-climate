@@ -1,0 +1,219 @@
+I've read the full simulation engine. Here is a structured assessment:
+
+---
+
+## Overall impression
+
+The visualization in `11.png` looks physically plausible: zonal (east-west) flow bands, some meridional structure, and emergent eddies on a rotating sphere. The color mapping and streamline rendering are coherent. The codebase is well-organized (grid generation, dynamics, coupling, particles, rendering are cleanly separated).
+
+---
+
+## Simulation problems I found
+
+### 1. Air–ocean momentum coupling is physically wrong (major)
+
+In `shader.js` (`COUPLE_FS`):
+
+```glsl
+vec2 rel = vl - vt;
+vec2 dstress = uWindStress*uDt*rel*(1.0-land);
+vt += dstress;
+vl -= dstress*0.02;
+```
+
+The ocean gains the full `dstress`, but the air only loses `0.02 * dstress`.  
+Physically, momentum transfer should be reciprocal: the air deceleration should be larger than the ocean acceleration by roughly the density-depth ratio `(ρ_water·H_water)/(ρ_air·H_air) ≈ 40–1000`, not smaller by a factor of 50. As written, **~98% of the momentum vanishes** from the system. This will cause the ocean to spin up unrealistically and the wind field to be weakly damped by the ocean.
+
+### 2. No true mass conservation / diagnosed pressure (major design limitation)
+
+Pressure is never dynamically evolved. In `stepAir`:
+
+```glsl
+outA = vec4(v1, tr1.x, p0);   // p0 = a0.w (pressure just copied)
+```
+
+Pressure is purely diagnostic (`Pl = 101325 - 60·(Tl-288) + 25·(Th-250)`). The velocity field is corrected with a simple `v0*div` term, but there is **no pressure-Poisson solve**. Over long runs this allows mass sources/sinks to accumulate, so the wind field can slowly drift.
+
+### 3. Seam in equirectangular projection (visual bug)
+
+`uLookup` is created with `CLAMP_TO_EDGE` in both S and T directions (`engine.js` `mkTex`). In equirectangular mode the S direction corresponds to longitude, so the date-line seam is not wrapped:
+
+```javascript
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+```
+
+It should use `gl.REPEAT` for S (longitude) while keeping `CLAMP_TO_EDGE` for T (latitude).
+
+### 4. Particle respawn opacity discontinuity (minor visual bug)
+
+In `PART_FS`:
+
+```glsl
+if(age <= 0.0){
+  ...
+  age = 1.0 + hash11(float(pid)+uSeed)*0.5;
+}
+```
+
+and in `PART_VS`:
+
+```glsl
+vA = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
+```
+
+Respawned particles start at age `1.0–1.5`, which always yields `vA ≈ 0.5` instead of fading in from 0. You see sudden half-opacity dots appearing.
+
+### 5. First-order upwind advection (modeling limitation)
+
+Both temperature and momentum use:
+
+```glsl
+float w = un > 0.0 ? 0.0 : 1.0;
+advT += L*un*mix(tr0, trj, w);
+```
+
+This is first-order upwind, which is **excessively diffusive** for sharp gradients (fronts, jets). It smears temperature and velocity structures over time. Acceptable for a fast GPU climate toy, but it limits realism.
+
+### 6. Hardcoded ocean density in the ocean shader
+
+```glsl
+vec2 acc = -gradP/1027.0 + uNuVel*lapV - advV + v0*div;
+```
+
+`1027.0` is buried in the shader source rather than passed as a uniform. If you ever want to simulate a different planet (e.g., freshwater ocean, or a gas-giant "sea"), you have to edit GLSL source.
+
+---
+
+## What looks good
+
+- **Coriolis**: The implementation (`-2·Ω×v` projected onto local east/north) is mathematically correct for the chosen north-pole axis.
+- **Dual-hex grid**: Neighbor indexing, area computation, and local frames (`e1`, `e2`) are handled correctly, including the 12 pentagonal vertices.
+- **Thermodynamic coupling**: Sensible/latent heat, radiation, convection, cloud/rain parameterization, and thermohaline mixing are all internally consistent and produce emergent Hadley-like behavior.
+- **Rendering pipeline**: Double-buffered A/B state, correct ping-pong through `dynO → dynA → cplO/cplA`, and particle trail geometry are all sound.
+- **Stability**: CFL for the chosen `dt=300 s` and grid spacing (~250 km at L5) is comfortable; viscosity terms further damp high-frequency noise.
+
+---
+
+## Verdict
+
+**Visually**: the result in `11.png` looks good — the streamlines and temperature field are coherent and Earth-like.
+
+**Physics-wise**: the most serious issue is the **air–ocean momentum coupling being off by two orders of magnitude and in the wrong direction** (point #1). The diagnosed-pressure / no-Poisson-solve approach (#2) is the second biggest limitation. The equirectangular seam (#3) is a clear rendering bug if you use map view.
+
+
+==================
+
+Based on the images, I can now give you a comprehensive diagnosis and improvement plan.
+
+---
+
+## What the images reveal
+
+### 3.png (Low air · T, globe view)
+- The **hexagonal grid is extremely visible** — each cell is flat-shaded with its center value, making the dual-hex structure obvious across the whole sphere.
+- Streamlines show **grid-aligned artifacts**: flow patterns follow the cell boundaries rather than smooth physical structures.
+- Southern hemisphere (bottom of globe) shows a **strong red band** — likely a grid artifact or temperature drift.
+- The banded temperature structure looks plausible (Hadley-like), but is modulated by the coarse grid.
+
+### 3_clouds.png (with clouds)
+- Same hexagonal visibility problem, now compounded by cloud shading.
+- Cloud patterns show **hexagonal symmetry** — the cloud field is being constrained by the grid rather than by physics.
+- The streamlines in the southern mid-latitudes form a distinct **grid-scale vortex** that looks like a numerical artifact.
+
+---
+
+## Root causes
+
+| Issue | Category | Severity |
+|-------|----------|----------|
+| Air–ocean momentum exchange is 50:1 instead of ~1:50 | Physics bug | Critical |
+| No pressure solve; diagnosed pressure only | Physics limitation | High |
+| Flat-shaded per-cell rendering | Visualization | High |
+| First-order upwind advection | Numerical diffusion | Medium |
+| Low grid resolution in screenshots | Resolution | Medium |
+| Equirectangular date-line seam | Rendering bug | Medium |
+| Particle respawn opacity jump | Visual bug | Low |
+| Hardcoded ρ_ocean in shader | Maintainability | Low |
+
+---
+
+## Improvement plan
+
+### Phase 1 — Fix critical physics (P0)
+
+**1.1 Fix air–ocean momentum coupling** (`shader.js` `COUPLE_FS`)
+- The drag impulse `dstress = uWindStress * uDt * rel` should accelerate the ocean AND decelerate the air by comparable amounts.
+- The air-side loss should be scaled by `ρ_water * H_water / (ρ_air * H_air) ≈ 40–200`, not the current `0.02`.
+- Proposed fix: `vl += dstress * (1.0 - land)` and `vl -= dstress * 0.02` is wrong. Instead:
+  ```glsl
+  float rhoRatio = 1027.0 / 1.1;           // ~930
+  float depthRatio = 200.0 / 5000.0;       // ~0.04
+  float momRatio = rhoRatio * depthRatio;   // ~37
+  vt += dstress * (1.0 - land);
+  vl -= dstress * 0.02;  // keep small, represents Ekman transport
+  ```
+  Actually the cleaner fix is to make the momentum exchange reciprocal: air loses what ocean gains (minus small Ekman return flow). The current 0.02 factor should be removed or inverted.
+
+**1.2 Add a simple pressure-Poisson solve** (new pass or inline)
+- Currently pressure is purely diagnostic: `Pl = 101325 - 60*(Tl-288) + 25*(Th-250)`.
+- Add one Jacobi-iteration pressure solve per coupling step to enforce `div(v) ≈ 0`. Even 5–10 iterations on the GPU would dramatically improve mass conservation and remove the spurious divergence that causes grid-aligned artifacts.
+
+### Phase 2 — Fix rendering and resolution (P1)
+
+**2.1 Smooth per-cell shading** (`shader.js` globe/equi shaders)
+- Instead of `texelFetch` at cell center (flat shading), sample the state texture at the fragment's actual lat/lon using `texture()` with `LINEAR` filtering. This requires:
+  - Regenerating `uLookup` at higher resolution (2048×1024 or 4096×2048)
+  - Switching from `texelFetch` to `texture(uLookup, uv)` in the render shaders
+  - Enabling `LINEAR` filtering on `uLookup`
+- This alone will eliminate 80% of the visible hexagonal grid.
+
+**2.2 Fix equirectangular wrap** (`engine.js` `mkTex`)
+- Change `TEXTURE_WRAP_S` to `gl.REPEAT` for the lookup texture so the date-line seam disappears in map view.
+
+**2.3 Increase default resolution**
+- Default to `level 6` (10·4⁶+2 = 40962 cells) instead of `level 5` (2562 cells). L5 is too coarse for realistic atmospheric patterns.
+- L6 is still fast on modern GPUs and dramatically reduces grid anisotropy.
+
+### Phase 3 — Improve numerics (P2)
+
+**3.1 Replace first-order upwind with minmod limiter**
+- In `stepAir` and `stepOcean`, replace:
+  ```glsl
+  float w = un > 0.0 ? 0.0 : 1.0;
+  advT += L*un*mix(tr0, trj, w);
+  ```
+  with a minmod-limited scheme that is second-order in smooth regions and first-order near shocks. This reduces excessive diffusion of temperature and moisture fronts.
+
+**3.2 Add a Smagorinsky-like subgrid-scale viscosity**
+- The current constant viscosity (`uNuVel`, `uNuT`) is either too low (grid-scale noise appears) or too high (features are smeared).
+- A dynamic viscosity that scales with local strain rate `|∂v/∂x|` adapts automatically: high shear → more mixing, smooth flow → less damping.
+
+**3.3 Improve land-sea mask smoothness**
+- The current land mask is binary per cell (`cb.w > 0.5`). Introduce a soft land fraction or at least use `smoothstep` on the land value to avoid sharp coastlines that the grid can't represent.
+
+### Phase 4 — Minor fixes (P3)
+
+**4.1 Particle respawn opacity**
+- Change respawn age from `1.0 + hash*0.5` to `0.0 + hash*0.3` so particles fade in smoothly.
+
+**4.2 Expose ρ_ocean as uniform**
+- Move `1027.0` to `uRhoOcean` uniform in `stepOcean`.
+
+---
+
+## Recommended execution order
+
+1. **Fix momentum coupling** — one-line change, largest physics impact.
+2. **Fix equirectangular wrap** — one-line change, obvious visual bug.
+3. **Smooth rendering via texture sampling** — requires regenerating lookup texture at higher res and changing shader fetch mode.
+4. **Bump default level to 6** — one-line change in `app.js` `boot()`.
+5. **Add pressure Poisson solve** — new shader + 5–10 iterations per step.
+6. **Minmod advection** — replace upwind in both air/ocean shaders.
+7. **Smagorinsky viscosity** — optional, after the above are stable.
+
+---
+
+## Do you want me to start implementing?
+
+I'd recommend starting with **steps 1–4** (coupling fix, wrap fix, smooth rendering, level bump) because they are small changes with large visible impact. Then we can tackle the pressure solve and advection improvements.
+
