@@ -1,0 +1,23 @@
+Act as an expert in computational fluid dynamics and global climate modeling. I am building a WebGL-based GPU climate engine using an icosahedral dual-hex grid. The simulation includes four stacked layers: High Air, Low Air, Surface Ocean, and Deep Ocean. It uses explicit time-stepping, finite-volume advection, and diagnostic hydrostatic pressure (no Poisson solve).
+
+I need you to review the physical logic of my ocean-atmosphere coupling based on a specific experiment I ran, while keeping in mind some general observations from previous reviews.
+
+**1. The Experiment: Locked Rotation Thermohaline Test**
+To isolate buoyancy-driven circulation, I locked the planet's rotation (Omega = 0) and observed the long-term behavior of the ocean layers.
+*   **Expectation:** A standard thermohaline conveyor belt. Warm surface water should flow toward the poles, cool/sink, and cold deep water should return toward the equator.
+*   **Observation:** The behavior was inverted. The Deep Ocean layer became the dominant fast-flowing limb moving warm water from the equator to the poles. The Surface Ocean acted as a slow, cold return flow moving pole-to-equator.
+
+**2. Context & Previous Findings (High-Level)**
+Previous analyses have flagged several areas, but I want you to focus on the structural physics rather than minor tuning:
+*   **Visuals/Numerics:** There are known issues with grid artifacts and first-order numerical diffusion making storms look "mushy," but these are secondary to getting the circulation correct.
+*   **Pressure Formulation:** The model uses diagnostic pressure based on local temperature/salinity differences (baroclinic) for both ocean layers independently. Some argue this is fine; others suggest it might be causing issues with mass continuity.
+*   **Vertical Coupling:** There is a suspicion that the vertical exchange between surface and deep ocean is currently "convective-only" (mixing only when surface water is denser/colder), lacking a mechanism for upwelling or bidirectional mass transfer.
+*   **Layer Independence:** The deep ocean layer has its own pressure gradients and friction settings, effectively acting as an independent fluid rather than being strictly driven by surface dynamics/mass continuity.
+
+**3. Your Task**
+Based on the experiment results and this context:
+1.  Explain why my Deep Ocean likely became the "warm-to-cold" driver instead of the return flow. Is this a result of how pressure gradients are calculated for independent layers?
+2.  Critique the approach of having two independently baroclinic ocean layers. Should the deep layer's motion be more tightly coupled to surface mass continuity (barotropic mode) rather than its own local buoyancy?
+3.  Propose a conceptual fix for the vertical coupling/mixing logic that would enforce a proper overturning cell (sinking at poles, upwelling elsewhere) without requiring a complex global solver.
+
+Please focus on the physical principles and model architecture. Do not look for specific code bugs; evaluate whether this design can realistically produce Earth-like thermohaline circulation. Ensure mass, energy (heat), impulse conservation.
