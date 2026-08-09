@@ -4,26 +4,78 @@ var MODES = [
   'Wind speed', 'Ocean current', 'Rain', 'Salinity', 'Deep ocean temp', 'Air temp (high)',
 ];
 
-var KNOBS = [
-  { key: 'dt', label: 'Timestep dt', min: 120, max: 1800, step: 60, fmt: function (v) { return v + ' s'; } },
-  { key: 'substeps', label: 'Substeps / frame', min: 1, max: 8, step: 1 },
-  { key: 'omega', label: 'Rotation Ω', min: 0, max: 3.6e-4, step: 1e-6, fmt: function (v) { return (v / 7.292e-5).toFixed(2) + '× Earth'; } },
-  { key: 'solar', label: 'Solar constant', min: 800, max: 2000, step: 10, fmt: function (v) { return v + ' W/m²'; } },
-  { key: 'greenhouse', label: 'Greenhouse', min: 0, max: 1, step: 0.01 },
-  { key: 'nuVelAir', label: 'Air viscosity ν', min: 0, max: 6e5, step: 1e4, fmt: function (v) { return v.toExponential(1); } },
-  { key: 'nuTAir', label: 'Air heat diffusion', min: 0, max: 6e5, step: 1e4, fmt: function (v) { return v.toExponential(1); } },
-  { key: 'fricAirLow', label: 'Surface friction', min: 0, max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
-  { key: 'conv', label: 'Convection gain', min: 0, max: 3e-5, step: 5e-7, fmt: function (v) { return v.toExponential(1); } },
-  { key: 'kRad', label: 'Radiative exchange', min: 0, max: 8, step: 0.1 },
-  { key: 'lapse', label: 'Reference lapse ΔT', min: 20, max: 70, step: 1, fmt: function (v) { return v + ' K'; } },
-  { key: 'evap', label: 'Evaporation k', min: 0, max: 0.02, step: 0.0005, fmt: function (v) { return v.toFixed(4); } },
-  { key: 'kSurf', label: 'Sensible heat k', min: 0, max: 60, step: 1, fmt: function (v) { return v + ' W/m²K'; } },
-  { key: 'windStress', label: 'Wind stress', min: 0, max: 3e-7, step: 5e-9, fmt: function (v) { return v.toExponential(1); } },
-  { key: 'thermo', label: 'Thermohaline mixing', min: 0, max: 2e-6, step: 2e-8, fmt: function (v) { return v.toExponential(1); } },
-  { key: 'nuVelOcean', label: 'Ocean viscosity', min: 0, max: 4e4, step: 1e3, fmt: function (v) { return v.toExponential(1); } },
-  { key: 'cloudK', label: 'Cloud sensitivity', min: 0, max: 4, step: 0.05 },
-  { key: 'noise', label: 'Symmetry-break noise', min: 0, max: 0.2, step: 0.005 },
-];
+/* Built-in presets: keyed maps of partial overrides ({ v?, min?, max?, step? }).
+   Applying one only touches the listed keys; all other params stay intact. */
+var BUILTIN_PRESETS = {
+  'Default': null, // sentinel: means "restore defaults"
+  'Earth-like': {
+    dt: { v: 300 }, solar: { v: 1361 }, greenhouse: { v: 0.55 },
+    omega: { v: 7.292e-5 }, evap: { v: 0.005 }, cloudK: { v: 1.7 }, noise: { v: 0.02 },
+  },
+  'Slow rotation': {
+    omega: { v: 1.8e-5, min: 0, max: 3.6e-4, step: 1e-6 },
+    lapse: { v: 55 }, conv: { v: 9e-6 },
+  },
+  'Hothouse': {
+    solar: { v: 1700 }, greenhouse: { v: 0.85 }, evap: { v: 0.012, min: 0, max: 0.03, step: 0.0005 },
+    kRad: { v: 1.2 }, cloudK: { v: 2.6 },
+  },
+};
+
+/* Normalize a preset source into a keyed map { key: { v?, min?, max?, step? } }.
+   Accepts either an object keyed by param key, or an array of entries each
+   carrying a `key` field. */
+function normalizePreset(src) {
+  if (!src) return {};
+  if (Array.isArray(src)) {
+    var m = {};
+    src.forEach(function (e) {
+      if (e && e.key) {
+        var o = {};
+        if (e.v !== undefined) o.v = e.v;
+        if (e.min !== undefined) o.min = e.min;
+        if (e.max !== undefined) o.max = e.max;
+        if (e.step !== undefined) o.step = e.step;
+        m[e.key] = o;
+      }
+    });
+    return m;
+  }
+  return src;
+}
+
+/* Merge a (partial) preset into the live planet: set v and/or bounds for the
+   listed keys only. Unknown keys are ignored. */
+function applyPreset(src) {
+  var p = ui.planet;
+  if (!p) return;
+  var map = normalizePreset(src);
+  Object.keys(map).forEach(function (key) {
+    if (!PARAMS[key]) return; // ignore unknown params
+    var e = map[key];
+    if (e.min !== undefined || e.max !== undefined || e.step !== undefined) {
+      setBound(p, key, { min: e.min, max: e.max, step: e.step });
+    }
+    if (e.v !== undefined) {
+      var b = boundsOf(p, key);
+      p.params[key] = clamp(Number(e.v), b.min, b.max);
+    }
+  });
+  syncSliders();
+  refreshDynamic();
+}
+
+/* Re-sync every tuning slider to the current v and (possibly overridden) bounds. */
+function syncSliders() {
+  if (!ui.planet) return;
+  var p = ui.planet;
+  Object.keys(ui.knobInputs).forEach(function (key) {
+    var inp = ui.knobInputs[key];
+    var b = boundsOf(p, key);
+    inp.min = b.min; inp.max = b.max; inp.step = b.step;
+    inp.value = p.params[key];
+  });
+}
 
 var ui = {
   planet: null,
@@ -37,6 +89,7 @@ var ui = {
   modeBtns: [],
   levelBtns: [],
   knobVals: {},
+  knobInputs: {},
   checks: {},
   fpsEls: {},
   tuningSection: null,
@@ -63,10 +116,12 @@ function rebuild(l) {
   if (!p) return;
   var keep = {};
   Object.keys(p.params).forEach(function (key) { keep[key] = p.params[key]; });
+  var keepBounds = p.bounds;
   var t = p.simTime; // keep the daylight/orbit phase continuous across resolution changes
   p.build(l);
   p.simTime = t;
   Object.keys(keep).forEach(function (key) { p.params[key] = keep[key]; });
+  p.bounds = keepBounds;
   refreshDynamic();
 }
 
@@ -91,9 +146,9 @@ function refreshDynamic() {
     ui.checks[k].checked = P[k] > 0.5;
   });
   Object.keys(ui.knobVals).forEach(function (key) {
-    var k = KNOBS.find(function (x) { return x.key === key; });
+    var def = PARAMS[key];
     var v = P[key];
-    ui.knobVals[key].textContent = k.fmt ? k.fmt(v) : String(v);
+    ui.knobVals[key].textContent = def && def.fmt ? def.fmt(v) : String(v);
   });
 }
 
@@ -227,20 +282,25 @@ function buildUI() {
   var tuningSection = el('div');
   tuningSection.style.display = 'none';
   tuningSection.style.marginTop = '8px';
-  KNOBS.forEach(function (k) {
+  // build sliders for every tunable param (those carrying min/max/step in PARAMS)
+  Object.keys(PARAMS).forEach(function (key) {
+    var spec = PARAMS[key];
+    if (spec.step === undefined) return;
     var wrap = el('div');
     wrap.style.marginBottom = '10px';
     var kv = el('div', 'kv');
-    kv.appendChild(el('span', null, k.label));
+    kv.appendChild(el('span', null, spec.label));
     var val = el('span', 'v', '');
     kv.appendChild(val);
-    ui.knobVals[k.key] = val;
+    ui.knobVals[key] = val;
     wrap.appendChild(kv);
     var inp = document.createElement('input');
     inp.type = 'range';
-    inp.min = k.min; inp.max = k.max; inp.step = k.step;
-    inp.value = defaultParams()[k.key];
-    inp.oninput = function () { setParam(k.key, parseFloat(inp.value)); };
+    var b = boundsOf(ui.planet, key);
+    inp.min = b.min; inp.max = b.max; inp.step = b.step;
+    inp.value = ui.planet ? ui.planet.params[key] : spec.default;
+    inp.oninput = function () { setParam(key, parseFloat(inp.value)); };
+    ui.knobInputs[key] = inp;
     wrap.appendChild(inp);
     tuningSection.appendChild(wrap);
   });
@@ -248,15 +308,81 @@ function buildUI() {
   restore.onclick = function () {
     var def = defaultParams();
     Object.keys(def).forEach(function (key) { ui.planet.params[key] = def[key]; });
-    // sync slider positions
-    tuningSection.querySelectorAll('input[type=range]').forEach(function (inp, idx) {
-      inp.value = def[KNOBS[idx].key];
-    });
+    ui.planet.bounds = {};
+    syncSliders();
     refreshDynamic();
   };
   tuningSection.appendChild(restore);
   ui.tuningSection = tuningSection;
   panel.appendChild(tuningSection);
+
+  // presets
+  panel.appendChild(el('div', 'lab', 'Presets'));
+  var presetRow = el('div', 'row');
+  var sel = document.createElement('select');
+  sel.className = 'btn';
+  Object.keys(BUILTIN_PRESETS).forEach(function (name) {
+    var o = document.createElement('option');
+    o.value = name; o.textContent = name;
+    sel.appendChild(o);
+  });
+  sel.onchange = function () {
+    var name = sel.value;
+    if (name === 'Default') {
+      ui.planet.bounds = {};
+      var def = defaultParams();
+      Object.keys(def).forEach(function (key) { ui.planet.params[key] = def[key]; });
+      syncSliders(); refreshDynamic();
+    } else {
+      applyPreset(BUILTIN_PRESETS[name]);
+    }
+  };
+  presetRow.appendChild(sel);
+  var loadBtn = el('button', 'btn', 'Load JSON');
+  var fileInp = document.createElement('input');
+  fileInp.type = 'file';
+  fileInp.accept = '.json,application/json';
+  fileInp.style.display = 'none';
+  fileInp.onchange = function () {
+    var f = fileInp.files && fileInp.files[0];
+    if (!f) return;
+    var r = new FileReader();
+    r.onload = function () {
+      try {
+        applyPreset(JSON.parse(r.result));
+      } catch (e) {
+        showError('Invalid preset JSON: ' + (e && e.message ? e.message : e));
+      }
+    };
+    r.readAsText(f);
+    fileInp.value = '';
+  };
+  loadBtn.onclick = function () { fileInp.click(); };
+  presetRow.appendChild(loadBtn);
+  panel.appendChild(presetRow);
+  panel.appendChild(fileInp);
+
+  var expBtn = el('button', 'btn', 'Export current');
+  expBtn.onclick = function () {
+    var out = {};
+    Object.keys(PARAMS).forEach(function (key) {
+      var e = { v: ui.planet.params[key] };
+      if (ui.planet.bounds && ui.planet.bounds[key]) {
+        var b = ui.planet.bounds[key];
+        if (b.min !== undefined) e.min = b.min;
+        if (b.max !== undefined) e.max = b.max;
+        if (b.step !== undefined) e.step = b.step;
+      }
+      out[key] = e;
+    });
+    var blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'preset.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+  panel.appendChild(expBtn);
 
   var desc = el('p', 'desc',
     'drag to orbit · wheel to zoom. Winds, ocean gyres, Hadley/Ferrel-like cells and ' +

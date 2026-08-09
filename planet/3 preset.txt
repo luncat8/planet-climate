@@ -1,0 +1,11 @@
+refactor
+defaultParams
+KNOBS
+and somwhere current values
+
+i want single structure with v min max default
+
+i want preset system to merge with json e.g. json contain only  
+ { key: 'evap', v=0.05, min: 0, max: 0.1, step: 0.0005 } and after select preset it keep other intact
+
+firstly think is current value v good to store in same place as other Params

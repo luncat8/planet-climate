@@ -1,0 +1,12 @@
+## map layers GUI refactoring
+
+current : non organized random properties, layers in GUI
+
+what i want : 
+clean table with 
+    physical layers -- rows sort by physical height , row0 is high air. 
+    view maps -- columns : T P speed
+    so columns is radio btn group (exclusive ) - can select only one physical layer to render it 
+
+
+
