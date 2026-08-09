@@ -39,7 +39,7 @@ function defaultParams() {
   return {
     running: true,
     substeps: 2,
-    dt: 1800,
+    dt: 300,
     omega: 7.292e-5,
     nuVelAir: 1.6e5,
     nuTAir: 1.1e5,

@@ -5,7 +5,7 @@ var MODES = [
 ];
 
 var KNOBS = [
-  { key: 'dt', label: 'Timestep dt', min: 300, max: 3600, step: 60, fmt: function (v) { return v + ' s'; } },
+  { key: 'dt', label: 'Timestep dt', min: 120, max: 1800, step: 60, fmt: function (v) { return v + ' s'; } },
   { key: 'substeps', label: 'Substeps / frame', min: 1, max: 8, step: 1 },
   { key: 'omega', label: 'Rotation Ω', min: 0, max: 3.6e-4, step: 1e-6, fmt: function (v) { return (v / 7.292e-5).toFixed(2) + '× Earth'; } },
   { key: 'solar', label: 'Solar constant', min: 800, max: 2000, step: 10, fmt: function (v) { return v + ' W/m²'; } },
@@ -123,7 +123,7 @@ function buildUI() {
   ui.fpsEls = { cellSpan: cellSpan, lvlSpan: lvlSpan, fps: fpsEl, day: dayEl, yr: yrEl };
 
   hdr.appendChild(box);
-  var projBtn = el('button', 'btn', '🌐 globe');
+  var projBtn = el('button', 'btn proj', '🌐 globe');
   projBtn.title = 'Toggle sphere / equirectangular (hover or press)';
   var projOver = false;
   function toggleProj() {
