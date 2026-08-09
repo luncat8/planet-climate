@@ -336,7 +336,11 @@ Planet.prototype.decl = function () {
 };
 Planet.prototype.sunDir = function () {
   var d = this.decl();
-  var lon = 6.2831853 * (this.simTime / 86400);
+  
+  // calculate  Sun's longitude with planet's angular velocity (omega).
+  // If omega = 0, the planet is tidally locked.
+  var lon = this.params.omega * this.simTime; 
+  
   return [Math.cos(d) * Math.cos(lon), Math.sin(d), Math.cos(d) * Math.sin(lon)];
 };
 
