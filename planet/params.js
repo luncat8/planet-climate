@@ -35,9 +35,11 @@ var PARAMS = {
   mode:           { default: 0 },
   showClouds:     { default: true },
   streamline:     { default: 2 },
+  showParticles:  { default: true },
+  streamTrail:    { label: 'Streak length', default: 6000, min: 0, max: 30000, step: 500,
+                    fmt: function (v) { return (v / 60).toFixed(0) + ' min'; } },
   showLand:       { default: 1 },
   nightShading:   { default: 1 },
-  pointSize:      { default: 2.2 },
   relief:         { default: 0.004 },
   equirect:       { default: 0 },
 };

@@ -523,33 +523,43 @@ void main(){
 }`;
 
 var PART_VS = SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uPart, uLookup;
+uniform sampler2D uPart, uLoA, uTop, uHiA, uDeep, uLookup;
 uniform mat4 uMVP;
 uniform ivec2 uPDim;
-uniform float uPointSize, uEquirect;
+uniform float uTrail, uRadius, uEquirect, uVelScale;
+uniform int uVelMode;
 out float vA;
 void main(){
-  ivec2 t = ivec2(gl_VertexID % uPDim.x, gl_VertexID / uPDim.x);
+  int pid = gl_VertexID >> 1;          // 2 vertices per particle
+  int isTail = gl_VertexID & 1;
+  ivec2 t = ivec2(pid % uPDim.x, pid / uPDim.x);
   vec4 p = texelFetch(uPart, t, 0);
   vec3 pos = normalize(p.xyz);
   float lon = atan(pos.z, pos.x), lat = asin(clamp(pos.y,-1.0,1.0));
   int cell = int(texture(uLookup, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).r + 0.5);
-  vA = clamp(p.w,0.0,1.0)*clamp(1.5-abs(p.w-0.5)*2.0, 0.0, 1.0);
+  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+  vec3 e1 = cb.xyz, e2 = cross(e1, pos);
+  vec2 vel;
+  if(uVelMode==0)      vel = texelFetch(uLoA, cTex(cell),0).xy;
+  else if(uVelMode==1) vel = texelFetch(uTop, cTex(cell),0).yz*uVelScale;
+  else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
+  else                 vel = texelFetch(uDeep, cTex(cell),0).yz*uVelScale;
+  vec3 v3 = vel.x*e1 + vel.y*e2;                              // tangent velocity (m/s)
+  vec3 tail = normalize(pos - v3 * (uTrail / uRadius));       // arc back along flow
+  vec3 outp = isTail == 1 ? tail : pos;
+  vA = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
   if(uEquirect > 0.5){
-    vec2 uv = vec2(lon/6.2831853 + 0.5, lat/3.14159265 + 0.5);
+    vec2 uv = vec2(atan(outp.z,outp.x)/6.2831853+0.5, asin(clamp(outp.y,-1.0,1.0))/3.14159265+0.5);
     gl_Position = vec4(uv*2.0 - 1.0, 0.0, 1.0);
   } else {
-    gl_Position = uMVP*vec4(pos*1.012, 1.0);
+    gl_Position = uMVP * vec4(outp*1.012, 1.0);
   }
-  gl_PointSize = uPointSize;
 }`;
 
 var PART_PS = SHADER_HEAD + `
 in float vA; uniform vec3 uColor; out vec4 o;
 void main(){
-  vec2 d = gl_PointCoord-0.5;
-  float m = smoothstep(0.5,0.15,length(d));
-  o = vec4(uColor, m*vA*0.75);
+  o = vec4(uColor, vA*0.75);
 }`;
 
 function GLOBE_VS(m) {

@@ -264,6 +264,24 @@ function buildUI() {
   table.appendChild(tbody);
   wrap.appendChild(table);
   panel.appendChild(wrap);
+  // streamlines streak-length control (kept visible, not in the collapsed tuning section)
+  panel.appendChild(el('div', 'lab', 'Streak length'));
+  var stWrap = el('div');
+  var stKv = el('div', 'kv');
+  stKv.appendChild(el('span', null, 'Streak'));
+  var stVal = el('span', 'v', '');
+  stKv.appendChild(stVal);
+  stWrap.appendChild(stKv);
+  var stInp = document.createElement('input');
+  stInp.type = 'range';
+  var stb = boundsOf(ui.planet, 'streamTrail');
+  stInp.min = stb.min; stInp.max = stb.max; stInp.step = stb.step;
+  stInp.value = ui.planet ? ui.planet.params.streamTrail : 6000;
+  stInp.oninput = function () { setParam('streamTrail', parseFloat(stInp.value)); };
+  stWrap.appendChild(stInp);
+  panel.appendChild(stWrap);
+  ui.knobVals['streamTrail'] = stVal;
+  ui.knobInputs['streamTrail'] = stInp;
   var bar = el('div', 'bar');
   panel.appendChild(bar);
   var barlab = el('div', 'barlab');
@@ -274,6 +292,7 @@ function buildUI() {
   // checkboxes
   var chkDefs = [
     ['showClouds', 'Clouds & rain overlay'],
+    ['showParticles', 'Streamlines'],
     ['dayNight', 'Day / night cycle'],
     ['nightShading', 'Night shading'],
     ['showLand', 'Show continents'],
@@ -323,6 +342,7 @@ function buildUI() {
   Object.keys(PARAMS).forEach(function (key) {
     var spec = PARAMS[key];
     if (spec.step === undefined) return;
+    if (key === 'streamTrail') return;
     var wrap = el('div');
     wrap.style.marginBottom = '10px';
     var kv = el('div', 'kv');
