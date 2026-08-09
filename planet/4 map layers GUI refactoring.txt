@@ -10,3 +10,7 @@ clean table with
 
 
 
+
+i do not understand why
+highAir has no P, humidity, speed
+is this good? and why architecture LLM make such decission
