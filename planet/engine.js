@@ -443,29 +443,30 @@ Planet.prototype.render = function () {
     gl.disable(gl.BLEND);
   }
 
-  if (P.showParticles) {
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-    gl.depthMask(false);
-    gl.disable(gl.CULL_FACE);
-    for (var pi = 0; pi < this.part.length; pi++) {
-      if (((P.streamline >> pi) & 1) === 0) continue;
-      var ps = this.part[pi];
-      var pp = this.prog.points.use();
-      this.gridUniforms(pp);
-      pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
-        .tex('uLoA', this.A[2]).tex('uTop', this.A[0]).tex('uHiA', this.A[4]).tex('uDeep', this.A[1])
-        .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp).f('uEquirect', 0.0)
-        .f('uTrail', P.streamTrail).f('uRadius', PLANET_R)
-        .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
-        .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
-      gl.bindVertexArray(this.vaoEmpty);
-      gl.drawArrays(gl.LINES, 0, this.PW * this.PH * 2);
-    }
-    gl.depthMask(true);
-    gl.disable(gl.BLEND);
-    gl.enable(gl.CULL_FACE);
+  var dots = P.streamTrail <= 0;
+  var psz = 2.0 * Math.min(2, dpr);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
+  gl.disable(gl.CULL_FACE);
+  for (var pi = 0; pi < this.part.length; pi++) {
+    if (((P.streamline >> pi) & 1) === 0) continue;
+    var ps = this.part[pi];
+    var pp = this.prog.points.use();
+    this.gridUniforms(pp);
+    pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
+      .tex('uLoA', this.A[2]).tex('uTop', this.A[0]).tex('uHiA', this.A[4]).tex('uDeep', this.A[1])
+      .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp).f('uEquirect', 0.0)
+      .f('uTrail', P.streamTrail).f('uRadius', PLANET_R)
+      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
+      .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
+      .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
+    gl.bindVertexArray(this.vaoEmpty);
+    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
   }
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
+  gl.enable(gl.CULL_FACE);
   gl.bindVertexArray(null);
 };
 
@@ -503,27 +504,28 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     gl.disable(gl.BLEND);
   }
 
-  if (P.showParticles) {
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-    gl.depthMask(false);
-    for (var pi = 0; pi < this.part.length; pi++) {
-      if (((P.streamline >> pi) & 1) === 0) continue;
-      var ps = this.part[pi];
-      var pp = this.prog.points.use();
-      this.gridUniforms(pp);
-      pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
-        .tex('uLoA', this.A[2]).tex('uTop', this.A[0]).tex('uHiA', this.A[4]).tex('uDeep', this.A[1])
-        .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
-        .f('uTrail', P.streamTrail).f('uRadius', PLANET_R)
-        .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
-        .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
-      gl.bindVertexArray(this.vaoEmpty);
-      gl.drawArrays(gl.LINES, 0, this.PW * this.PH * 2);
-    }
-    gl.depthMask(true);
-    gl.disable(gl.BLEND);
+  var dots = P.streamTrail <= 0;
+  var psz = 2.0 * Math.min(2, window.devicePixelRatio || 1);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+  gl.depthMask(false);
+  for (var pi = 0; pi < this.part.length; pi++) {
+    if (((P.streamline >> pi) & 1) === 0) continue;
+    var ps = this.part[pi];
+    var pp = this.prog.points.use();
+    this.gridUniforms(pp);
+    pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
+      .tex('uLoA', this.A[2]).tex('uTop', this.A[0]).tex('uHiA', this.A[4]).tex('uDeep', this.A[1])
+      .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
+      .f('uTrail', P.streamTrail).f('uRadius', PLANET_R)
+      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
+      .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
+      .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
+    gl.bindVertexArray(this.vaoEmpty);
+    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
   }
+  gl.depthMask(true);
+  gl.disable(gl.BLEND);
 };
 
 Planet.prototype.loop = function () {

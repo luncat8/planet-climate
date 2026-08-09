@@ -23,6 +23,21 @@ var LAYER_VIEW = {
   },
 };
 
+/* per-layer streamline colors, indexed by LAYER_VIEW.layers order */
+var STREAM_COLORS = ['#ff3b3b', '#27e36b', '#3b82f6', '#f5f5f5'];
+
+/* reverse lookup: mode number -> { layer label, view label } */
+var VIEW_BY_ID = {};
+LAYER_VIEW.views.forEach(function (v) { VIEW_BY_ID[v.id] = v; });
+var MODE_INFO = {};
+LAYER_VIEW.layers.forEach(function (layer) {
+  var row = LAYER_VIEW.map[layer.id] || {};
+  Object.keys(row).forEach(function (v) {
+    var vi = VIEW_BY_ID[v];
+    MODE_INFO[row[v]] = { layer: layer.label, view: vi ? vi.label : v };
+  });
+});
+
 /* Merge a (partial) preset into the live planet: set v and/or bounds for the
    listed keys only. Unknown keys are ignored. (PARAMS, BUILTIN_PRESETS,
    normalizePreset, boundsOf, setBound, clamp are defined in params.js.) */
@@ -78,6 +93,9 @@ var ui = {
   tuningToggleBtn: null,
   panelToggleBtn: null,
   projBtn: null,
+  vinfoEl: null,
+  vinfoLayer: null,
+  vinfoStreams: null,
 };
 
 function el(tag, cls, txt) {
@@ -137,6 +155,29 @@ function refreshDynamic() {
     var v = P[key];
     ui.knobVals[key].textContent = def && def.fmt ? def.fmt(v) : String(v);
   });
+  updateViewportInfo();
+}
+
+function updateViewportInfo() {
+  if (!ui.vinfoEl || !ui.planet) return;
+  var P = ui.planet.params;
+  var mi = MODE_INFO[P.mode];
+  ui.vinfoLayer.textContent = mi ? (mi.layer + ' · ' + mi.view) : ('mode ' + P.mode);
+  var cont = ui.vinfoStreams;
+  while (cont.firstChild) cont.removeChild(cont.firstChild);
+  var any = false;
+  for (var i = 0; i < LAYER_VIEW.layers.length; i++) {
+    if (((P.streamline >> i) & 1) === 0) continue;
+    any = true;
+    var t = el('span', 'vtag', LAYER_VIEW.layers[i].label + ' speed');
+    t.style.color = STREAM_COLORS[i];
+    cont.appendChild(t);
+  }
+  if (!any) {
+    var none = el('span', 'vtag', 'no streamlines');
+    none.style.color = '#64748b';
+    cont.appendChild(none);
+  }
 }
 
 function buildUI() {
@@ -186,6 +227,17 @@ function buildUI() {
   hdr.appendChild(panelToggle);
   app.appendChild(hdr);
 
+  // viewport info (top center)
+  var vinfo = el('div', 'vinfo');
+  var vlabel = el('div', 'vlabel', 'rendering');
+  var vlayer = el('div', 'vlayer', '');
+  var vstreams = el('div', 'vstreams');
+  vinfo.appendChild(vlabel);
+  vinfo.appendChild(vlayer);
+  vinfo.appendChild(vstreams);
+  ui.vinfoEl = vinfo; ui.vinfoLayer = vlayer; ui.vinfoStreams = vstreams;
+  app.appendChild(vinfo);
+
   // panel
   var panel = el('div', 'panel');
   ui.panelEl = panel;
@@ -220,7 +272,6 @@ function buildUI() {
   thead.appendChild(hrow);
   table.appendChild(thead);
   var tbody = document.createElement('tbody');
-  var streamColors = ['#ff3b3b', '#27e36b', '#3b82f6', '#f5f5f5'];
   function setStreamBit(mask, i, on) { return on ? (mask | (1 << i)) : (mask & ~(1 << i)); }
   LAYER_VIEW.layers.forEach(function (layer, li) {
     var tr = document.createElement('tr');
@@ -246,7 +297,7 @@ function buildUI() {
     });
     var std = el('td', 'stream');
     var sw = el('span', 'swatch');
-    sw.style.background = streamColors[li];
+    sw.style.background = STREAM_COLORS[li];
     std.appendChild(sw);
     var sinp = document.createElement('input');
     sinp.type = 'checkbox';
@@ -264,8 +315,8 @@ function buildUI() {
   table.appendChild(tbody);
   wrap.appendChild(table);
   panel.appendChild(wrap);
-  // streamlines streak-length control (kept visible, not in the collapsed tuning section)
-  panel.appendChild(el('div', 'lab', 'Streak length'));
+  // streamlines control: 0 = dots, >0 = streak length (kept visible, not in collapsed tuning)
+  panel.appendChild(el('div', 'lab', 'Streamline length (0 = dots)'));
   var stWrap = el('div');
   var stKv = el('div', 'kv');
   stKv.appendChild(el('span', null, 'Streak'));
@@ -292,7 +343,6 @@ function buildUI() {
   // checkboxes
   var chkDefs = [
     ['showClouds', 'Clouds & rain overlay'],
-    ['showParticles', 'Streamlines'],
     ['dayNight', 'Day / night cycle'],
     ['nightShading', 'Night shading'],
     ['showLand', 'Show continents'],

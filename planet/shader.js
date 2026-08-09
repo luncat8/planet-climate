@@ -526,12 +526,12 @@ var PART_VS = SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uPart, uLoA, uTop, uHiA, uDeep, uLookup;
 uniform mat4 uMVP;
 uniform ivec2 uPDim;
-uniform float uTrail, uRadius, uEquirect, uVelScale;
+uniform float uTrail, uRadius, uEquirect, uVelScale, uAsPoints, uPointSize;
 uniform int uVelMode;
 out float vA;
 void main(){
-  int pid = gl_VertexID >> 1;          // 2 vertices per particle
-  int isTail = gl_VertexID & 1;
+  int pid = (uAsPoints > 0.5) ? gl_VertexID : (gl_VertexID >> 1);
+  int isTail = (uAsPoints > 0.5) ? 0 : (gl_VertexID & 1);
   ivec2 t = ivec2(pid % uPDim.x, pid / uPDim.x);
   vec4 p = texelFetch(uPart, t, 0);
   vec3 pos = normalize(p.xyz);
@@ -554,12 +554,18 @@ void main(){
   } else {
     gl_Position = uMVP * vec4(outp*1.012, 1.0);
   }
+  gl_PointSize = uPointSize;
 }`;
 
 var PART_PS = SHADER_HEAD + `
-in float vA; uniform vec3 uColor; out vec4 o;
+in float vA; uniform vec3 uColor; uniform float uAsPoints; out vec4 o;
 void main(){
-  o = vec4(uColor, vA*0.75);
+  float a = vA * 0.75;
+  if (uAsPoints > 0.5) {
+    float d = length(gl_PointCoord - 0.5);
+    a *= smoothstep(0.5, 0.15, d);
+  }
+  o = vec4(uColor, a);
 }`;
 
 function GLOBE_VS(m) {
