@@ -14,3 +14,10 @@ clean table with
 i do not understand why
 highAir has no P, humidity, speed
 is this good? and why architecture LLM make such decission
+
+
+move checkboxes
+	Wind streamlines
+	Streamlines follow ocean
+to table. place them next after speed. so i can select what speed show with Streamlines
+max possible Streamlines check is 4. draw them as r g b w colored lines accordingly to layer. Note lines are independent of radio buttons (e.g. may select Temperature radio btn + ocean lines checkbox)

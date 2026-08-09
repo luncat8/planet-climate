@@ -1,8 +1,27 @@
 /* app.js - UI, modes/knobs, and bootstrap */
-var MODES = [
-  'Air temp (low)', 'Surface temp', 'Sea-level pressure', 'Humidity',
-  'Wind speed', 'Ocean current', 'Rain', 'Salinity', 'Deep ocean temp', 'Air temp (high)',
-];
+// rows top->bottom = high->low (row0 = High air). view->uMode; absent key = no data.
+var LAYER_VIEW = {
+  layers: [
+    { id: 'highAir', label: 'High air' },
+    { id: 'lowAir', label: 'Low air' },
+    { id: 'ocean', label: 'Ocean' },
+    { id: 'deepOcean', label: 'Deep ocean' },
+  ],
+  views: [
+    { id: 'T', label: 'T', title: 'Temperature' },
+    { id: 'P', label: 'P', title: 'Pressure' },
+    { id: 'speed', label: 'Spd', title: 'Speed' },
+    { id: 'humidity', label: 'Hum', title: 'Humidity' },
+    { id: 'salinity', label: 'Sal', title: 'Salinity' },
+    { id: 'rain', label: 'Rain', title: 'Rain' },
+  ],
+  map: {
+    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
+    lowAir: { T: 0, P: 2, humidity: 3, speed: 4 },
+    ocean: { T: 1, speed: 5, salinity: 7 },
+    deepOcean: { T: 8, speed: 13, salinity: 14 },
+  },
+};
 
 /* Merge a (partial) preset into the live planet: set v and/or bounds for the
    listed keys only. Unknown keys are ignored. (PARAMS, BUILTIN_PRESETS,
@@ -47,7 +66,7 @@ var ui = {
   err: null,
   // element refs
   runBtn: null,
-  modeBtns: [],
+  layerRadios: {},
   levelBtns: [],
   knobVals: {},
   knobInputs: {},
@@ -96,8 +115,11 @@ function refreshDynamic() {
   if (ui.projBtn) {
     ui.projBtn.textContent = (P.equirect > 0.5 ? '🗺 map' : '🌐 globe');
   }
-  ui.modeBtns.forEach(function (b, i) {
-    b.className = 'mbtn' + (P.mode === i ? ' on' : '');
+  Object.keys(ui.layerRadios).forEach(function (m) {
+    var inp = ui.layerRadios[m];
+    var on = (P.mode === +m);
+    inp.checked = on;
+    inp.parentNode.classList.toggle('sel', on);
   });
   ui.levelBtns.forEach(function (b, i) {
     var l = 4 + i;
@@ -178,14 +200,46 @@ function buildUI() {
 
   // layer view
   panel.appendChild(el('div', 'lab', 'Layer view'));
-  var grid2 = el('div', 'grid2');
-  MODES.forEach(function (m, i) {
-    var b = el('button', 'mbtn', m);
-    b.onclick = function () { setParam('mode', i); };
-    ui.modeBtns.push(b);
-    grid2.appendChild(b);
+  var wrap = el('div', 'ltable-wrap');
+  var table = el('table', 'ltable');
+  var thead = document.createElement('thead');
+  var hrow = document.createElement('tr');
+  hrow.appendChild(el('th', 'lname', ''));
+  LAYER_VIEW.views.forEach(function (v) {
+    var th = el('th', null, v.label);
+    th.title = v.title;
+    hrow.appendChild(th);
   });
-  panel.appendChild(grid2);
+  thead.appendChild(hrow);
+  table.appendChild(thead);
+  var tbody = document.createElement('tbody');
+  LAYER_VIEW.layers.forEach(function (layer) {
+    var tr = document.createElement('tr');
+    tr.appendChild(el('th', 'lname', layer.label));
+    var row = LAYER_VIEW.map[layer.id] || {};
+    LAYER_VIEW.views.forEach(function (v) {
+      var mode = row[v.id];
+      if (mode === undefined) {
+        tr.appendChild(el('td', 'na', ''));
+        return;
+      }
+      var td = el('td');
+      var inp = document.createElement('input');
+      inp.type = 'radio';
+      inp.name = 'lview';
+      inp.value = String(mode);
+      inp.title = layer.label + ' — ' + v.title;
+      inp.setAttribute('aria-label', layer.label + ' ' + v.title);
+      inp.onchange = function () { setParam('mode', +this.value); };
+      td.appendChild(inp);
+      tr.appendChild(td);
+      ui.layerRadios[mode] = inp;
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  panel.appendChild(wrap);
   var bar = el('div', 'bar');
   panel.appendChild(bar);
   var barlab = el('div', 'barlab');

@@ -5,6 +5,33 @@ precision highp int;
 precision highp sampler2D;
 `;
 
+/* Shared render-mode GLSL, used verbatim by EQUI_FS and GLOBE_FS so the two
+   projections can never disagree. Expects wt/la/lb/ha/hb/wd in scope and a
+   `float v` declared by the caller. uMode 9 (and anything unknown) falls
+   through to high-air temperature. */
+var MODE_VALUE_CHAIN = `  if(uMode==0) v = (la.z-238.0)/72.0;
+  else if(uMode==1) v = (wt.x-260.0)/50.0;
+  else if(uMode==2) v = (la.w-101325.0)/2600.0*0.5+0.5;
+  else if(uMode==3) v = lb.x/0.022;
+  else if(uMode==4) v = length(la.xy)/34.0;
+  else if(uMode==5) v = length(wt.yz)/1.1;
+  else if(uMode==6) v = hb.y/1.6;
+  else if(uMode==7) v = (wt.w-33.0)/4.0;
+  else if(uMode==8) v = (wd.x-272.0)/16.0;
+  else if(uMode==10) v = (ha.w-45000.0)/4000.0*0.5+0.5;
+  else if(uMode==11) v = hb.x/0.022;
+  else if(uMode==12) v = length(ha.xy)/34.0;
+  else if(uMode==13) v = length(wd.yz)/0.25;
+  else if(uMode==14) v = (wd.w-33.0)/4.0;
+  else v = (ha.z-215.0)/45.0;`;
+
+/* Magnitude-style (dark background) fields: humidity/speed/rain variants.
+   Palette-style fields (pressure, salinity, temperature) are excluded.
+   Expects `base` and `vVal` in scope. */
+var MODE_MAGNITUDE_STYLE = `  if(uMode==3||uMode==4||uMode==5||uMode==6||uMode==11||uMode==12||uMode==13){
+    base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));
+  }`;
+
 var SHADER_COMMON = `
 uniform ivec2 uDim;          // W, H of the cell texture
 uniform int   uCount;        // number of real cells (V)
@@ -73,23 +100,12 @@ void main(){
   vec4 wd = texelFetch(uDeep, cTex(cell),0);
 
   float v = 0.0;
-  if(uMode==0) v = (la.z-238.0)/72.0;
-  else if(uMode==1) v = (wt.x-260.0)/50.0;
-  else if(uMode==2) v = (la.w-101325.0)/2600.0*0.5+0.5;
-  else if(uMode==3) v = lb.x/0.022;
-  else if(uMode==4) v = length(la.xy)/34.0;
-  else if(uMode==5) v = length(wt.yz)/1.1;
-  else if(uMode==6) v = hb.y/1.6;
-  else if(uMode==7) v = (wt.w-33.0)/4.0;
-  else if(uMode==8) v = (wd.x-272.0)/16.0;
-  else v = (ha.z-215.0)/45.0;
+${MODE_VALUE_CHAIN}
   float vVal = clamp(v, 0.0, 1.0);
   float vLand = cb.w;
 
   vec3 base = pal(vVal);
-  if(uMode==4||uMode==5||uMode==6||uMode==3){
-    base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));
-  }
+${MODE_MAGNITUDE_STYLE}
   base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
 
   // day/night uses the real cell normal (blocky, crisp) — not a smooth reconstruction
@@ -553,16 +569,7 @@ void main(){
   vec4 hb = texelFetch(uHiB, cTex(cell),0);
   vec4 wd = texelFetch(uDeep, cTex(cell),0);
   float v = 0.0;
-  if(uMode==0) v = (la.z-238.0)/72.0;
-  else if(uMode==1) v = (wt.x-260.0)/50.0;
-  else if(uMode==2) v = (la.w-101325.0)/2600.0*0.5+0.5;
-  else if(uMode==3) v = lb.x/0.022;
-  else if(uMode==4) v = length(la.xy)/34.0;
-  else if(uMode==5) v = length(wt.yz)/1.1;
-  else if(uMode==6) v = hb.y/1.6;
-  else if(uMode==7) v = (wt.w-33.0)/4.0;
-  else if(uMode==8) v = (wd.x-272.0)/16.0;
-  else v = (ha.z-215.0)/45.0;
+${MODE_VALUE_CHAIN}
   vVal = clamp(v, 0.0, 1.0);
   vLand = cb.w;
   vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
@@ -588,9 +595,7 @@ vec3 pal(float t){
 }
 void main(){
   vec3 base = pal(vVal);
-  if(uMode==4||uMode==5||uMode==6||uMode==3){
-    base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));
-  }
+${MODE_MAGNITUDE_STYLE}
   base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
   vec3 N = normalize(vN);
   float d = max(0.0, dot(N, uSun));
