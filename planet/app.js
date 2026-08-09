@@ -4,48 +4,9 @@ var MODES = [
   'Wind speed', 'Ocean current', 'Rain', 'Salinity', 'Deep ocean temp', 'Air temp (high)',
 ];
 
-/* Built-in presets: keyed maps of partial overrides ({ v?, min?, max?, step? }).
-   Applying one only touches the listed keys; all other params stay intact. */
-var BUILTIN_PRESETS = {
-  'Default': null, // sentinel: means "restore defaults"
-  'Earth-like': {
-    dt: { v: 300 }, solar: { v: 1361 }, greenhouse: { v: 0.55 },
-    omega: { v: 7.292e-5 }, evap: { v: 0.005 }, cloudK: { v: 1.7 }, noise: { v: 0.02 },
-  },
-  'Slow rotation': {
-    omega: { v: 1.8e-5, min: 0, max: 3.6e-4, step: 1e-6 },
-    lapse: { v: 55 }, conv: { v: 9e-6 },
-  },
-  'Hothouse': {
-    solar: { v: 1700 }, greenhouse: { v: 0.85 }, evap: { v: 0.012, min: 0, max: 0.03, step: 0.0005 },
-    kRad: { v: 1.2 }, cloudK: { v: 2.6 },
-  },
-};
-
-/* Normalize a preset source into a keyed map { key: { v?, min?, max?, step? } }.
-   Accepts either an object keyed by param key, or an array of entries each
-   carrying a `key` field. */
-function normalizePreset(src) {
-  if (!src) return {};
-  if (Array.isArray(src)) {
-    var m = {};
-    src.forEach(function (e) {
-      if (e && e.key) {
-        var o = {};
-        if (e.v !== undefined) o.v = e.v;
-        if (e.min !== undefined) o.min = e.min;
-        if (e.max !== undefined) o.max = e.max;
-        if (e.step !== undefined) o.step = e.step;
-        m[e.key] = o;
-      }
-    });
-    return m;
-  }
-  return src;
-}
-
 /* Merge a (partial) preset into the live planet: set v and/or bounds for the
-   listed keys only. Unknown keys are ignored. */
+   listed keys only. Unknown keys are ignored. (PARAMS, BUILTIN_PRESETS,
+   normalizePreset, boundsOf, setBound, clamp are defined in params.js.) */
 function applyPreset(src) {
   var p = ui.planet;
   if (!p) return;

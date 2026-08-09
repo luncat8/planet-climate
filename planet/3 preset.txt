@@ -9,3 +9,12 @@ i want preset system to merge with json e.g. json contain only
  { key: 'evap', v=0.05, min: 0, max: 0.1, step: 0.0005 } and after select preset it keep other intact
 
 firstly think is current value v good to store in same place as other Params
+
+
+is good to move
+var PARAMS 
+var BUILTIN_PRESETS
+to params.js
+
+and may be preset helper functions
+?
