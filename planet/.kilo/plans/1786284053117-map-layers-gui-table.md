@@ -3,7 +3,8 @@
 ## Goal
 Replace the flat 10-button "Layer view" grid with a clean table:
 - **Rows = physical layers**, ordered by height, row 0 = High air (top) → Deep ocean (bottom).
-- **Columns = view maps**: `T`, `P`, `Humidity`, `Speed`, `Salinity`, `Rain`.
+- **Columns = view maps**: `T`, `P`, `Speed`, `Humidity`, `Salinity`, `Rain` (ordered so the
+  three emphasized views T/P/Speed are contiguous, matching the request).
 - **One global radio group** across the whole table (shared `name`) → exactly one cell is
   selectable at a time. Selecting a cell sets the single render mode (`params.mode` → shader
   `uMode`). The engine renders only one `uMode` (one layer+field) at a time, so "only one
@@ -48,8 +49,8 @@ var LAYER_VIEW = {
   views: [
     { id:'T',        label:'T',   title:'Temperature' },
     { id:'P',        label:'P',   title:'Pressure' },
-    { id:'humidity', label:'Hum', title:'Humidity' },
     { id:'speed',    label:'Spd', title:'Speed' },
+    { id:'humidity', label:'Hum', title:'Humidity' },
     { id:'salinity', label:'Sal', title:'Salinity' },
     { id:'rain',     label:'Rain',title:'Rain' },
   ],
@@ -71,10 +72,10 @@ The high-air and deep-ocean fields are simulated but have no `uMode` branch. Add
 `EQUI_FS` (shader.js:76-85) and `GLOBE_FS` (shader.js:556-564), extending the `uMode` chain:
 
 ```glsl
-  else if(uMode==10) v = (ha.w-45000.0)/16000.0*0.5+0.5;  // High-air pressure   (ha.w)
+  else if(uMode==10) v = (ha.w-45000.0)/4000.0*0.5+0.5;   // High-air pressure   (ha.w)
   else if(uMode==11) v = hb.x/0.022;                      // High-air humidity   (hb.x)
   else if(uMode==12) v = length(ha.xy)/34.0;              // High-air speed      (ha.xy)
-  else if(uMode==13) v = length(wd.yz)/1.1;               // Deep-ocean speed    (wd.yz)
+  else if(uMode==13) v = length(wd.yz)/0.25;              // Deep-ocean speed    (wd.yz)
   else if(uMode==14) v = (wd.w-33.0)/4.0;                 // Deep-ocean salinity (wd.w)
 ```
 
@@ -88,8 +89,10 @@ Widen the magnitude-style (dark-bg) branch in **both** shaders (currently
 - Add **11,12,13** (high humidity ∥ 3, high speed ∥ 4, deep speed ∥ 5).
 - Do **not** add 10 (high P) or 14 (deep salinity): they use palette coloring, like their
   low-air/surface counterparts (modes 2 and 7).
-- Scales reuse the analogous low/surface-mode divisors. Deep-ocean speed (13) may need a
-  smaller divisor (deep currents are far slower than surface) — tune if it renders near-black.
+- Scales reuse the analogous low/surface-mode divisors, but tightened where the field's natural
+  range is far smaller: high-air P uses /4000 (its pressure varies only ~±1.5 kPa vs low-air
+  ~±10 kPa) and deep-ocean speed uses /0.25 (deep currents are ~10-100× slower than surface).
+  These are first approximations — tune if a field renders near-uniform or near-black.
 
 ## Implementation steps
 1. **Shaders** — apply the Shader additions above (both render FS).
@@ -116,11 +119,13 @@ Widen the magnitude-style (dark-bg) branch in **both** shaders (currently
       inp.parentNode.classList.toggle('sel', on); // reconcile highlight for preset/JSON loads
     });
     ```
-    The radio `change` handler (in buildUI) must also toggle `sel` off the previously selected
-    `<td>` and on the new one.
-    6. **`index.html` CSS** — add `.ltable` styles. Layout is the main risk: 6 view columns + 1
+     Because this loop reconciles BOTH `.checked` and `.sel` for every radio, the buildUI
+     `change` handler only needs to call `setParam('mode', +this.value)` (which invokes
+     `refreshDynamic`) — no separate manual toggle is required. This also keeps the highlight
+     correct after preset/JSON loads that change `mode`.
+  6. **`index.html` CSS** — add `.ltable` styles. Layout is the main risk: 6 view columns + 1
     label column in a 300px panel. Mitigations:
-    - Short column headers (`T`, `P`, `Hum`, `Spd`, `Sal`, `Rain`) with `title` full names (from
+    - Short column headers (`T`, `P`, `Spd`, `Hum`, `Sal`, `Rain`) with `title` full names (from
       `LAYER_VIEW.views[].title`); layer labels kept short ("High air", "Low air", …).
     - Wrap the table in `<div class="ltable-wrap">` with `overflow-x:auto` as a safety net if it
       still overflows at `font-size:10px`.
@@ -156,4 +161,8 @@ Widen the magnitude-style (dark-bg) branch in **both** shaders (currently
   deep-ocean speed (13) may need tuning to avoid rendering near-black.
 - If a future field is added, just extend `LAYER_VIEW.map` + `views`/`layers` and (if new) add a
   `uMode` branch in the two render shaders.
+- Rain is stored only in the high-atmosphere state (`hb.y`); it is placed in the **High air**
+  row. A "surface rain" cell would require a separate (currently un-simulated) field — out of scope.
+- Particle streamlines follow low-air (or ocean when `particleOcean` is on) regardless of the
+  selected layer/view; coupling the streamlines to the selected layer is NOT part of this refactor.
 - `MODES` is referenced only in `buildUI`; safe to delete once replaced.
