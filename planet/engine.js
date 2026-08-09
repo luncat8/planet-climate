@@ -185,10 +185,22 @@ Planet.prototype.compile = function () {
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
   this.prog.part = new Prog(gl, QUAD_VS, PART_FS, 'part');
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
-  this.prog.globe = new Prog(gl, GLOBE_VS, GLOBE_FS, 'globe');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
-  this.prog.equi = new Prog(gl, EQUI_VS, EQUI_FS, 'equi');
   this.prog.equiCloud = new Prog(gl, EQUI_VS, EQUI_CLOUD_FS, 'equiCloud');
+  // Render programs are compiled lazily per mode (see getGlobeProg/getEquiProg)
+  // so the selected mode is baked into the GLSL source with no runtime branch.
+  this.prog.globeByMode = {};
+  this.prog.equiByMode = {};
+};
+Planet.prototype.getGlobeProg = function (m) {
+  var c = this.prog.globeByMode;
+  if (!c[m]) c[m] = new Prog(this.gl, GLOBE_VS(m), GLOBE_FS(m), 'globe' + m);
+  return c[m];
+};
+Planet.prototype.getEquiProg = function (m) {
+  var c = this.prog.equiByMode;
+  if (!c[m]) c[m] = new Prog(this.gl, EQUI_VS, EQUI_FS(m), 'equi' + m);
+  return c[m];
 };
 
 Planet.prototype.build = function (level) {
@@ -391,11 +403,11 @@ Planet.prototype.render = function () {
   var view = m4.look(eye, [0, 0, 0], [0, 1, 0]);
   var mvp = m4.mul(proj, view);
 
-  var g = this.prog.globe.use();
+  var g = this.getGlobeProg(P.mode).use();
   this.gridUniforms(g);
   g.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uLoA', this.A[2])
     .tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
-    .m4('uMVP', mvp).i('uMode', P.mode)
+    .m4('uMVP', mvp)
     .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
     .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief);
   gl.bindVertexArray(this.vaoGlobe);
@@ -445,11 +457,11 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
   gl.disable(gl.BLEND);
   gl.disable(gl.CULL_FACE);
 
-  var eq = this.prog.equi.use();
+  var eq = this.getEquiProg(P.mode).use();
   this.gridUniforms(eq);
   eq.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uLoA', this.A[2])
     .tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
-    .tex('uLookup', this.texLookup).i('uMode', P.mode)
+    .tex('uLookup', this.texLookup)
     .v3('uSun', sun[0], sun[1], sun[2])
     .f('uShowLand', P.showLand).f('uNight', P.nightShading);
   gl.bindVertexArray(this.vaoEmpty);

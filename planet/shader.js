@@ -5,32 +5,34 @@ precision highp int;
 precision highp sampler2D;
 `;
 
-/* Shared render-mode GLSL, used verbatim by EQUI_FS and GLOBE_FS so the two
-   projections can never disagree. Expects wt/la/lb/ha/hb/wd in scope and a
-   `float v` declared by the caller. uMode 9 (and anything unknown) falls
-   through to high-air temperature. */
-var MODE_VALUE_CHAIN = `  if(uMode==0) v = (la.z-238.0)/72.0;
-  else if(uMode==1) v = (wt.x-260.0)/50.0;
-  else if(uMode==2) v = (la.w-101325.0)/2600.0*0.5+0.5;
-  else if(uMode==3) v = lb.x/0.022;
-  else if(uMode==4) v = length(la.xy)/34.0;
-  else if(uMode==5) v = length(wt.yz)/1.1;
-  else if(uMode==6) v = hb.y/1.6;
-  else if(uMode==7) v = (wt.w-33.0)/4.0;
-  else if(uMode==8) v = (wd.x-272.0)/16.0;
-  else if(uMode==10) v = (ha.w-45000.0)/4000.0*0.5+0.5;
-  else if(uMode==11) v = hb.x/0.022;
-  else if(uMode==12) v = length(ha.xy)/34.0;
-  else if(uMode==13) v = length(wd.yz)/0.25;
-  else if(uMode==14) v = (wd.w-33.0)/4.0;
-  else v = (ha.z-215.0)/45.0;`;
-
-/* Magnitude-style (dark background) fields: humidity/speed/rain variants.
-   Palette-style fields (pressure, salinity, temperature) are excluded.
-   Expects `base` and `vVal` in scope. */
-var MODE_MAGNITUDE_STYLE = `  if(uMode==3||uMode==4||uMode==5||uMode==6||uMode==11||uMode==12||uMode==13){
-    base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));
-  }`;
+// index = uMode; value = GLSL expression for `float v`, referencing the per-cell
+// textures wt/la/lb/ha/hb/wd already in scope. Drives PER-MODE source compilation,
+// so there is no runtime branch on mode.
+var MODE_FIELDS = [
+  '(la.z-238.0)/72.0',                       // 0  low-air T
+  '(wt.x-260.0)/50.0',                       // 1  ocean-surface T
+  '(la.w-101325.0)/2600.0*0.5+0.5',          // 2  low-air P
+  'lb.x/0.022',                              // 3  humidity
+  'length(la.xy)/34.0',                      // 4  wind speed
+  'length(wt.yz)/1.1',                        // 5  ocean current
+  'hb.y/1.6',                                // 6  rain
+  '(wt.w-33.0)/4.0',                         // 7  salinity
+  '(wd.x-272.0)/16.0',                       // 8  deep-ocean T
+  '(ha.z-215.0)/45.0',                       // 9  high-air T
+  '(ha.w-45000.0)/4000.0*0.5+0.5',           // 10 high-air P
+  'hb.x/0.022',                              // 11 high-air humidity
+  'length(ha.xy)/34.0',                      // 12 high-air speed
+  'length(wd.yz)/0.25',                      // 13 deep-ocean speed
+  '(wd.w-33.0)/4.0',                         // 14 deep-ocean salinity
+];
+// modes that use magnitude (dark-background) coloring; palette-color fields excluded
+var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1 };
+function modeValueSrc(m) {
+  return 'float v = ' + (MODE_FIELDS[m] != null ? MODE_FIELDS[m] : MODE_FIELDS[9]) + ';';
+}
+function modeMagSrc(m) {
+  return MODE_MAG[m] ? 'base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));' : '';
+}
 
 var SHADER_COMMON = `
 uniform ivec2 uDim;          // W, H of the cell texture
@@ -68,9 +70,9 @@ void main(){
   gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
 }`;
 
-var EQUI_FS = SHADER_HEAD + SHADER_COMMON + `
+function EQUI_FS(m) {
+return SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB, uLookup;
-uniform int   uMode;
 uniform vec3  uSun;
 uniform float uShowLand, uNight;
 in vec2 vUv;
@@ -99,13 +101,12 @@ void main(){
   vec4 cb = texelFetch(uCellB,cTex(cell),0);
   vec4 wd = texelFetch(uDeep, cTex(cell),0);
 
-  float v = 0.0;
-${MODE_VALUE_CHAIN}
+${modeValueSrc(m)}
   float vVal = clamp(v, 0.0, 1.0);
   float vLand = cb.w;
 
   vec3 base = pal(vVal);
-${MODE_MAGNITUDE_STYLE}
+${modeMagSrc(m)}
   base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
 
   // day/night uses the real cell normal (blocky, crisp) — not a smooth reconstruction
@@ -116,6 +117,7 @@ ${MODE_MAGNITUDE_STYLE}
   vec3 col = base * lit;
   o = vec4(col, 1.0);
 }`;
+}
 
 var EQUI_CLOUD_FS = SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uLookup, uCellA, uLoB, uHiB;
@@ -551,10 +553,10 @@ void main(){
   o = vec4(c, m*vA*0.75);
 }`;
 
-var GLOBE_VS = SHADER_HEAD + SHADER_COMMON + `
+function GLOBE_VS(m) {
+return SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB;
 uniform mat4 uMVP;
-uniform int uMode;
 uniform float uRelief;
 out vec3 vN; out float vVal; out float vLand; out float vCloud; out vec3 vPos;
 void main(){
@@ -568,8 +570,7 @@ void main(){
   vec4 ha = texelFetch(uHiA, cTex(cell),0);
   vec4 hb = texelFetch(uHiB, cTex(cell),0);
   vec4 wd = texelFetch(uDeep, cTex(cell),0);
-  float v = 0.0;
-${MODE_VALUE_CHAIN}
+${modeValueSrc(m)}
   vVal = clamp(v, 0.0, 1.0);
   vLand = cb.w;
   vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
@@ -577,11 +578,13 @@ ${MODE_VALUE_CHAIN}
   vPos = n*(1.0 + uRelief*cb.w);
   gl_Position = uMVP*vec4(vPos, 1.0);
 }`;
+}
 
-var GLOBE_FS = SHADER_HEAD + `
+function GLOBE_FS(m) {
+return SHADER_HEAD + `
 in vec3 vN; in float vVal; in float vLand; in float vCloud; in vec3 vPos;
 uniform vec3 uSun; uniform vec3 uEye;
-uniform int uMode; uniform float uShowLand, uNight;
+uniform float uShowLand, uNight;
 out vec4 o;
 vec3 pal(float t){
   t = clamp(t,0.0,1.0);
@@ -595,7 +598,7 @@ vec3 pal(float t){
 }
 void main(){
   vec3 base = pal(vVal);
-${MODE_MAGNITUDE_STYLE}
+${modeMagSrc(m)}
   base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
   vec3 N = normalize(vN);
   float d = max(0.0, dot(N, uSun));
@@ -605,6 +608,7 @@ ${MODE_MAGNITUDE_STYLE}
   vec3 col = base*lit + vec3(0.20,0.42,0.85)*rim*0.55;
   o = vec4(col, 1.0);
 }`;
+}
 
 var CLOUD_VS = SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uLoB, uHiB;
