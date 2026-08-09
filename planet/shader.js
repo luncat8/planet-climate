@@ -37,7 +37,7 @@ var EQUI_VS = SHADER_HEAD + `
 out vec2 vUv;
 void main(){
   vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2));
-  vUv = p * 0.5;
+  vUv = p;   // on-screen this spans [0,1]x[0,1] (full lon/lat), matching MAP_VS
   gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
 }`;
 
@@ -60,8 +60,6 @@ vec3 pal(float t){
 }
 void main(){
   vec2 uv = vUv;
-  float lon = (uv.x - 0.5) * 6.2831853;
-  float lat = (uv.y - 0.5) * 3.14159265;
   int cell = int(texture(uLookup, uv).r + 0.5);
   if(cell < 0 || cell >= uCount){ o = vec4(0.02,0.03,0.07,1.0); return; }
 
@@ -70,6 +68,7 @@ void main(){
   vec4 lb = texelFetch(uLoB,  cTex(cell),0);
   vec4 ha = texelFetch(uHiA,  cTex(cell),0);
   vec4 hb = texelFetch(uHiB,  cTex(cell),0);
+  vec4 ca = texelFetch(uCellA,cTex(cell),0);
   vec4 cb = texelFetch(uCellB,cTex(cell),0);
   vec4 wd = texelFetch(uDeep, cTex(cell),0);
 
@@ -86,7 +85,6 @@ void main(){
   else v = (ha.z-215.0)/45.0;
   float vVal = clamp(v, 0.0, 1.0);
   float vLand = cb.w;
-  float vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
 
   vec3 base = pal(vVal);
   if(uMode==4||uMode==5||uMode==6||uMode==3){
@@ -94,13 +92,33 @@ void main(){
   }
   base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
 
-  vec3 n = vec3(cos(lat)*cos(lon), sin(lat), cos(lat)*sin(lon));
-  float d = max(0.0, dot(normalize(n), uSun));
+  // day/night uses the real cell normal (blocky, crisp) — not a smooth reconstruction
+  vec3 n = normalize(ca.xyz);
+  float d = max(0.0, dot(n, uSun));
   float lit = mix(1.0, 0.16 + 0.9*d, uNight);
 
-  vec3 col = base*lit;
-  col = mix(col, vec3(1.0)*lit, clamp(vCloud*0.9, 0.0, 1.0)*0.8);
+  vec3 col = base * lit;
   o = vec4(col, 1.0);
+}`;
+
+var EQUI_CLOUD_FS = SHADER_HEAD + SHADER_COMMON + `
+uniform sampler2D uLookup, uCellA, uLoB, uHiB;
+uniform vec3 uSun;
+uniform float uNight;
+in vec2 vUv;
+out vec4 o;
+void main(){
+  int cell = int(texture(uLookup, vUv).r + 0.5);
+  if(cell < 0 || cell >= uCount){ discard; }
+  vec3 n = normalize(texelFetch(uCellA, cTex(cell), 0).xyz);
+  float cloud = clamp(texelFetch(uLoB, cTex(cell), 0).y, 0.0, 1.0);
+  float rain  = clamp(texelFetch(uHiB, cTex(cell), 0).y, 0.0, 2.0);
+  float a = clamp(cloud*0.9 + rain*0.35, 0.0, 1.0);
+  if(a < 0.02) discard;
+  float d = max(0.0, dot(n, uSun));
+  float lit = mix(1.0, 0.22 + 0.85*d, uNight);
+  vec3 c = mix(vec3(1.0), vec3(0.45,0.5,0.62), clamp(rain*0.5, 0.0, 0.75));
+  o = vec4(c*lit, a*0.85);
 }`;
 
 var OCEAN_FS = SHADER_HEAD + SHADER_COMMON + `

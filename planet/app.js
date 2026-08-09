@@ -63,7 +63,9 @@ function rebuild(l) {
   if (!p) return;
   var keep = {};
   Object.keys(p.params).forEach(function (key) { keep[key] = p.params[key]; });
+  var t = p.simTime; // keep the daylight/orbit phase continuous across resolution changes
   p.build(l);
+  p.simTime = t;
   Object.keys(keep).forEach(function (key) { p.params[key] = keep[key]; });
   refreshDynamic();
 }

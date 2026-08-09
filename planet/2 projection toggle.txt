@@ -7,6 +7,14 @@ pointer down and on mouse on it. i dont remember action name. it is similar to l
 same features as on sphere we just toggle view representation
 
 
+both implementations has bug with subdiv levels change - it somehow make scale incorrect, especially daylight shade. also your version always wrong/blurry   shade
+
+see
+/media/sf_1/planet_c5o_webgl_h/q36f.webp
+/media/sf_1/planet_c5o_webgl_h/your.webp
+your version still has strange shadow rendering that become completely wrong after subdiv levels change 
+
+
 
 
 Implementation complete. All JS passes `node --check`. Here's what changed:

@@ -222,6 +222,7 @@ Planet.prototype.compile = function () {
   this.prog.globe = new Prog(gl, GLOBE_VS, GLOBE_FS, 'globe');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
   this.prog.equi = new Prog(gl, EQUI_VS, EQUI_FS, 'equi');
+  this.prog.equiCloud = new Prog(gl, EQUI_VS, EQUI_CLOUD_FS, 'equiCloud');
 };
 
 Planet.prototype.build = function (level) {
@@ -483,6 +484,21 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     .f('uShowLand', P.showLand).f('uNight', P.nightShading);
   gl.bindVertexArray(this.vaoEmpty);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  if (P.showClouds) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    var cl = this.prog.equiCloud.use();
+    this.gridUniforms(cl);
+    cl.tex('uLookup', this.texLookup).tex('uCellA', this.texCellA)
+      .tex('uLoB', this.A[3]).tex('uHiB', this.A[5])
+      .v3('uSun', sun[0], sun[1], sun[2]).f('uNight', P.nightShading);
+    gl.bindVertexArray(this.vaoEmpty);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+  }
 
   if (P.showParticles) {
     gl.enable(gl.BLEND);

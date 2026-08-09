@@ -1,0 +1,240 @@
+
+I can see two distinct problems in how subdivision level changes and shading interact:
+
+1) Changing subdivision level breaks visual scale / lighting (especially day/night).
+2) Shading is consistently “wrong/blurry” even without changing levels.
+
+Below are the concrete issues and fixes you should apply to your codebase.
+
+---
+
+## 1. Subdivision-level change resets simulation state → wrong shading/scale
+
+### What’s happening now
+
+In app.js:
+
+```js
+function rebuild(l) {
+  ui.level = l;
+  var p = ui.planet;
+  if (!p) return;
+  var keep = {};
+  Object.keys(p.params).forEach(function (key) { keep[key] = p.params[key]; });
+  p.build(l);
+  Object.keys(keep).forEach(function (key) { p.params[key] = keep[key]; });
+  refreshDynamic();
+}
+```
+
+And in engine.js:
+
+```js
+Planet.prototype.build = function (level) {
+  var gl = this.gl;
+  this.destroyGrid();
+  var g = new Grid(level).build();
+  // ... rebuild textures, FBOs, VAO/IBO ...
+  this.reset();   // <-- THIS IS THE KEY LINE
+};
+
+Planet.prototype.reset = function () {
+  var W = this.grid.W, H = this.grid.H;
+  this.simTime = 0;          // <-- resets time → sun position resets
+  // re-init fields with random seed
+};
+```
+
+So when you change subdivision level:
+
+- The grid is rebuilt.
+- `this.reset()` is called.
+- `simTime` goes back to 0.
+- Sun direction (`sunDir()`) jumps back to t=0.
+- All climate state (temps, winds, clouds) is re-initialized with a new random seed.
+
+That’s why:
+
+- Day/night shading suddenly looks “wrong” or at a different time of day.
+- The visual scale / patterns look completely different after level change.
+
+### Fix: preserve simTime and avoid full reset on rebuild
+
+You want to keep the simulation clock when changing resolution, even if you can’t perfectly transfer fields between grids. At minimum:
+
+1) Don’t zero `simTime` in `build()`.
+2) Optionally re-init only if necessary (or accept that fields are randomized but time is consistent).
+
+Change engine.js:
+
+```js
+Planet.prototype.build = function (level) {
+  var gl = this.gl;
+  var savedSimTime = this.simTime || 0; // preserve simulation time
+
+  this.destroyGrid();
+  var g = new Grid(level).build();
+  this.grid = g;
+  var W = g.W, H = g.H;
+
+  // ... (texture/FBO/VAO rebuild code unchanged) ...
+
+  // Re-init fields but keep simTime consistent:
+  this.simTime = savedSimTime;
+
+  var p = this.prog.init.use();
+  this.gridUniforms(p); p.f('uSeed', Math.random() * 1000);
+  this.fullscreen('init', W, H);
+  var p2 = this.prog.init2.use();
+  this.gridUniforms(p2); p2.f('uSeed', Math.random() * 1000);
+  this.fullscreen('init2', W, H);
+};
+```
+
+And remove the `this.reset()` call from `build()`. Keep `reset()` only for explicit user reset:
+
+```js
+Planet.prototype.reset = function () {
+  var W = this.grid.W, H = this.grid.H;
+  this.simTime = 0;
+  // ... same init code as before ...
+};
+```
+
+Now changing subdivision level will:
+
+- Keep the same day/year and sun position.
+- Only re-randomize fields (which is unavoidable without field remapping), but lighting/time won’t jump.
+
+If you want even better behavior, you could:
+
+- Use a fixed seed for init when rebuilding so patterns are more stable across levels.
+- Or implement a coarse-to-fine / fine-to-coarse remap pass using the lookup texture (more work).
+
+---
+
+## 2. “Always wrong/blurry shade” – root causes and fixes
+
+There are three main culprits in your current shaders:
+
+### A) Equirectangular mode uses bilinear sampling on a cell-index lookup → blurry transitions
+
+In EQUI_FS you do:
+
+```glsl
+int cell = int(texture(uLookup, uv).r + 0.5);
+```
+
+`uLookup` is a float texture storing integer cell IDs. With linear filtering (or even with nearest but at low resolution), this causes:
+
+- Blurry or incorrect cell selection near boundaries.
+- Visible banding / soft shading transitions that don’t match the discrete grid.
+
+Fix options:
+
+1) Force NEAREST on uLookup in engine.js when creating it:
+
+```js
+this.texLookup = this.mkTex(g.lookupW, g.lookupH, g.lookup, 1);
+// mkTex already uses NEAREST by default if linear=false; ensure that:
+// In Planet.prototype.mkTex:
+var f = linear ? gl.LINEAR : gl.NEAREST;
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+```
+
+Make sure you call it with `linear=false` (which you do: `this.mkTex(..., 1)`). Double-check that no later code changes filtering.
+
+2) In EQUI_FS, explicitly use texelFetch-style logic if possible, or at least clamp and round more robustly:
+
+```glsl
+float cellF = texture(uLookup, uv).r;
+int cell = int(cellF + 0.5);
+if (cell < 0 || cell >= uCount) { o = vec4(0.02,0.03,0.07,1.0); return; }
+```
+
+This is minor but helps avoid off-by-one artifacts.
+
+### B) Day/night shading uses a simple cosine dot product → harsh/wrong terminator and no atmospheric scattering
+
+In both EQUI_FS and GLOBE_FS:
+
+```glsl
+float d = max(0.0, dot(normalize(n), uSun));
+float lit = mix(1.0, 0.16 + 0.9*d, uNight);
+```
+
+Issues:
+
+- No twilight / penumbra; terminator is too sharp or too soft depending on parameters.
+- Night side brightness (0.16 base) can look “wrong” for some modes.
+- For equirectangular view, this shading doesn’t account for perspective or atmosphere at all, so it looks flat/blurry compared to expectations.
+
+Fix: add a simple atmospheric terminator softening and better night factor.
+
+Example replacement in both EQUI_FS and GLOBE_FS:
+
+```glsl
+float d = dot(normalize(n), uSun);
+// Soft terminator with small penumbra
+float dayFactor = smoothstep(-0.15, 0.15, d);
+float lit = mix(0.08 + 0.04 * max(d, -0.2), // subtle night gradient
+                0.9 + 0.1 * clamp(d, 0.0, 1.0),
+                dayFactor);
+lit *= (1.0 - uNight) + uNight; // keep uNight as global dimmer if you like
+```
+
+Or more simply:
+
+```glsl
+float d = dot(normalize(n), uSun);
+float dayFactor = smoothstep(-0.1, 0.2, d);
+float lit = mix(0.12, 1.0, dayFactor);
+if (uNight > 0.5) {
+    float nightDim = mix(1.0, 0.35 + 0.65 * clamp(d, -0.2, 1.0), uNight);
+    lit *= nightDim;
+}
+```
+
+This gives:
+
+- A smoother day/night boundary.
+- Less “blurry” or washed-out shading because transitions are physically motivated instead of linear mix.
+
+### C) Globe mode uses vertex normals from dual-hex centers → faceted / blurry shading at low levels
+
+In GLOBE_VS you compute position and normal per cell:
+
+```glsl
+vec3 n = normalize(ca.xyz);
+vN = n;
+vPos = n*(1.0 + uRelief*cb.w);
+```
+
+At low subdivision levels (L4/L5), each “cell” is large, so normals are coarse and shading looks faceted or smeared. This is expected for a dual-hex grid but can look like a bug.
+
+Options:
+
+1) Increase default level to 6 or 7 if performance allows.
+2) Add per-fragment normal smoothing using neighbors (expensive).
+3) Accept this as inherent to the grid and document it; improve perception via better lighting (see B).
+
+For your complaint (“always wrong/blurry shade”), A + B are the big wins. C is more about geometric resolution than a bug.
+
+---
+
+## 3. Summary of concrete changes you should apply
+
+1) In engine.js:
+   - Remove `this.reset()` from `build()`.
+   - Preserve `simTime` across rebuilds as shown above.
+   - Ensure `uLookup` texture uses NEAREST filtering (already the case if mkTex is called with linear=false; verify).
+
+2) In shader.js:
+   - Improve day/night shading in EQUI_FS and GLOBE_FS using a smoothstep-based terminator instead of raw dot product mix.
+   - Optionally tweak night base brightness to avoid overly bright/dim nights depending on your taste.
+
+3) Optional but recommended:
+   - Use a deterministic seed for init when rebuilding levels, so patterns are more consistent across resolutions.
+   - Consider raising default subdivision level or adding a note that L4/L5 shading is coarse by design.
+
