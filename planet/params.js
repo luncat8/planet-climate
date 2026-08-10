@@ -45,9 +45,12 @@ var PARAMS = {
   steric:         { label: 'Steric height gain',    default: 500, min: 0, max: 5000, step: 50, fmt: function (v) { return v.toExponential(1); } },
   /* Rate (1/s) at which h_top relaxes toward its steric equilibrium. */
   stericRate:     { label: 'Steric relax rate',     default: 1e-6, min: 0, max: 1e-5, step: 1e-7, fmt: function (v) { return v.toExponential(1); } },
-  /* Weak global mass correction (1/s): nudges h_top back toward the reference
-     thickness H_ref so the flux-form continuity integrator cannot drift. */
-  massSpring:     { label: 'Mass spring (global)',  default: 8e-12, min: 0, max: 1e-9, step: 5e-12, fmt: function (v) { return v.toExponential(1); } },
+  /* Extra mass correction (1/s) on top of the steric relaxation: nudges h_top
+     back toward the plain reference thickness H_ref. The steric relaxation
+     (stericRate) is what actually stabilises the interface; this term only
+     removes any residual bias, so it needs a timescale of months-to-years
+     (~1e-8 = 3 yr) to do anything at all on simulated timescales. */
+  massSpring:     { label: 'Mass spring (global)',  default: 1e-8, min: 0, max: 1e-7, step: 1e-9, fmt: function (v) { return v.toExponential(1); } },
   /* Extra uniform surface mass forcing on h_top (m/s), on top of E-P. Useful
      to probe the mass budget; positive thins the top layer. */
   surfMass:       { label: 'Surface mass forcing',  default: 0, min: -1e-6, max: 1e-6, step: 5e-8, fmt: function (v) { return v.toExponential(1); } },

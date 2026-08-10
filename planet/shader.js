@@ -347,6 +347,22 @@ void main(){
   if(any(isnan(trT1))) trT1 = trT0;
   if(any(isnan(trD1))) trD1 = trD0;
 
+  // ---- ENTRAINMENT / DETRAINMENT ------------------------------------------
+  // Moving the interface moves WATER between the layers, and that water must
+  // carry its own T and S with it, otherwise heat/salt are silently created:
+  // thickening the top layer by d without this term changes the total content
+  // by cp*rho*d*(T_top - T_deep). Mixing the entrained volume in (or detraining
+  // top water down) keeps cp*rho*(h_top*T_top + h_deep*T_deep) invariant under
+  // the interface motion, exactly as the vertical-exchange term does.
+  float dEnt = h1 - h0;
+  if(dEnt > 0.0){          // interface deepens: deep water joins the top layer
+    float f = clamp(dEnt/max(h1, 40.0), 0.0, 1.0);
+    trT1 += f*(trD1 - trT1);
+  } else if(dEnt < 0.0){   // interface shoals: top water is detrained downward
+    float f = clamp(-dEnt/max(hd1, 40.0), 0.0, 1.0);
+    trD1 += f*(trT1 - trD1);
+  }
+
   oTopS  = vec4(h1, trT1.x, trT1.y, 0.0);
   oTopV  = vec4(vt1, 0.0, 0.0);
   oDeepS = vec4(trD1.x, trD1.y, 0.0, 0.0);
@@ -518,7 +534,10 @@ void main(){
   float qs_s = qsat(Ts, 101325.0);
   float evap = (1.0 - 0.75*land)*uEvap*(0.6 + 0.08*spd)*max(0.0, qs_s - q);  // kg/m2/s
   float precip = rain*0.001*(1.0-land);                                      // kg/m2/s
-  float EmP = evap - precip;                                                 // net loss
+  // Net freshwater loss from the ocean surface. Masked ONCE, here, so that the
+  // salinity update and the thickness update below see exactly the same flux
+  // (otherwise rho*h*S stops being conserved, and land cells drift in S).
+  float EmP = (evap - precip)*(1.0-land);                                    // net loss
   float Fsens = uKsurf*(Ts - Tl);
   float Fsol_s = S*0.76;
 
@@ -531,9 +550,22 @@ void main(){
   St += uDt*EmP*St/(rhoW*hT);
 
   // ---- SURFACE MASS FLUX: only the interface moves, total volume is fixed --
-  hT -= uDt*(EmP*(1.0-land)/rhoW + uSurfMass);
-  hT = clamp(hT, 40.0, uHtot-40.0);
+  float hT0 = hT;
+  hT = clamp(hT - uDt*(EmP/rhoW + uSurfMass*(1.0-land)), 40.0, uHtot-40.0);
   hD = uHtot - hT;
+  // The interface moved, so water crossed it and must carry its T and S along
+  // (same entrainment/detrainment bookkeeping as in the dynamics pass).
+  float dEnt = hT - hT0;
+  if(dEnt > 0.0){
+    float fEnt = clamp(dEnt/hT, 0.0, 1.0);
+    Ts += fEnt*(Td - Ts);  St += fEnt*(Sd - St);
+  } else if(dEnt < 0.0){
+    float fEnt = clamp(-dEnt/hD, 0.0, 1.0);
+    Td += fEnt*(Ts - Td);  Sd += fEnt*(St - Sd);
+  }
+  // layer heat capacities follow the new thicknesses
+  CwT = cpW*rhoW*hT;
+  CwD = cpW*rhoW*hD;
 
   // Wind stress: Newton's 3rd law, mass-weighted. The ocean top layer (~200 m
   // of water) has far more inertia per m^2 than the low-air column (~5000 m of
@@ -740,11 +772,27 @@ void main(){
   else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
   else                 vel = texelFetch(uDeepV, cTex(cell),0).xy*uVelScale;
   vec3 v3 = vel.x*e1 + vel.y*e2;                              // tangent velocity (m/s)
-  vec3 tail = normalize(pos - v3 * (uTrail / uRadius));       // arc back along flow
+  // Back-step along the flow to draw a streak.  Clamp the angular extent so a
+  // velocity spike (e.g. near coasts) or an oversized trail cannot fling the
+  // tail far across the planet and paint a long stray line (globe mode bug).
+  float s = length(v3) * (uTrail / uRadius);
+  s = min(s, 0.35);                                           // ~20 deg cap
+  vec3 tdir = (length(v3) > 1e-6) ? v3 / length(v3) : vec3(0.0);
+  vec3 tail = normalize(pos - tdir * s);                      // arc back along flow
   vec3 outp = isTail == 1 ? tail : pos;
   vA = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
   if(uEquirect > 0.5){
-    vec2 uv = vec2(atan(outp.z,outp.x)/6.2831853+0.5, asin(clamp(outp.y,-1.0,1.0))/3.14159265+0.5);
+    vec2 uvHead = vec2(lon/6.2831853+0.5, lat/3.14159265+0.5);
+    vec2 uvTail = vec2(atan(tail.z,tail.x)/6.2831853+0.5, asin(clamp(tail.y,-1.0,1.0))/3.14159265+0.5);
+    // A streak that straddles the date line or a pole would be drawn as one
+    // straight segment spanning the whole viewport.  Instead push the far
+    // endpoint to the adjacent map edge so the streak stops at the boundary.
+    bool wrap = abs(uvHead.x - uvTail.x) > 0.5 || abs(uvHead.y - uvTail.y) > 0.5;
+    if (wrap) {
+      if (abs(uvHead.x - uvTail.x) > 0.5) uvTail.x = uvHead.x > 0.5 ? 1.0 : 0.0;
+      if (abs(uvHead.y - uvTail.y) > 0.5) uvTail.y = uvHead.y > 0.5 ? 1.0 : 0.0;
+    }
+    vec2 uv = (isTail == 1 ? uvTail : uvHead);
     gl_Position = vec4(uv*2.0 - 1.0, 0.0, 1.0);
   } else {
     gl_Position = uMVP * vec4(outp*1.012, 1.0);
