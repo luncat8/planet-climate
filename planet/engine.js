@@ -217,15 +217,16 @@ Planet.prototype.build = function (level) {
   this.texLookup = this.mkTex(g.lookupW, g.lookupH, g.lookup, 1);
 
   this.A = []; this.B = [];
-  for (var i = 0; i < 6; i++) {
+  // slot 6 = sea-surface height eta (.r), the prognostic free surface
+  for (var i = 0; i < 7; i++) {
     this.A.push(this.mkTex(W, H, null));
     this.B.push(this.mkTex(W, H, null));
   }
-  this.fbo.dynO = this.mkFbo([this.B[0], this.B[1]]);
+  this.fbo.dynO = this.mkFbo([this.B[0], this.B[1], this.B[6]]);
   this.fbo.dynA = this.mkFbo([this.B[2], this.B[3], this.B[4], this.B[5]]);
-  this.fbo.cplO = this.mkFbo([this.A[0], this.A[1]]);
+  this.fbo.cplO = this.mkFbo([this.A[0], this.A[1], this.A[6]]);
   this.fbo.cplA = this.mkFbo([this.A[2], this.A[3], this.A[4], this.A[5]]);
-  this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);
+  this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3], this.A[6]]);
   this.fbo.init2 = this.mkFbo([this.A[4], this.A[5]]);
 
   var pdata = new Float32Array(this.PW * this.PH * 4);
@@ -309,14 +310,16 @@ Planet.prototype.couple = function () {
     var pr = self.prog[pair[1]].use();
     self.gridUniforms(pr);
     pr.tex('uTop', src[0]).tex('uDeep', src[1]).tex('uLoA', src[2])
-      .tex('uLoB', src[3]).tex('uHiA', src[4]).tex('uHiB', src[5]);
+      .tex('uLoB', src[3]).tex('uHiA', src[4]).tex('uHiB', src[5])
+      .tex('uEta', src[6]);
     pr.f('uDt', P.dt).f('uTime', self.simTime)
       .v3('uSun', sun[0], sun[1], sun[2])
       .f('uSolar', P.solar).f('uDayNight', P.dayNight).f('uSeasonDecl', self.decl())
       .f('uKsurf', P.kSurf).f('uEvap', P.evap).f('uWindStress', P.windStress)
       .f('uConv', P.conv).f('uKrad', P.kRad).f('uLapse', P.lapse)
       .f('uThermo', P.thermo).f('uCloudK', P.cloudK).f('uRainK', P.rainK)
-      .f('uNoise', P.noise).f('uGreenhouse', P.greenhouse);
+      .f('uNoise', P.noise).f('uGreenhouse', P.greenhouse)
+      .f('uMassFix', P.oceanMassFix);
     self.fullscreen(pair[0], W, H);
   });
 };
@@ -344,14 +347,20 @@ Planet.prototype.step = function () {
   var pkTop = 9.81 * 200 * 1027;
   var po = this.prog.ocean.use();
   this.gridUniforms(po);
-  po.tex('uTop', this.A[0]).tex('uDeep', this.A[1])
+  po.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uEta', this.A[6])
     .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
     .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
     .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
     .f('uPkTop', pkTop)
     .f('uPkDeep', pkTop * P.oceanPkRatio)
-    .f('uPkAbyss', pkTop * P.oceanAbyssRatio);
+    .f('uPkAbyss', pkTop * P.oceanAbyssRatio)
+    // barotropic (free-surface) pressure per metre of eta, rho0*g, scaled by a
+    // tunable gain so the fast external gravity waves stay CFL-safe at the
+    // coarse resolutions / long timesteps this model runs at.
+    .f('uGBaro', 1027 * 9.81 * P.oceanSSHGain)
+    .f('uDragI', P.oceanInterDrag)
+    .f('uMassFix', P.oceanMassFix);
   this.fullscreen('dynO', W, H);
 
   var pa = this.prog.air.use();
@@ -429,6 +438,7 @@ Planet.prototype.render = function () {
   this.gridUniforms(g);
   g.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uLoA', this.A[2])
     .tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
+    .tex('uEta', this.A[6])
     .m4('uMVP', mvp)
     .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
     .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief);
@@ -489,7 +499,7 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
   this.gridUniforms(eq);
   eq.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uLoA', this.A[2])
     .tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
-    .tex('uLookup', this.texLookup)
+    .tex('uEta', this.A[6]).tex('uLookup', this.texLookup)
     .v3('uSun', sun[0], sun[1], sun[2])
     .f('uShowLand', P.showLand).f('uNight', P.nightShading);
   gl.bindVertexArray(this.vaoEmpty);

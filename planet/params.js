@@ -38,6 +38,16 @@ var PARAMS = {
   /* Small direct contribution of the deep layer's OWN density field to its
      pressure (abyssal circulation), as a fraction of uPkTop. */
   oceanAbyssRatio: { label: 'Abyssal own-density',  default: 0.12, min: 0, max: 0.5, step: 0.01, fmt: function (v) { return v.toFixed(2); } },
+  /* Gain on the barotropic (free-surface) pressure rho0*g*eta that the
+     prognostic sea-surface height exerts on BOTH layers. Physically this is 1,
+     but full-strength external gravity waves (c = sqrt(gH) ~ 100 m/s) would
+     violate CFL at this grid spacing and timestep, so the default slows them
+     down to a stable, still clearly visible adjustment. */
+  oceanSSHGain:    { label: 'Sea-surface gravity',  default: 0.15, min: 0, max: 1, step: 0.01, fmt: function (v) { return v.toFixed(2) + '× g'; } },
+  /* Mechanical interfacial drag coefficient [m/s]: an equal-and-opposite stress
+     rho0*Cd*(v_top - v_deep)*(1+|dv|/2) between the layers. Pure friction --
+     independent of stratification, unlike the thermohaline mixing above. */
+  oceanInterDrag:  { label: 'Inter-layer drag',     default: 2e-4, min: 0, max: 2e-3, step: 1e-5, fmt: function (v) { return v.toExponential(1); } },
   nuVelOcean:{ label: 'Ocean viscosity',      default: 6e3,   min: 0,   max: 4e4,  step: 1e3,  fmt: function (v) { return v.toExponential(1); } },
   cloudK:    { label: 'Cloud sensitivity',    default: 1.7,   min: 0,   max: 4,    step: 0.05 },
   noise:     { label: 'Symmetry-break noise', default: 0.02,  min: 0,   max: 0.2,  step: 0.005 },
@@ -47,6 +57,10 @@ var PARAMS = {
   fricAirHigh:    { default: 2.5e-6 },
   fricOceanTop:   { default: 1.5e-6 },
   fricOceanDeep:  { default: 6e-7 },
+  /* Very weak relaxation of eta back to zero [1/s] (~1 year e-folding). Purely
+     a numerical safety net against slow global volume drift from the clamps and
+     the coastal masks; far too slow to interfere with real dynamics. */
+  oceanMassFix:   { default: 3e-8 },
   rainK:          { default: 2200 },
   dayNight:       { default: 1 },
   mode:           { default: 0 },
