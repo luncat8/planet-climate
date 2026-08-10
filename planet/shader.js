@@ -146,22 +146,38 @@ layout(location=1) out vec4 oDeep;
 uniform sampler2D uTop;
 uniform sampler2D uDeep;
 uniform float uDt, uOmega, uNuVel, uNuT, uFricTop, uFricDeep, uAlphaT, uBetaS;
-uniform float uPkTop, uPkDeep;
+uniform float uPkTop, uPkDeep, uCouple, uKif, uHtop;
 
 float oceanP(vec4 s, float pk){
   return pk*(uAlphaT*(s.x-283.0) - uBetaS*(s.w-35.0));
 }
 
+// Two-layer ocean with FIXED thicknesses and NO free-surface solver.
+//   tex    : this layer's own texture
+//   texOth : the OTHER layer's texture (uDeep when this is uTop, uTop when this is uDeep)
+//   pkOwn  : own reduced-gravity coefficient (baroclinic self-mode)
+//   couple : barotropic coupling coefficient (overlying surface mass pulling the deep layer)
+//            = 0.0 for the surface layer, = uPkTop for the deep layer.
+// The deep layer's pressure gradient is gradP_own MINUS the surface mass gradient,
+// which makes the deep the compensating / return limb of the conveyor.
+// TODO: verify sign empirically in the Locked-Rotation (Omega=0) test; flip
+//       the 'uCouple*gradPtop' term to '+=' if the deep limb runs the wrong way.
 vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
-               sampler2D tex, float fric, float pk)
+               sampler2D tex, sampler2D texOth, float fric,
+               float pkOwn, float couple)
 {
-  vec4 s0 = texelFetch(tex, cTex(cell), 0);
+  vec4 s0 = texelFetch(tex,   cTex(cell), 0);
+  vec4 o0 = texelFetch(texOth,cTex(cell), 0);
   vec2 v0 = s0.yz;
   vec2 tr0 = vec2(s0.x, s0.w);
-  float p0 = oceanP(s0, pk);
+  float p0 = oceanP(s0, pkOwn);
+
+  // overlying (surface) mass field — only used when couple>0 (deep layer)
+  float p0_top = oceanP(o0, uPkTop);
 
   vec2 gradP = vec2(0.0), lapV = vec2(0.0), advV = vec2(0.0);
   vec2 lapT  = vec2(0.0), advT = vec2(0.0);
+  vec2 gradPtop = vec2(0.0);
   float div = 0.0;
 
   for(int k=0;k<6;k++){
@@ -174,14 +190,17 @@ vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
     vec2  nrm = nb.xy;
 
     vec4 sj    = texelFetch(tex,   cTex(j), 0);
+    vec4 oj    = texelFetch(texOth,cTex(j), 0);
     float landj= texelFetch(uCellB,cTex(j), 0).w;
     float wet  = (1.0-landj)*(1.0-land);
 
     vec2 vj  = xfer(sj.yz, nb.z, nb.w) * (1.0-landj);
     vec2 trj = vec2(sj.x, sj.w);
-    float pj = oceanP(sj, pk);
+    float pj = oceanP(sj, pkOwn);
+    float pj_top = oceanP(oj, uPkTop);
 
-    gradP += L*0.5*(pj-p0)*nrm*wet;
+    gradP    += L*0.5*(pj-p0)*nrm*wet;
+    gradPtop += L*0.5*(pj_top-p0_top)*nrm*wet;   // gradient of overlying mass
     lapV  += (L/d)*(vj-v0)*wet;
     lapT  += (L/d)*(trj-tr0);
     float un = 0.5*dot(v0+vj, nrm)*wet;
@@ -192,9 +211,20 @@ vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   }
 
   float ia = 1.0/area;
-  gradP *= ia; lapV *= ia; lapT *= ia; advV *= ia; advT *= ia; div *= ia;
+  gradP *= ia; gradPtop *= ia; lapV *= ia; lapT *= ia;
+  advV *= ia; advT *= ia; div *= ia;
 
-  vec2 acc = -gradP/1027.0 + uNuVel*lapV - advV + v0*div;
+  // BAROTROPIC COUPLING: deep layer is driven by the overlying surface mass
+  // field in the OPPOSITE sense to the surface (return limb).
+  vec2 gradP_use = gradP - couple*gradPtop;
+
+  // Vertical mass exchange w_i ~ -H_top * div (continuity), used as a local
+  // interfacial drag that couples the two layers' momentum (no global solve).
+  float wi   = -uHtop*div;
+  vec2  vOth = o0.yz;
+  vec2  intf = uKif * (vOth - v0) * (0.5 + min(abs(wi), 2.0));
+
+  vec2 acc = -gradP_use/1027.0 + uNuVel*lapV - advV + v0*div + intf;
   vec3 v3 = v0.x*e1 + v0.y*e2;
   vec3 c3 = -2.0*cross(vec3(0.0,uOmega,0.0), v3);
   acc += vec2(dot(c3,e1), dot(c3,e2));
@@ -217,8 +247,10 @@ void main(){
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
-  oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  uPkTop);
-  oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, uPkDeep);
+  // surface layer: own baroclinic only (couple = 0), reads deep as the "other" layer
+  oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uDeep, uFricTop,  uPkTop,  0.0);
+  // deep layer: weak own gradient + barotropic pull from overlying surface mass
+  oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uTop,  uFricDeep, uPkDeep, uCouple);
 }`;
 
 var AIR_FS = SHADER_HEAD + SHADER_COMMON + `
@@ -408,10 +440,11 @@ void main(){
   float rd = -0.00017*(Td-283.0) + 0.00078*(Sd-35.0);
   float mix_ = clamp((uThermo*(1.0 + 900.0*max(0.0, rt-rd)))*uDt, 0.0, 0.25);
   float dT = mix_*(Td - Ts), dS = mix_*(Sd - St);
-  Ts += dT;   Td -= dT*0.22;
-  St += dS;   Sd -= dS*0.22;
+  // mass-weighted exchange (H_top/H_deep = 200/800 = 0.25) -> column heat/momentum conserved
+  Ts += dT;   Td -= dT*0.25;
+  St += dS;   Sd -= dS*0.25;
   vec2 dvm = 0.12*mix_*(vt - vd);
-  vd += dvm; vt -= dvm*0.22;
+  vd += dvm; vt -= dvm*0.25;
 
   float nz = hash21(vec2(float(cell), floor(uTime*0.37)))-0.5;
   Tl += uNoise*nz;

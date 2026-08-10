@@ -345,7 +345,12 @@ Planet.prototype.step = function () {
     .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
     .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
     .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
-    .f('uPkTop', 9.81 * 200 * 1027).f('uPkDeep', 9.81 * 800 * 1027);
+    // surface keeps full reduced gravity; deep's OWN baroclinic is a weak diagnostic
+    // (was 9.81*800*1027 — 4x the surface, which caused the inverted conveyor).
+    .f('uPkTop', 9.81 * 200 * 1027).f('uPkDeep', 9.81 * 40 * 1027)
+    // barotropic coupling: deep is driven by the overlying surface mass field
+    .f('uCouple', 9.81 * 200 * 1027)
+    .f('uKif', 3e-7).f('uHtop', 200.0);
   this.fullscreen('dynO', W, H);
 
   var pa = this.prog.air.use();
