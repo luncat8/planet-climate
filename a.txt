@@ -1,0 +1,267 @@
+Act as an expert in computational fluid dynamics and global climate modeling. I am building a WebGL-based GPU climate engine using an icosahedral dual-hex grid. The simulation includes four stacked layers: High Air, Low Air, Surface Ocean, and Deep Ocean. It uses explicit time-stepping, finite-volume advection, and diagnostic hydrostatic pressure (no Poisson solve).
+
+
+**1. The Experiment: Locked Rotation Thermohaline Test**
+To isolate buoyancy-driven circulation, I locked the planet's rotation (Omega = 0) and observed the long-term behavior of the ocean layers.
+*   **Expectation:** A standard thermohaline conveyor belt. Warm surface water should flow toward the poles, cool/sink, and cold deep water should return toward the equator.
+*   **Observation:** The behavior was inverted. The Deep Ocean layer became the dominant fast-flowing limb moving warm water from the equator to the poles. The Surface Ocean acted as a slow, cold return flow moving pole-to-equator.
+
+**2. Context & Previous Findings (High-Level)**
+Previous analyses have flagged several areas, but I want you to focus on the structural physics rather than minor tuning:
+*   **Visuals/Numerics:** There are known issues with grid artifacts and first-order numerical diffusion making storms look "mushy," but these are secondary to getting the circulation correct.
+*   **Pressure Formulation:** The model uses diagnostic pressure based on local temperature/salinity differences (baroclinic) for both ocean layers independently. Some argue this is fine; others suggest it might be causing issues with mass continuity.
+*   **Vertical Coupling:** There is a suspicion that the vertical exchange between surface and deep ocean is currently "convective-only" (mixing only when surface water is denser/colder), lacking a mechanism for upwelling or bidirectional mass transfer.
+*   **Layer Independence:** The deep ocean layer has its own pressure gradients and friction settings, effectively acting as an independent fluid rather than being strictly driven by surface dynamics/mass continuity.
+
+**3. Your Task**
+
+model B suggested this patch . it is for older TS version. so we cant apply it directly. your task is smart implement similar changes
+
+
+
+46,47c46
+<   omegaSpin: number;
+<   omegaOrbit: number;
+---
+>   omega: number;
+84,85c83
+<   omegaSpin: 7.292e-5,
+<   omegaOrbit: 7.292e-5,
+---
+>   omega: 7.292e-5,
+99c97
+<   windStress: 1.4e-6,
+---
+>   windStress: 6e-8,
+365,366c363,364
+<     // omegaOrbit is the apparent angular speed of the sun in the surface frame.
+<     // Tidal-lock test: omegaSpin > 0 for Coriolis, omegaOrbit = 0 for fixed sun.
+---
+>     // the planet spins about +Y (right-hand rule), so in the co-rotating
+>     // frame the sub-solar point drifts the other way round.
+368c366
+<     const lon = this.params.omegaOrbit * this.simTime;
+---
+>     const lon = 6.2831853 * (this.simTime / 86400);
+380c378
+<       .f('uDt', P.dt).f('uOmega', P.omegaSpin)
+---
+>       .f('uDt', P.dt).f('uOmega', P.omega)
+384c382
+<       .f('uPkTop', 9.81 * 180 * 1027).f('uPkDeep', 9.81 * 28 * 1027);
+---
+>       .f('uPkTop', 9.81 * 200 * 1027).f('uPkDeep', 9.81 * 800 * 1027);
+390c388
+<       .f('uDt', P.dt).f('uOmega', P.omegaSpin)
+---
+>       .f('uDt', P.dt).f('uOmega', P.omega)
+452d449
+<       .tex('uLookup', this.texLookup)
+64c64
+<                sampler2D tex, float fric, float pk, float vmax)
+---
+>                sampler2D tex, float fric, float pk)
+114c114
+<   v1 = clamp(v1, vec2(-vmax), vec2(vmax));
+---
+>   v1 = clamp(v1, vec2(-3.0), vec2(3.0));
+130,131c130,131
+<   oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  uPkTop,  2.5);
+<   oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, uPkDeep, 1.2);
+---
+>   oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  uPkTop);
+>   oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, uPkDeep);
+293,294c293
+<   // Mass-weighted wind stress: the same impulse changes the much lighter
+<   // air column far more than the ocean mixed layer.
+---
+>   // wind stress drags the ocean, ocean drags back on the wind
+297,298c296,297
+<   vt += dstress*0.026;
+<   vl -= dstress;
+---
+>   vt += dstress;
+>   vl -= dstress*0.02;
+337,339c336
+<   float unstableSink = max(0.0, rt-rd); // dense surface water sinks rapidly
+<   float stableUpwell = max(0.0, rd-rt); // warm/light surface favours slow upwelling
+<   float mix_ = clamp((uThermo*(0.35 + 1000.0*unstableSink + 250.0*stableUpwell))*uDt, 0.0, 0.22);
+---
+>   float mix_ = clamp((uThermo*(1.0 + 900.0*max(0.0, rt-rd)))*uDt, 0.0, 0.25);
+346,353d342
+<   // Two-layer continuity closure: damp net column transport by pushing the
+<   // deep layer toward a slow return limb instead of letting it drive the cell.
+<   const float Htop = 90.0;
+<   const float Hdeep = 760.0;
+<   vec2 transport = Htop*vt + Hdeep*vd;
+<   float overturn = clamp((0.10 + 650.0*unstableSink + 120.0*stableUpwell)*uThermo*uDt, 0.0, 0.18);
+<   vd -= overturn*transport/Hdeep;
+< 
+500a490
+> uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB;
+501a492
+> uniform int uMode;
+503c494
+< out vec3 vN; out vec3 vPos;
+---
+> out vec3 vN; out float vVal; out float vLand; out float vCloud; out vec3 vPos;
+508a500,519
+>   vec4 wt = texelFetch(uTop, cTex(cell),0);
+>   vec4 la = texelFetch(uLoA, cTex(cell),0);
+>   vec4 lb = texelFetch(uLoB, cTex(cell),0);
+>   vec4 ha = texelFetch(uHiA, cTex(cell),0);
+>   vec4 hb = texelFetch(uHiB, cTex(cell),0);
+>   vec4 wd = texelFetch(uDeep, cTex(cell),0);
+>   float v = 0.0;
+>   if(uMode==0) v = (la.z-238.0)/72.0;                 // air low T
+>   else if(uMode==1) v = (wt.x-260.0)/50.0;            // surface T
+>   else if(uMode==2) v = (la.w-101325.0)/2600.0*0.5+0.5; // sea level pressure
+>   else if(uMode==3) v = lb.x/0.022;                   // humidity
+>   else if(uMode==4) v = length(la.xy)/34.0;           // wind speed
+>   else if(uMode==5) v = length(wt.yz)/1.1;            // surface current
+>   else if(uMode==6) v = hb.y/1.6;                     // rain
+>   else if(uMode==7) v = (wt.w-33.0)/4.0;              // salinity
+>   else if(uMode==8) v = (wd.x-272.0)/16.0;            // deep ocean T
+>   else v = (ha.z-215.0)/45.0;                         // high air T
+>   vVal = clamp(v, 0.0, 1.0);
+>   vLand = cb.w;
+>   vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
+514,516c525,526
+< export const GLOBE_FS = HEAD + COMMON + `
+< uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB, uLookup;
+< in vec3 vN; in vec3 vPos;
+---
+> export const GLOBE_FS = HEAD + `
+> in vec3 vN; in float vVal; in float vLand; in float vCloud; in vec3 vPos;
+530,568d539
+< int dirCell(vec3 n){
+<   float lon = atan(n.z, n.x);
+<   float lat = asin(clamp(n.y,-1.0,1.0));
+<   return int(texture(uLookup, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).r + 0.5);
+< }
+< float rawVal(int cell){
+<   if(uMode==0) return (texelFetch(uLoA, cTex(cell),0).z-238.0)/72.0;              // air low T
+<   if(uMode==1) return (texelFetch(uTop, cTex(cell),0).x-260.0)/50.0;              // surface T
+<   if(uMode==2) return (texelFetch(uLoA, cTex(cell),0).w-101325.0)/2600.0*0.5+0.5; // sea-level pressure
+<   if(uMode==3) return texelFetch(uLoB, cTex(cell),0).x/0.022;                     // humidity
+<   if(uMode==4) return length(texelFetch(uLoA, cTex(cell),0).xy)/34.0;             // wind speed
+<   if(uMode==5) return length(texelFetch(uTop, cTex(cell),0).yz)/1.1;              // surface current
+<   if(uMode==6) return texelFetch(uHiB, cTex(cell),0).y/1.6;                       // rain
+<   if(uMode==7) return (texelFetch(uTop, cTex(cell),0).w-33.0)/4.0;                // salinity
+<   if(uMode==8) return (texelFetch(uDeep, cTex(cell),0).x-272.0)/16.0;             // deep ocean T
+<   return (texelFetch(uHiA, cTex(cell),0).z-215.0)/45.0;                           // high air T
+< }
+< float smoothVal(int cell){
+<   float v = rawVal(cell)*0.55;
+<   float w = 0.55;
+<   for(int k=0;k<6;k++){
+<     vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+<     if(na.w < 0.5) continue;
+<     v += rawVal(int(na.x))*0.075;
+<     w += 0.075;
+<   }
+<   return clamp(v/w, 0.0, 1.0);
+< }
+< float smoothLand(int cell){
+<   float v = texelFetch(uCellB, cTex(cell),0).w*0.65;
+<   float w = 0.65;
+<   for(int k=0;k<6;k++){
+<     vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+<     if(na.w < 0.5) continue;
+<     v += texelFetch(uCellB, cTex(int(na.x)),0).w*0.0583333;
+<     w += 0.0583333;
+<   }
+<   return clamp(v/w,0.0,1.0);
+< }
+570,574c541
+<   vec3 N = normalize(vN);
+<   int cell = dirCell(N);
+<   float val = smoothVal(cell);
+<   float land = smoothLand(cell);
+<   vec3 base = pal(val);
+---
+>   vec3 base = pal(vVal);
+576c543
+<     base = mix(vec3(0.02,0.03,0.07), base, pow(val,0.7));
+---
+>     base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));
+578c545,546
+<   base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*land*0.45);
+---
+>   base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
+>   vec3 N = normalize(vN);
+17,18c17
+<   { key: 'omegaSpin', label: 'Spin Ω (Coriolis)', min: 0, max: 3.6e-4, step: 1e-6, fmt: v => `${(v / 7.292e-5).toFixed(2)}× Earth` },
+<   { key: 'omegaOrbit', label: 'Solar drift Ω', min: 0, max: 3.6e-4, step: 1e-6, fmt: v => `${(v / 7.292e-5).toFixed(2)}× day` },
+---
+>   { key: 'omega', label: 'Rotation Ω', min: 0, max: 3.6e-4, step: 1e-6, fmt: v => `${(v / 7.292e-5).toFixed(2)}× Earth` },
+29c28
+<   { key: 'windStress', label: 'Wind stress', min: 0, max: 8e-6, step: 1e-7, fmt: v => v.toExponential(1) },
+---
+>   { key: 'windStress', label: 'Wind stress', min: 0, max: 3e-7, step: 5e-9, fmt: v => v.toExponential(1) },
+40c39
+<   const [stats, setStats] = useState({ fps: 0, days: 0, cells: 0, level: 6 });
+---
+>   const [stats, setStats] = useState({ fps: 0, days: 0, cells: 0, level: 5 });
+42c41
+<   const [level, setLevel] = useState(6);
+---
+>   const [level, setLevel] = useState(5);
+50c49
+<       const p = new Planet(canvasRef.current, 6);
+---
+>       const p = new Planet(canvasRef.current, 5);
+122,129d120
+<           <button
+<             onClick={() => {
+<               set('omegaSpin', 7.292e-5);
+<               set('omegaOrbit', 0);
+<               set('dayNight', 1);
+<             }}
+<             className="w-full rounded-md py-1.5 bg-cyan-500/10 border border-cyan-400/20 text-cyan-200 hover:bg-cyan-500/20"
+<           >tidal-lock test: Coriolis on, sun fixed</button>
+103,105d102
+<   The UI separates `omegaSpin` (Coriolis/physical spin) from `omegaOrbit`
+<   (apparent solar drift in the surface frame), so a tidally locked test can keep
+<   Coriolis active while pinning the substellar point.
+109,112c106
+<   * ocean `P = g·H·ρ₀·(α(T−283) − β(S−35))` — warm/fresh = light = high dynamic pressure.
+<     The top layer uses an energetic mixed-layer scale; the deep layer uses a
+<     much smaller effective scale so it acts mostly as the return limb instead
+<     of independently racing from hot to cold.
+---
+>   * ocean `P = g·H·ρ₀·(α(T−283) − β(S−35))` — warm/fresh = light = high dynamic pressure
+129,130c123,124
+<   cools the ocean by `L_v·E`, and salts the surface water; **wind stress** uses
+<   a mass-weighted impulse: `u_air -= impulse`, `u_wtop += 0.026·impulse`.
+---
+>   cools the ocean by `L_v·E`, and salts the surface water; **wind stress**
+>   `u_wtop += k·dt·(u_air − u_wtop)` with the reaction `u_air −= 0.02·(…)`.
+133,135c127
+<   sinking; warm/light surface regions get weaker but nonzero upwelling exchange.
+<   A two-layer continuity closure damps net column transport by nudging the deep
+<   layer toward a slow return limb.
+---
+>   sinking; otherwise a slow background exchange, plus inter-layer drag.
+144,146c136,137
+<   vertex shader `texelFetch`es position directly from the grid texture. Field
+<   values are sampled per-fragment through the direction→cell lookup and lightly
+<   one-ring smoothed for less triangle faceting (10 view modes, blue→red colormap).
+---
+>   vertex shader `texelFetch`es position and the selected field directly from the
+>   simulation textures (10 view modes, blue→red colormap).
+157c148
+< * Default is L6 ≈ 41 k cells. L5 ≈ 10 k and L7 ≈ 164 k are rebuildable at runtime.
+---
+> * L5 ≈ 10 k cells, L6 ≈ 41 k, L7 ≈ 164 k (rebuildable at runtime).
+163,165c154,155
+< | `dt` / `substeps` | 1800 s × 2 | sim speed; CFL is `u·dt/dx`; lower `dt` or increase diffusion for L7 experiments |
+< | `omegaSpin` Ω | 7.292e-5 | physical spin/Coriolis; more Ω ⇒ tighter, more numerous jets & cyclones |
+< | `omegaOrbit` | 7.292e-5 | apparent solar drift. Set to 0 for a fixed substellar point while leaving `omegaSpin` nonzero |
+---
+> | `dt` / `substeps` | 1800 s × 2 | sim speed; CFL is `u·dt/dx` (≈0.3 at L5) |
+> | `omega` Ω | 7.292e-5 | rotation rate — more Ω ⇒ tighter, more numerous jets & cyclones |
+172c162
+< | `windStress` | 1.4e-6 | air-sea momentum coupling; air loses the full impulse, ocean receives 0.026× |
+---
+> | `windStress` | 6e-8 | how hard the wind drags the ocean (gyre strength) |
