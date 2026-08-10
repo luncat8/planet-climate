@@ -1,0 +1,364 @@
+Act as an expert in computational fluid dynamics and global climate modeling. I am building a WebGL-based GPU climate engine using an icosahedral dual-hex grid. The simulation includes four stacked layers: High Air, Low Air, Surface Ocean, and Deep Ocean. It uses explicit time-stepping, finite-volume advection, and diagnostic hydrostatic pressure (no Poisson solve).
+
+
+**1. The Experiment: Locked Rotation Thermohaline Test**
+To isolate buoyancy-driven circulation, I locked the planet's rotation (Omega = 0) and observed the long-term behavior of the ocean layers.
+*   **Expectation:** A standard thermohaline conveyor belt. Warm surface water should flow toward the poles, cool/sink, and cold deep water should return toward the equator.
+*   **Observation:** The behavior was inverted. The Deep Ocean layer became the dominant fast-flowing limb moving warm water from the equator to the poles. The Surface Ocean acted as a slow, cold return flow moving pole-to-equator.
+
+**2. Context & Previous Findings (High-Level)**
+Previous analyses have flagged several areas, but I want you to focus on the structural physics rather than minor tuning:
+*   **Visuals/Numerics:** There are known issues with grid artifacts and first-order numerical diffusion making storms look "mushy," but these are secondary to getting the circulation correct.
+*   **Pressure Formulation:** The model uses diagnostic pressure based on local temperature/salinity differences (baroclinic) for both ocean layers independently. Some argue this is fine; others suggest it might be causing issues with mass continuity.
+*   **Vertical Coupling:** There is a suspicion that the vertical exchange between surface and deep ocean is currently "convective-only" (mixing only when surface water is denser/colder), lacking a mechanism for upwelling or bidirectional mass transfer.
+*   **Layer Independence:** The deep ocean layer has its own pressure gradients and friction settings, effectively acting as an independent fluid rather than being strictly driven by surface dynamics/mass continuity.
+
+**3. Your Task**
+
+model A suggested this patch . it is for older TS version. so we cant apply it directly. your task is smart implement similar changes
+
+
+
+46c46,53
+<   omega: number;
+---
+>   /** Physical spin rate (rad/s) — drives the real 3-D Coriolis force. A
+>    *  tidally-locked planet still rotates once per orbit in the inertial
+>    *  frame, so this should generally stay non-zero even when omegaOrbit=0. */
+>   omegaSpin: number;
+>   /** Apparent angular rate (rad/s) of the sub-solar point sliding across the
+>    *  surface — i.e. the day/night cycle. Independent of omegaSpin: set this
+>    *  to 0 to freeze the sun (tidal lock) while Coriolis keeps spinning. */
+>   omegaOrbit: number;
+64a72,80
+>   /** Deep-ocean pressure compensation strength, as a fraction of uPkTop. The
+>    *  deep layer's pressure is driven by the NEGATIVE of the surface layer's
+>    *  buoyancy (a light/warm column above means lower pressure below it) --
+>    *  this is what turns the deep layer into a genuine return limb instead of
+>    *  an independent (and, if too strong, dominant) buoyancy-driven flow. */
+>   oceanPkRatio: number;
+>   /** Small direct contribution of the deep layer's OWN density field to its
+>    *  pressure (abyssal circulation), as a fraction of uPkTop. */
+>   oceanAbyssRatio: number;
+83c99,100
+<   omega: 7.292e-5,
+---
+>   omegaSpin: 7.292e-5,
+>   omegaOrbit: 6.2831853 / 86400,
+97c114
+<   windStress: 6e-8,
+---
+>   windStress: 2e-6,
+101a119,120
+>   oceanPkRatio: 0.55,
+>   oceanAbyssRatio: 0.12,
+363,364c382,386
+<     // the planet spins about +Y (right-hand rule), so in the co-rotating
+<     // frame the sub-solar point drifts the other way round.
+---
+>     // omegaOrbit alone controls how fast the sub-solar point slides across
+>     // the surface (the day/night cycle) -- independent of omegaSpin, which
+>     // only feeds the Coriolis term. Set omegaOrbit=0 to freeze the sun
+>     // entirely (tidal lock) while keeping a physically-motivated Coriolis
+>     // force from the planet's real rotation.
+366c388
+<     const lon = 6.2831853 * (this.simTime / 86400);
+---
+>     const lon = this.params.omegaOrbit * this.simTime;
+376a399
+>     const pkTop = 9.81 * 200 * 1027;
+378c401
+<       .f('uDt', P.dt).f('uOmega', P.omega)
+---
+>       .f('uDt', P.dt).f('uOmega', P.omegaSpin)
+382c405,407
+<       .f('uPkTop', 9.81 * 200 * 1027).f('uPkDeep', 9.81 * 800 * 1027);
+---
+>       .f('uPkTop', pkTop)
+>       .f('uPkDeep', pkTop * P.oceanPkRatio)
+>       .f('uPkAbyss', pkTop * P.oceanAbyssRatio);
+388c413
+<       .f('uDt', P.dt).f('uOmega', P.omega)
+---
+>       .f('uDt', P.dt).f('uOmega', P.omegaSpin)
+56c56
+< uniform float uPkTop, uPkDeep;
+---
+> uniform float uPkTop, uPkDeep, uPkAbyss;
+58,61c58,75
+< float oceanP(vec4 s, float pk){
+<   // dynamic pressure ~ -g*H*rho' ; warm/fresh = light = high pressure
+<   return pk*(uAlphaT*(s.x-283.0) - uBetaS*(s.w-35.0));
+< }
+---
+> // buoyancy anomaly: positive = warm/fresh = light
+> float buoy(vec4 s){ return uAlphaT*(s.x-283.0) - uBetaS*(s.w-35.0); }
+> 
+> // Top layer: classic reduced-gravity dynamic pressure from its OWN buoyancy
+> // (warm/light water "piles up" -> higher sea-surface height -> higher P).
+> // This alone drives the expected warm -> cold surface current.
+> float oceanPTop(vec4 sTop){ return uPkTop*buoy(sTop); }
+> 
+> // Deep layer: hydrostatic pressure at depth is dominated by the *compensating*
+> // signal of whatever water sits above it -- a light/warm top layer means LESS
+> // weight overhead, hence LOWER pressure beneath it, not higher. Using the
+> // deep layer's own (weak, slowly-diffusing) temperature here previously made
+> // both layers respond to the same sign of anomaly, so the deep layer just
+> // replayed (and, being scaled up, overpowered) the surface flow instead of
+> // returning it. Flipping the sign onto the TOP layer's buoyancy is what
+> // actually closes the overturning loop into a proper return limb; a small
+> // direct term from the deep water's own density adds slow abyssal drift.
+> float oceanPDeep(vec4 sDeep, vec4 sTop){ return -uPkDeep*buoy(sTop) + uPkAbyss*buoy(sDeep); }
+64c78
+<                sampler2D tex, float fric, float pk)
+---
+>                sampler2D tex, float fric, bool isDeep)
+66a81
+>   vec4 top0 = isDeep ? texelFetch(uTop, cTex(cell), 0) : s0;
+69c84
+<   float p0 = oceanP(s0, pk);
+---
+>   float p0 = isDeep ? oceanPDeep(s0, top0) : oceanPTop(s0);
+85a101
+>     vec4 topj  = isDeep ? texelFetch(uTop, cTex(j), 0) : sj;
+91c107
+<     float pj = oceanP(sj, pk);
+---
+>     float pj = isDeep ? oceanPDeep(sj, topj) : oceanPTop(sj);
+130,131c146,147
+<   oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  uPkTop);
+<   oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, uPkDeep);
+---
+>   oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  false);
+>   oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, true);
+293c309,315
+<   // wind stress drags the ocean, ocean drags back on the wind
+---
+>   // Wind stress: Newton's 3rd law, mass-weighted. The ocean top layer
+>   // (~200 m of water) has far more inertia per m^2 than the low-air column
+>   // (~5000 m of thin air): massRatio = (rhoL*Hlo)/(rho_w*H_top) ~= 1/37, so
+>   // the SAME momentum flux barely nudges the ocean but strongly decelerates
+>   // the wind. (Previously this was backwards: the ocean got the full
+>   // impulse and the air lost only 2%, which pumped spurious kinetic energy
+>   // into the ocean and let it dominate/overpower the real circulation.)
+296,297c318,320
+<   vt += dstress;
+<   vl -= dstress*0.02;
+---
+>   float massRatio = (rhoL*Hlo)/(1027.0*200.0);
+>   vl -= dstress;
+>   vt += dstress*massRatio;
+333a357,362
+>   // Mixing rate: a background rate everywhere plus enhancement from *either*
+>   // sign of instability (abs, not max(0,..)) -- unstable stratification can
+>   // arise either from surface cooling/salting (classic polar sinking) or
+>   // from the deep layer locally out-densifying the surface, and both should
+>   // stir the column, letting warm regions upwell instead of only ever
+>   // sinking at the poles.
+336c365,373
+<   float mix_ = clamp((uThermo*(1.0 + 900.0*max(0.0, rt-rd)))*uDt, 0.0, 0.25);
+---
+>   float mix_ = clamp((uThermo*(1.0 + 900.0*abs(rt-rd)))*uDt, 0.0, 0.25);
+>   // Mass-weighted (thickness-weighted) exchange, consistent with the 200 m /
+>   // 800 m top/deep layer depths assumed elsewhere: the thin top layer should
+>   // respond ~4x more than the thick deep layer per unit of heat/salt/momentum
+>   // exchanged, so that the deep ocean acts as a slow, high-inertia return
+>   // limb instead of mirroring (and, when over-weighted, overpowering) the
+>   // surface circulation.
+>   const float wTopEx = 0.8;   // = Hdeep/(Htop+Hdeep), Htop=200 Hdeep=800
+>   const float wDeepEx = 0.2;  // = Htop /(Htop+Hdeep)
+338,339c375,376
+<   Ts += dT;   Td -= dT*0.22;
+<   St += dS;   Sd -= dS*0.22;
+---
+>   Ts += dT*wTopEx;   Td -= dT*wDeepEx;
+>   St += dS*wTopEx;   Sd -= dS*wDeepEx;
+341c378
+<   vd += dvm; vt -= dvm*0.22;
+---
+>   vt -= dvm*wTopEx;  vd += dvm*wDeepEx;
+495,499c532,535
+< void main(){
+<   int cell = gl_VertexID;
+<   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
+<   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+<   vec3 n = normalize(ca.xyz);
+---
+> 
+> // mode-selected scalar field for an arbitrary cell (used both for the
+> // vertex's own value and for its neighbours, so we can blend them).
+> float sampleVal(int cell, int mode){
+500a537
+>   vec4 wd = texelFetch(uDeep, cTex(cell),0);
+505d541
+<   vec4 wd = texelFetch(uDeep, cTex(cell),0);
+507,515c543,551
+<   if(uMode==0) v = (la.z-238.0)/72.0;                 // air low T
+<   else if(uMode==1) v = (wt.x-260.0)/50.0;            // surface T
+<   else if(uMode==2) v = (la.w-101325.0)/2600.0*0.5+0.5; // sea level pressure
+<   else if(uMode==3) v = lb.x/0.022;                   // humidity
+<   else if(uMode==4) v = length(la.xy)/34.0;           // wind speed
+<   else if(uMode==5) v = length(wt.yz)/1.1;            // surface current
+<   else if(uMode==6) v = hb.y/1.6;                     // rain
+<   else if(uMode==7) v = (wt.w-33.0)/4.0;              // salinity
+<   else if(uMode==8) v = (wd.x-272.0)/16.0;            // deep ocean T
+---
+>   if(mode==0) v = (la.z-238.0)/72.0;                 // air low T
+>   else if(mode==1) v = (wt.x-260.0)/50.0;            // surface T
+>   else if(mode==2) v = (la.w-101325.0)/2600.0*0.5+0.5; // sea level pressure
+>   else if(mode==3) v = lb.x/0.022;                   // humidity
+>   else if(mode==4) v = length(la.xy)/34.0;           // wind speed
+>   else if(mode==5) v = length(wt.yz)/1.1;            // surface current
+>   else if(mode==6) v = hb.y/1.6;                     // rain
+>   else if(mode==7) v = (wt.w-33.0)/4.0;              // salinity
+>   else if(mode==8) v = (wd.x-272.0)/16.0;            // deep ocean T
+516a553,580
+>   return v;
+> }
+> 
+> void main(){
+>   int cell = gl_VertexID;
+>   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
+>   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+>   vec3 n = normalize(ca.xyz);
+> 
+>   // Each vertex IS a simulation cell, so a raw per-vertex read reproduces the
+>   // hard Voronoi cell boundaries exactly (a per-FRAGMENT nearest-cell lookup
+>   // would look the same or worse -- it would remove the smooth barycentric
+>   // blend the rasteriser already gives us across each triangle). Instead we
+>   // pre-blend a little of the 1-ring neighbourhood into each vertex value
+>   // here, which softens the facets while staying resolution-independent and
+>   // essentially free (a handful of extra texelFetch per vertex).
+>   float v0 = sampleVal(cell, uMode);
+>   float vAcc = 0.0, wAcc = 0.0;
+>   for(int k=0;k<6;k++){
+>     vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+>     if(na.w < 0.5) continue;
+>     vAcc += sampleVal(int(na.x), uMode);
+>     wAcc += 1.0;
+>   }
+>   float v = wAcc > 0.0 ? mix(v0, vAcc / wAcc, 0.35) : v0;
+> 
+>   vec4 lb = texelFetch(uLoB, cTex(cell),0);
+>   vec4 hb = texelFetch(uHiB, cTex(cell),0);
+563,564c627,639
+<   vC = clamp(texelFetch(uLoB, cTex(cell),0).y, 0.0, 1.0);
+<   vR = clamp(texelFetch(uHiB, cTex(cell),0).y, 0.0, 2.0);
+---
+>   float c0 = texelFetch(uLoB, cTex(cell),0).y;
+>   float r0 = texelFetch(uHiB, cTex(cell),0).y;
+>   float cAcc = 0.0, rAcc = 0.0, wAcc = 0.0;
+>   for(int k=0;k<6;k++){
+>     vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+>     if(na.w < 0.5) continue;
+>     int j = int(na.x);
+>     cAcc += texelFetch(uLoB, cTex(j),0).y;
+>     rAcc += texelFetch(uHiB, cTex(j),0).y;
+>     wAcc += 1.0;
+>   }
+>   vC = clamp(wAcc > 0.0 ? mix(c0, cAcc/wAcc, 0.4) : c0, 0.0, 1.0);
+>   vR = clamp(wAcc > 0.0 ? mix(r0, rAcc/wAcc, 0.4) : r0, 0.0, 2.0);
+17c17,18
+<   { key: 'omega', label: 'Rotation Ω', min: 0, max: 3.6e-4, step: 1e-6, fmt: v => `${(v / 7.292e-5).toFixed(2)}× Earth` },
+---
+>   { key: 'omegaSpin', label: 'Spin Ω (Coriolis)', min: 0, max: 3.6e-4, step: 1e-6, fmt: v => `${(v / 7.292e-5).toFixed(2)}× Earth` },
+>   { key: 'omegaOrbit', label: 'Sun angular rate', min: 0, max: 3e-4, step: 1e-6, fmt: v => v > 1e-8 ? `${(2 * Math.PI / v / 3600).toFixed(1)} h/day` : 'frozen (locked)' },
+28c29
+<   { key: 'windStress', label: 'Wind stress', min: 0, max: 3e-7, step: 5e-9, fmt: v => v.toExponential(1) },
+---
+>   { key: 'windStress', label: 'Wind stress (air-side)', min: 0, max: 1e-5, step: 1e-7, fmt: v => v.toExponential(1) },
+29a31,32
+>   { key: 'oceanPkRatio', label: 'Deep return strength', min: 0, max: 1.2, step: 0.02, fmt: v => v.toFixed(2) },
+>   { key: 'oceanAbyssRatio', label: 'Abyssal own-density', min: 0, max: 0.5, step: 0.01, fmt: v => v.toFixed(2) },
+41c44
+<   const [level, setLevel] = useState(5);
+---
+>   const [level, setLevel] = useState(6);
+43a47
+>   const lockedOrbit = useRef(6.2831853 / 86400);
+49c53
+<       const p = new Planet(canvasRef.current, 5);
+---
+>       const p = new Planet(canvasRef.current, 6);
+161a166,180
+>                 className="accent-cyan-400" />
+>             </label>
+>             <label className="flex items-center justify-between cursor-pointer">
+>               <span className="text-slate-300" title="Freezes the sun's apparent motion (omegaOrbit=0) while leaving the planet's real spin — and thus Coriolis — untouched.">
+>                 Tidally locked (freeze sun)
+>               </span>
+>               <input type="checkbox" checked={P.omegaOrbit < 1e-9}
+>                 onChange={e => {
+>                   if (e.target.checked) {
+>                     lockedOrbit.current = P.omegaOrbit > 1e-9 ? P.omegaOrbit : lockedOrbit.current;
+>                     set('omegaOrbit', 0);
+>                   } else {
+>                     set('omegaOrbit', lockedOrbit.current);
+>                   }
+>                 }}
+168a169,233
+> 
+> ---
+> 
+> ## 8. Post-mortem: fixing the tidally-locked ocean-inversion bug
+> 
+> A tidally-locked test (`omegaOrbit = 0`, sun fixed) exposed a real structural
+> bug: the deep ocean raced from the hot side to the cold side while the
+> surface layer sluggishly limped the other way — an inverted, deep-dominated
+> circulation instead of the expected warm-surface-out / cold-deep-return
+> overturning cell. Root causes and fixes:
+> 
+> 1. **Both ocean layers diagnosed pressure from their own local buoyancy with
+>    the same sign**, and the deep layer's weight (`uPkDeep`) was set 4×
+>    *larger* than the top layer's. That makes *both* layers independently flow
+>    warm→cold, and the (over-)heavier deep layer dominates and drowns out the
+>    real surface response — never mind reproducing an actual return limb.
+>    **Fix:** the deep layer's pressure is now driven by the *negative* of the
+>    TOP layer's buoyancy (`oceanPDeep = -k·buoy(top) + k_abyss·buoy(deep)`),
+>    matching the real hydrostatic argument: a warm/light column above means
+>    *less* weight overhead, hence *lower* pressure at depth beneath it — this
+>    is precisely what turns the deep layer into a genuine, opposite-signed
+>    return current instead of a scaled-up copy of the surface flow. The
+>    compensation strength (`oceanPkRatio`, default 0.55× top) and a small
+>    direct abyssal term (`oceanAbyssRatio`, default 0.12×) are both exposed as
+>    tuning knobs.
+> 2. **Vertical mixing was asymmetric** (`900·max(0, ρ_top-ρ_deep)`), so it only
+>    accelerated sinking at the poles and never helped warm water upwell.
+>    Changed to `900·abs(Δρ)` so either sign of instability stirs the column.
+> 3. **Vertical momentum exchange between the ocean layers had the mass
+>    weighting backwards**: the (thick, high-inertia) deep layer absorbed the
+>    *full* top/deep velocity difference every mixing event while the (thin,
+>    low-inertia) top layer lost almost none of it — literally the opposite of
+>    what a 200 m vs 800 m layer-thickness ratio implies. It's now a
+>    mass-conserving exchange weighted `0.8` (top) / `0.2` (deep), matching the
+>    same 200 m/800 m assumption already used for the pressure terms and for
+>    heat/salt exchange.
+> 4. **Air–sea wind stress violated momentum conservation**: the ocean got the
+>    *full* impulse and the air lost only 2% of it, pumping spurious kinetic
+>    energy into the ocean and letting wind-driven currents overpower the
+>    thermohaline signal. Fixed to a proper mass-weighted Newton's-3rd-law
+>    exchange: `massRatio = (ρ_air·H_air)/(ρ_water·H_top) ≈ 1/37`, so
+>    `airVel -= dstress; topVel += dstress·massRatio` — the ocean now barely
+>    notices a gust that fully decelerates the wind, as it should.
+> 5. **Rotation was a single overloaded parameter.** `omega` fed the Coriolis
+>    term directly, so "locking" the planet for the tidal experiment (`omega=0`)
+>    also silently killed Coriolis — but a real tidally-locked planet still
+>    rotates once per orbit in inertial space and keeps a (weak) Coriolis
+>    force. Split into:
+>    * `omegaSpin` — physical rotation rate, feeds Coriolis only.
+>    * `omegaOrbit` — angular rate of the sub-solar point (day/night cycle),
+>      used only in `sunDir()`.
+>    A "Tidally locked (freeze sun)" checkbox sets `omegaOrbit = 0` while
+>    leaving `omegaSpin` (and therefore Coriolis) untouched.
+> 
+> One item from an earlier LLM-authored refactor pass was deliberately **not**
+> taken: switching the globe's per-*vertex* field sampling to a per-*fragment*
+> nearest-cell lookup (mirroring the equirectangular particle lookup texture).
+> That would replace the smooth barycentric blend the rasteriser already gives
+> across each triangle with a hard-edged Voronoi mosaic — i.e. it makes the
+> hex-cell structure *more* visible, not less. Instead, faceting is reduced by
+> (a) defaulting to subdivision **L6** (~41k cells) and (b) blending each
+> vertex's value with a light-weight average of its 1-ring neighbours before
+> rasterisation — cheap (a handful of extra `texelFetch` per vertex, done once,
+> not per pixel), resolution-independent, and it actually softens the cell
+> boundaries instead of hardening them.
