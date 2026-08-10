@@ -137,9 +137,14 @@ function normalizePreset(src) {
    and the sub-solar point, so an old preset/save maps onto both new keys. */
 function migrateKeys(m) {
   if (!m || m.omega === undefined) return m;
-  var out = {}, k;
+  var out = {}, k, o = m.omega || {};
   for (k in m) if (k !== 'omega') out[k] = m[k];
-  if (out.omegaSpin === undefined) out.omegaSpin = m.omega;
-  if (out.omegaOrbit === undefined) out.omegaOrbit = m.omega;
+  // Copy the value (and the legacy bounds, which only ever applied to the
+  // rotation-rate slider) onto the spin key; give the sun-rate key the value
+  // only, so it keeps its own schema bounds. Separate objects: never alias.
+  if (out.omegaSpin === undefined) {
+    out.omegaSpin = { v: o.v, min: o.min, max: o.max, step: o.step };
+  }
+  if (out.omegaOrbit === undefined) out.omegaOrbit = { v: o.v };
   return out;
 }

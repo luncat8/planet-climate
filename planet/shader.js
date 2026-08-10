@@ -446,12 +446,18 @@ void main(){
 
   float rt = -0.00017*(Ts-283.0) + 0.00078*(St-35.0);
   float rd = -0.00017*(Td-283.0) + 0.00078*(Sd-35.0);
-  // Mixing rate: a background rate everywhere plus enhancement from *either*
-  // sign of instability (abs, not max(0,..)) -- unstable stratification can
-  // arise either from surface cooling/salting (classic polar sinking) or from
-  // the deep layer locally out-densifying the surface, and both should stir the
-  // column, letting warm regions upwell instead of only ever sinking.
-  float mix_ = clamp((uThermo*(1.0 + 900.0*abs(rt-rd)))*uDt, 0.0, 0.25);
+  // Mixing rate: a background rate everywhere, plus enhancement from *either*
+  // sign of instability -- but strongly asymmetric. Unstable stratification
+  // (top denser than deep: polar cooling/salting) drives real convective
+  // overturning and gets the large coefficient; a stable column still exchanges
+  // (weak diapycnal mixing / upwelling, so warm regions can upwell instead of
+  // only ever sinking at the poles) but ~20x more slowly. Weighting both signs
+  // equally would let stable tropical columns mix at a convective rate and
+  // destroy the very surface-deep density contrast that drives the overturning.
+  float dRho = rt - rd;                        // > 0 = top denser = unstable
+  float unstableK = 900.0*max(0.0,  dRho);     // convective overturning
+  float stableK   =  40.0*max(0.0, -dRho);     // background diapycnal / upwelling
+  float mix_ = clamp((uThermo*(1.0 + unstableK + stableK))*uDt, 0.0, 0.25);
   // Mass-(thickness-)weighted exchange, consistent with the 200 m / 800 m
   // top/deep depths assumed elsewhere: the thin top layer responds ~4x more per
   // unit of heat/salt/momentum exchanged, so the deep ocean acts as a slow,
@@ -640,12 +646,18 @@ void main(){
   // rasteriser already gives across each triangle). Instead we pre-blend a
   // little of the 1-ring neighbourhood into each vertex value here: cheap (a
   // few extra texelFetch per vertex, not per pixel) and resolution-independent.
+  // Neighbours on the other side of a coastline are skipped: land cells hold
+  // frozen ocean state (and vice versa), so blending across the boundary would
+  // smear a false halo along every coast in the SST/salinity/current views.
   float v0 = sampleVal(cell);
+  float land0 = cb.w;
   float vAcc = 0.0, wAcc = 0.0;
   for(int k=0;k<6;k++){
     vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
     if(na.w < 0.5) continue;
-    vAcc += sampleVal(int(na.x));
+    int j = int(na.x);
+    if(abs(texelFetch(uCellB, cTex(j), 0).w - land0) > 0.5) continue;
+    vAcc += sampleVal(j);
     wAcc += 1.0;
   }
   float v = wAcc > 0.0 ? mix(v0, vAcc/wAcc, 0.35) : v0;
