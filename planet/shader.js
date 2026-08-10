@@ -30,21 +30,6 @@ var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1 };
 function modeValueSrc(m) {
   return 'float v = ' + (MODE_FIELDS[m] != null ? MODE_FIELDS[m] : MODE_FIELDS[9]) + ';';
 }
-/* Same per-mode expression, wrapped as a function of an arbitrary cell index so
-   the globe vertex shader can also sample its 1-ring neighbours and pre-blend
-   them (softens hex faceting without a per-fragment nearest-cell lookup). */
-function modeSampleFnSrc(m) {
-  return 'float sampleVal(int cell){\n' +
-    '  vec4 wt = texelFetch(uTop,  cTex(cell),0);\n' +
-    '  vec4 la = texelFetch(uLoA,  cTex(cell),0);\n' +
-    '  vec4 lb = texelFetch(uLoB,  cTex(cell),0);\n' +
-    '  vec4 ha = texelFetch(uHiA,  cTex(cell),0);\n' +
-    '  vec4 hb = texelFetch(uHiB,  cTex(cell),0);\n' +
-    '  vec4 wd = texelFetch(uDeep, cTex(cell),0);\n' +
-    '  ' + modeValueSrc(m) + '\n' +
-    '  return v;\n' +
-    '}';
-}
 function modeMagSrc(m) {
   return MODE_MAG[m] ? 'base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));' : '';
 }
@@ -161,35 +146,19 @@ layout(location=1) out vec4 oDeep;
 uniform sampler2D uTop;
 uniform sampler2D uDeep;
 uniform float uDt, uOmega, uNuVel, uNuT, uFricTop, uFricDeep, uAlphaT, uBetaS;
-uniform float uPkTop, uPkDeep, uPkAbyss;
+uniform float uPkTop, uPkDeep;
 
-// buoyancy anomaly: positive = warm/fresh = light
-float buoy(vec4 s){ return uAlphaT*(s.x-283.0) - uBetaS*(s.w-35.0); }
-
-// Top layer: classic reduced-gravity dynamic pressure from its OWN buoyancy
-// (warm/light water "piles up" -> higher sea-surface height -> higher P).
-// This alone drives the expected warm -> cold surface current.
-float oceanPTop(vec4 sTop){ return uPkTop*buoy(sTop); }
-
-// Deep layer: hydrostatic pressure at depth is dominated by the *compensating*
-// signal of whatever water sits above it -- a light/warm top layer means LESS
-// weight overhead, hence LOWER pressure beneath it, not higher. Using the deep
-// layer's own (weak, slowly-diffusing) temperature here previously made both
-// layers respond to the same sign of anomaly, so the deep layer just replayed
-// (and, being scaled up 4x, overpowered) the surface flow instead of returning
-// it. Flipping the sign onto the TOP layer's buoyancy closes the overturning
-// loop into a proper return limb; a small direct term from the deep water's own
-// density adds slow abyssal drift.
-float oceanPDeep(vec4 sDeep, vec4 sTop){ return -uPkDeep*buoy(sTop) + uPkAbyss*buoy(sDeep); }
+float oceanP(vec4 s, float pk){
+  return pk*(uAlphaT*(s.x-283.0) - uBetaS*(s.w-35.0));
+}
 
 vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
-               sampler2D tex, float fric, bool isDeep)
+               sampler2D tex, float fric, float pk, float vmax)
 {
   vec4 s0 = texelFetch(tex, cTex(cell), 0);
-  vec4 top0 = isDeep ? texelFetch(uTop, cTex(cell), 0) : s0;
   vec2 v0 = s0.yz;
   vec2 tr0 = vec2(s0.x, s0.w);
-  float p0 = isDeep ? oceanPDeep(s0, top0) : oceanPTop(s0);
+  float p0 = oceanP(s0, pk);
 
   vec2 gradP = vec2(0.0), lapV = vec2(0.0), advV = vec2(0.0);
   vec2 lapT  = vec2(0.0), advT = vec2(0.0);
@@ -205,13 +174,12 @@ vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
     vec2  nrm = nb.xy;
 
     vec4 sj    = texelFetch(tex,   cTex(j), 0);
-    vec4 topj  = isDeep ? texelFetch(uTop, cTex(j), 0) : sj;
     float landj= texelFetch(uCellB,cTex(j), 0).w;
     float wet  = (1.0-landj)*(1.0-land);
 
     vec2 vj  = xfer(sj.yz, nb.z, nb.w) * (1.0-landj);
     vec2 trj = vec2(sj.x, sj.w);
-    float pj = isDeep ? oceanPDeep(sj, topj) : oceanPTop(sj);
+    float pj = oceanP(sj, pk);
 
     gradP += L*0.5*(pj-p0)*nrm*wet;
     lapV  += (L/d)*(vj-v0)*wet;
@@ -233,7 +201,7 @@ vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
 
   vec2 v1 = (v0 + uDt*acc)/(1.0 + uDt*fric);
   v1 *= (1.0-land);
-  v1 = clamp(v1, vec2(-3.0), vec2(3.0));
+  v1 = clamp(v1, vec2(-vmax), vec2(vmax));
 
   vec2 tr1 = tr0 + uDt*(uNuT*lapT - advT + tr0*div);
   tr1.x = clamp(tr1.x, 200.0, 360.0);
@@ -249,8 +217,8 @@ void main(){
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
-  oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  false);
-  oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, true);
+  oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  uPkTop,  2.5);
+  oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, uPkDeep, 1.2);
 }`;
 
 var AIR_FS = SHADER_HEAD + SHADER_COMMON + `
@@ -345,6 +313,7 @@ uniform vec3  uSun;
 uniform float uSolar, uDayNight, uSeasonDecl;
 uniform float uKsurf, uEvap, uWindStress, uConv, uKrad, uLapse;
 uniform float uThermo, uCloudK, uRainK, uNoise, uGreenhouse;
+uniform float uContK, uHtop, uHdeep;
 
 const float Le   = 2.5e6;
 const float cpA  = 1004.0;
@@ -401,18 +370,12 @@ void main(){
   q  += uDt*evap/(rhoL*Hlo);
   St += uDt*(evap - rain*0.001)*35.0/(1027.0*40.0);
 
-  // Wind stress: Newton's 3rd law, mass-weighted. The ocean top layer (~200 m
-  // of water) has far more inertia per m^2 than the low-air column (~5000 m of
-  // thin air): massRatio = (rhoL*Hlo)/(rho_w*H_top) ~= 1/37, so the SAME
-  // momentum flux barely nudges the ocean but strongly decelerates the wind.
-  // (Previously this was backwards: the ocean got the full impulse and the air
-  // lost only 2%, which pumped spurious kinetic energy into the ocean and let
-  // wind-driven currents overpower the thermohaline signal.)
+  // Mass-weighted wind stress: the same momentum impulse changes the much
+  // lighter air column far more than it changes the ocean mixed layer.
   vec2 rel = vl - vt;
   vec2 dstress = uWindStress*uDt*rel*(1.0-land);
-  float massRatio = (rhoL*Hlo)/(1027.0*200.0);
+  vt += dstress*0.026;
   vl -= dstress;
-  vt += dstress*massRatio;
 
   float win = mix(0.35, 0.12, uGreenhouse);
   Tl -= uDt*win*(100.0 + 1.6*(Tl-273.0))/Ca;
@@ -446,23 +409,28 @@ void main(){
 
   float rt = -0.00017*(Ts-283.0) + 0.00078*(St-35.0);
   float rd = -0.00017*(Td-283.0) + 0.00078*(Sd-35.0);
-  // Mixing rate: a background rate everywhere plus enhancement from *either*
-  // sign of instability (abs, not max(0,..)) -- unstable stratification can
-  // arise either from surface cooling/salting (classic polar sinking) or from
-  // the deep layer locally out-densifying the surface, and both should stir the
-  // column, letting warm regions upwell instead of only ever sinking.
-  float mix_ = clamp((uThermo*(1.0 + 900.0*abs(rt-rd)))*uDt, 0.0, 0.25);
-  // Mass-(thickness-)weighted exchange, consistent with the 200 m / 800 m
-  // top/deep depths assumed elsewhere: the thin top layer responds ~4x more per
-  // unit of heat/salt/momentum exchanged, so the deep ocean acts as a slow,
-  // high-inertia return limb instead of mirroring the surface circulation.
-  const float wTopEx  = 0.8;   // = Hdeep/(Htop+Hdeep), Htop=200 Hdeep=800
-  const float wDeepEx = 0.2;   // = Htop /(Htop+Hdeep)
+  // Bidirectional vertical exchange. Dense surface water over lighter deep
+  // water convects rapidly; the stable case (warm/light on top) still gets a
+  // weaker, nonzero upwelling exchange instead of being switched off.
+  float unstableSink = max(0.0, rt-rd);
+  float stableUpwell = max(0.0, rd-rt);
+  float mix_ = clamp((uThermo*(0.35 + 1000.0*unstableSink + 250.0*stableUpwell))*uDt, 0.0, 0.22);
   float dT = mix_*(Td - Ts), dS = mix_*(Sd - St);
-  Ts += dT*wTopEx;   Td -= dT*wDeepEx;
-  St += dS*wTopEx;   Sd -= dS*wDeepEx;
+  Ts += dT;   Td -= dT*0.22;
+  St += dS;   Sd -= dS*0.22;
   vec2 dvm = 0.12*mix_*(vt - vd);
-  vt -= dvm*wTopEx;  vd += dvm*wDeepEx;
+  vd += dvm; vt -= dvm*0.22;
+
+  // Two-layer continuity closure. With no rigid-lid/Poisson solve the two
+  // layers are otherwise free to transport mass in the same direction. Damp
+  // the net column transport (uHtop*vt + uHdeep*vd -> 0) by nudging the deep
+  // layer, so the deep limb returns flow instead of driving the cell itself.
+  // Driven by uContK, NOT uThermo: continuity is a structural constraint and
+  // must stay active regardless of the mixing diffusivity.
+  // The clamp keeps the implicit self-damping factor (1 - overturn) positive.
+  vec2 transport = uHtop*vt + uHdeep*vd;
+  float overturn = clamp((0.10 + 650.0*unstableSink + 120.0*stableUpwell)*uContK*uDt, 0.0, 0.25);
+  vd -= overturn*transport/uHdeep;
 
   float nz = hash21(vec2(float(cell), floor(uTime*0.37)))-0.5;
   Tl += uNoise*nz;
@@ -625,31 +593,18 @@ uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB;
 uniform mat4 uMVP;
 uniform float uRelief;
 out vec3 vN; out float vVal; out float vLand; out float vCloud; out vec3 vPos;
-${modeSampleFnSrc(m)}
 void main(){
   int cell = gl_VertexID;
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz);
+  vec4 wt = texelFetch(uTop, cTex(cell),0);
+  vec4 la = texelFetch(uLoA, cTex(cell),0);
   vec4 lb = texelFetch(uLoB, cTex(cell),0);
+  vec4 ha = texelFetch(uHiA, cTex(cell),0);
   vec4 hb = texelFetch(uHiB, cTex(cell),0);
-
-  // Each vertex IS a simulation cell, so a raw per-vertex read reproduces the
-  // hard Voronoi cell boundaries exactly (a per-FRAGMENT nearest-cell lookup
-  // would be no better -- it removes the smooth barycentric blend the
-  // rasteriser already gives across each triangle). Instead we pre-blend a
-  // little of the 1-ring neighbourhood into each vertex value here: cheap (a
-  // few extra texelFetch per vertex, not per pixel) and resolution-independent.
-  float v0 = sampleVal(cell);
-  float vAcc = 0.0, wAcc = 0.0;
-  for(int k=0;k<6;k++){
-    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
-    if(na.w < 0.5) continue;
-    vAcc += sampleVal(int(na.x));
-    wAcc += 1.0;
-  }
-  float v = wAcc > 0.0 ? mix(v0, vAcc/wAcc, 0.35) : v0;
-
+  vec4 wd = texelFetch(uDeep, cTex(cell),0);
+${modeValueSrc(m)}
   vVal = clamp(v, 0.0, 1.0);
   vLand = cb.w;
   vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
@@ -697,20 +652,8 @@ out float vC; out float vR; out vec3 vN;
 void main(){
   int cell = gl_VertexID;
   vec3 n = normalize(texelFetch(uCellA, cTex(cell),0).xyz);
-  // 1-ring pre-blend, as in GLOBE_VS: softens hex faceting of the cloud deck.
-  float c0 = texelFetch(uLoB, cTex(cell),0).y;
-  float r0 = texelFetch(uHiB, cTex(cell),0).y;
-  float cAcc = 0.0, rAcc = 0.0, wAcc = 0.0;
-  for(int k=0;k<6;k++){
-    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
-    if(na.w < 0.5) continue;
-    int j = int(na.x);
-    cAcc += texelFetch(uLoB, cTex(j),0).y;
-    rAcc += texelFetch(uHiB, cTex(j),0).y;
-    wAcc += 1.0;
-  }
-  vC = clamp(wAcc > 0.0 ? mix(c0, cAcc/wAcc, 0.4) : c0, 0.0, 1.0);
-  vR = clamp(wAcc > 0.0 ? mix(r0, rAcc/wAcc, 0.4) : r0, 0.0, 2.0);
+  vC = clamp(texelFetch(uLoB, cTex(cell),0).y, 0.0, 1.0);
+  vR = clamp(texelFetch(uHiB, cTex(cell),0).y, 0.0, 2.0);
   vN = n;
   gl_Position = uMVP*vec4(n*uShellR, 1.0);
 }`;

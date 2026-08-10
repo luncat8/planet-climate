@@ -8,15 +8,12 @@ var PARAMS = {
   // tunable (have min/max/step) -> become sliders
   dt:        { label: 'Timestep dt',          default: 120,   min: 120, max: 1800, step: 60,   fmt: function (v) { return v + ' s'; } },
   substeps:  { label: 'Substeps / frame',     default: 4,     min: 1,   max: 8,    step: 1 },
-  /* Physical spin rate (rad/s) — drives the real 3-D Coriolis force. A tidally
-     locked planet still rotates once per orbit in the inertial frame, so this
-     should generally stay non-zero even when omegaOrbit = 0. */
+  /* Spin and apparent solar drift are separate knobs. `omegaSpin` is the
+     physical rotation rate that feeds Coriolis; `omegaOrbit` is how fast the
+     sub-solar point travels in the co-rotating surface frame. A tidally locked
+     test sets omegaOrbit = 0 while keeping omegaSpin > 0. */
   omegaSpin: { label: 'Spin Ω (Coriolis)',    default: 7.292e-5, min: 0, max: 3.6e-4, step: 1e-6, fmt: function (v) { return (v / 7.292e-5).toFixed(2) + '× Earth'; } },
-  /* Apparent angular rate (rad/s) of the sub-solar point sliding across the
-     surface — i.e. the day/night cycle. Independent of omegaSpin: set to 0 to
-     freeze the sun (tidal lock) while Coriolis keeps spinning. */
-  omegaOrbit:{ label: 'Sun angular rate',     default: 6.2831853 / 86400, min: 0, max: 3e-4, step: 1e-6,
-               fmt: function (v) { return v > 1e-8 ? (6.2831853 / v / 3600).toFixed(1) + ' h/day' : 'frozen (locked)'; } },
+  omegaOrbit:{ label: 'Solar drift Ω',        default: 7.292e-5, min: 0, max: 3.6e-4, step: 1e-6, fmt: function (v) { return (v / 7.292e-5).toFixed(2) + '× day'; } },
   solar:     { label: 'Solar constant',       default: 1361,  min: 800, max: 2000, step: 10,   fmt: function (v) { return v + ' W/m²'; } },
   greenhouse:{ label: 'Greenhouse',           default: 0.55,  min: 0,   max: 1,    step: 0.01 },
   nuVelAir:  { label: 'Air viscosity ν',      default: 1.6e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
@@ -27,17 +24,16 @@ var PARAMS = {
   lapse:     { label: 'Reference lapse ΔT',   default: 45,    min: 20,  max: 70,   step: 1,    fmt: function (v) { return v + ' K'; } },
   evap:      { label: 'Evaporation k',        default: 0.005, min: 0,   max: 0.02, step: 0.0005, fmt: function (v) { return v.toFixed(4); } },
   kSurf:     { label: 'Sensible heat k',      default: 22,    min: 0,   max: 60,   step: 1,    fmt: function (v) { return v + ' W/m²K'; } },
-  windStress:{ label: 'Wind stress (air-side)', default: 2e-6, min: 0, max: 1e-5, step: 1e-7, fmt: function (v) { return v.toExponential(1); } },
+  windStress:{ label: 'Wind stress',          default: 1.4e-6, min: 0,   max: 8e-6, step: 1e-7, fmt: function (v) { return v.toExponential(1); } },
   thermo:    { label: 'Thermohaline mixing',  default: 2e-7,  min: 0,   max: 2e-6, step: 2e-8, fmt: function (v) { return v.toExponential(1); } },
-  /* Deep-ocean pressure compensation strength, as a fraction of uPkTop. The
-     deep layer's pressure is driven by the NEGATIVE of the surface layer's
-     buoyancy (a light/warm column above means lower pressure below it) — this
-     is what turns the deep layer into a genuine return limb instead of an
-     independent (and, if too strong, dominant) buoyancy-driven flow. */
-  oceanPkRatio:    { label: 'Deep return strength', default: 0.55, min: 0, max: 1.2, step: 0.02, fmt: function (v) { return v.toFixed(2); } },
-  /* Small direct contribution of the deep layer's OWN density field to its
-     pressure (abyssal circulation), as a fraction of uPkTop. */
-  oceanAbyssRatio: { label: 'Abyssal own-density',  default: 0.12, min: 0, max: 0.5, step: 0.01, fmt: function (v) { return v.toFixed(2); } },
+  /* Rate of the two-layer continuity closure that damps net column transport.
+     Deliberately independent of `thermo`: continuity is a structural constraint,
+     not a mixing process, so changing the diffusivity must not switch it off. */
+  contK:     { label: 'Continuity closure',   default: 4e-6,  min: 0,   max: 2e-5, step: 2e-7, fmt: function (v) { return v.toExponential(1); } },
+  /* Axial tilt driving the seasonal declination cycle. Set to 0 for a steady
+     experiment: with tilt the sub-solar point still migrates in latitude even
+     when its longitude is pinned by omegaOrbit = 0. */
+  obliquity: { label: 'Obliquity',            default: 0.4084, min: 0,  max: 0.6,  step: 0.005, fmt: function (v) { return (v * 57.2958).toFixed(1) + '°'; } },
   nuVelOcean:{ label: 'Ocean viscosity',      default: 6e3,   min: 0,   max: 4e4,  step: 1e3,  fmt: function (v) { return v.toExponential(1); } },
   cloudK:    { label: 'Cloud sensitivity',    default: 1.7,   min: 0,   max: 4,    step: 0.05 },
   noise:     { label: 'Symmetry-break noise', default: 0.02,  min: 0,   max: 0.2,  step: 0.005 },
@@ -66,17 +62,23 @@ var BUILTIN_PRESETS = {
   'Default': null, // sentinel: means "restore defaults"
   'Earth-like': {
     dt: { v: 300 }, solar: { v: 1361 }, greenhouse: { v: 0.55 },
-    omegaSpin: { v: 7.292e-5 }, omegaOrbit: { v: 6.2831853 / 86400 },
+    omegaSpin: { v: 7.292e-5 }, omegaOrbit: { v: 7.292e-5 },
     evap: { v: 0.005 }, cloudK: { v: 1.7 }, noise: { v: 0.02 },
   },
   'Slow rotation': {
     omegaSpin: { v: 1.8e-5, min: 0, max: 3.6e-4, step: 1e-6 },
-    omegaOrbit: { v: 1.8e-5, min: 0, max: 3e-4, step: 1e-6 },
+    omegaOrbit: { v: 1.8e-5, min: 0, max: 3.6e-4, step: 1e-6 },
     lapse: { v: 55 }, conv: { v: 9e-6 },
   },
-  'Tidally locked': {
-    omegaSpin: { v: 7.292e-5 }, omegaOrbit: { v: 0 },
-    lapse: { v: 55 },
+  /* Coriolis stays on, the sub-solar point is fully pinned (longitude via
+     omegaOrbit = 0, latitude via obliquity = 0): isolates the buoyancy-driven
+     overturning without also killing rotation, and admits a true steady state. */
+  'Tidal-lock test': {
+    omegaSpin: { v: 7.292e-5 }, omegaOrbit: { v: 0 }, obliquity: { v: 0 }, dayNight: { v: 1 },
+  },
+  /* Omega = 0 everywhere: pure thermohaline, no rotation, no seasonal cycle. */
+  'Non-rotating (THC)': {
+    omegaSpin: { v: 0 }, omegaOrbit: { v: 0 }, obliquity: { v: 0 }, dayNight: { v: 0 },
   },
   'Hothouse': {
     solar: { v: 1700 }, greenhouse: { v: 0.85 }, evap: { v: 0.012, min: 0, max: 0.03, step: 0.0005 },
@@ -113,7 +115,15 @@ function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
 /* Normalize a preset source into a keyed map { key: { v?, min?, max?, step? } }.
    Accepts either an object keyed by param key, or an array of entries each
-   carrying a `key` field. */
+   carrying a `key` field. Legacy presets using a single `omega` key are
+   expanded into `omegaSpin` + `omegaOrbit`. */
+function migrateOmega(m) {
+  if (m && m.omega && !m.omegaSpin && !m.omegaOrbit) {
+    m.omegaSpin = m.omega;
+    m.omegaOrbit = m.omega;
+  }
+  return m;
+}
 function normalizePreset(src) {
   if (!src) return {};
   if (Array.isArray(src)) {
@@ -128,18 +138,9 @@ function normalizePreset(src) {
         m[e.key] = o;
       }
     });
-    return migrateKeys(m);
+    return migrateOmega(m);
   }
-  return migrateKeys(src);
-}
-
-/* Backwards compatibility: the old single `omega` drove BOTH the Coriolis term
-   and the sub-solar point, so an old preset/save maps onto both new keys. */
-function migrateKeys(m) {
-  if (!m || m.omega === undefined) return m;
-  var out = {}, k;
-  for (k in m) if (k !== 'omega') out[k] = m[k];
-  if (out.omegaSpin === undefined) out.omegaSpin = m.omega;
-  if (out.omegaOrbit === undefined) out.omegaOrbit = m.omega;
-  return out;
+  var copy = {};
+  Object.keys(src).forEach(function (k) { copy[k] = src[k]; });
+  return migrateOmega(copy);
 }

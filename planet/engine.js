@@ -34,6 +34,26 @@ var m4 = {
   },
 };
 
+/* =================== ocean layer geometry =================== */
+/* Single source of truth for the two ocean layers. Both the baroclinic
+   pressure scales and the continuity-closure transport weights are derived
+   from these thicknesses, so the dynamics and the closure cannot disagree
+   about how thick each layer is.
+
+   `pkEffTop` / `pkEffDeep` are baroclinic efficiencies: the fraction of the
+   full g·ρ₀·H scale that actually drives each layer. The deep layer is given a
+   much smaller efficiency so it acts as the return limb instead of
+   out-accelerating the surface down the same equator->pole density gradient. */
+var OCEAN_LAYER = {
+  Htop: 90.0,      // surface / mixed-layer thickness (m)
+  Hdeep: 760.0,    // deep layer thickness (m)
+  rho0: 1027.0,
+  pkEffTop: 2.0,   // -> effective pressure depth 180 m
+  pkEffDeep: 0.037 // -> effective pressure depth  28 m
+};
+OCEAN_LAYER.pkTop = 9.81 * OCEAN_LAYER.Htop * OCEAN_LAYER.pkEffTop * OCEAN_LAYER.rho0;
+OCEAN_LAYER.pkDeep = 9.81 * OCEAN_LAYER.Hdeep * OCEAN_LAYER.pkEffDeep * OCEAN_LAYER.rho0;
+
 /* =================== params =================== */
 /* PARAMS, defaultParams(), boundsOf(), setBound(), clamp() and the preset
    helpers now live in params.js (loaded before this file). Only the per-instance
@@ -316,24 +336,24 @@ Planet.prototype.couple = function () {
       .f('uKsurf', P.kSurf).f('uEvap', P.evap).f('uWindStress', P.windStress)
       .f('uConv', P.conv).f('uKrad', P.kRad).f('uLapse', P.lapse)
       .f('uThermo', P.thermo).f('uCloudK', P.cloudK).f('uRainK', P.rainK)
+      .f('uContK', P.contK)
+      .f('uHtop', OCEAN_LAYER.Htop).f('uHdeep', OCEAN_LAYER.Hdeep)
       .f('uNoise', P.noise).f('uGreenhouse', P.greenhouse);
     self.fullscreen(pair[0], W, H);
   });
 };
 
 Planet.prototype.decl = function () {
-  return 0.4084 * Math.sin((this.simTime / (365 * 86400)) * 6.2831853);
+  // obliquity = 0 removes the seasonal cycle entirely (steady-state experiments)
+  return this.params.obliquity * Math.sin((this.simTime / (365 * 86400)) * 6.2831853);
 };
 Planet.prototype.sunDir = function () {
   var d = this.decl();
-  
-  // omegaOrbit alone controls how fast the sub-solar point slides across the
-  // surface (the day/night cycle) — independent of omegaSpin, which only feeds
-  // the Coriolis term. Set omegaOrbit = 0 to freeze the sun entirely (tidal
-  // lock) while keeping a physically-motivated Coriolis force from the
-  // planet's real rotation.
+
+  // omegaOrbit is the apparent angular speed of the sun in the surface frame.
+  // Tidal-lock test: omegaSpin > 0 for Coriolis, omegaOrbit = 0 for a fixed sun.
   var lon = this.params.omegaOrbit * this.simTime;
-  
+
   return [Math.cos(d) * Math.cos(lon), Math.sin(d), Math.cos(d) * Math.sin(lon)];
 };
 
@@ -341,7 +361,6 @@ Planet.prototype.step = function () {
   var W = this.grid.W, H = this.grid.H;
   var P = this.params;
 
-  var pkTop = 9.81 * 200 * 1027;
   var po = this.prog.ocean.use();
   this.gridUniforms(po);
   po.tex('uTop', this.A[0]).tex('uDeep', this.A[1])
@@ -349,9 +368,9 @@ Planet.prototype.step = function () {
     .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
     .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
     .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
-    .f('uPkTop', pkTop)
-    .f('uPkDeep', pkTop * P.oceanPkRatio)
-    .f('uPkAbyss', pkTop * P.oceanAbyssRatio);
+    // Per-layer dynamic-pressure scale, derived from OCEAN_LAYER so the deep
+    // layer cannot become the dominant (inverted) limb.
+    .f('uPkTop', OCEAN_LAYER.pkTop).f('uPkDeep', OCEAN_LAYER.pkDeep);
   this.fullscreen('dynO', W, H);
 
   var pa = this.prog.air.use();
