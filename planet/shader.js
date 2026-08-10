@@ -142,27 +142,54 @@ void main(){
 var OCEAN_FS = SHADER_HEAD + SHADER_COMMON + `
 layout(location=0) out vec4 oTop;
 layout(location=1) out vec4 oDeep;
+layout(location=2) out vec4 oEta;
 
-uniform sampler2D uTop;
-uniform sampler2D uDeep;
-uniform float uDt, uOmega, uNuVel, uNuT, uFricTop, uFricDeep, uAlphaT, uBetaS;
-uniform float uPkTop, uPkDeep;
+uniform sampler2D uTop, uDeep, uEta;
+uniform float uDt, uOmega, uNuVel, uNuT, uFricTop, uFricDeep;
+uniform float uAlphaT, uBetaS, uGrav, uRho0, uH1, uH2;
+uniform float uConv, uDiap, uKface, uEtaDamp, uGInt;
 
-float oceanP(vec4 s, float pk){
-  return pk*(uAlphaT*(s.x-283.0) - uBetaS*(s.w-35.0));
+const float T0 = 283.0, S0 = 35.0;
+// Background stable stratification (deep denser than surface). Reduced gravity
+// uses a FIXED positive value so the baroclinic coupling sign never flips where
+// the local surface happens to be denser than the deep (the sinking poles).
+const float GSTRAT = 2.0;
+
+// density anomaly: positive when water is colder / saltier (i.e. denser)
+float rhoAnom(float T, float S){
+  return uBetaS*(S - S0) - uAlphaT*(T - T0);
 }
 
-vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
-               sampler2D tex, float fric, float pk)
-{
-  vec4 s0 = texelFetch(tex, cTex(cell), 0);
-  vec2 v0 = s0.yz;
-  vec2 tr0 = vec2(s0.x, s0.w);
-  float p0 = oceanP(s0, pk);
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oTop = vec4(0.0); oDeep = vec4(0.0); oEta = vec4(0.0); return; }
+  vec4 ca = texelFetch(uCellA, cTex(cell), 0);
+  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+  vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
+  float area = ca.w, land = cb.w;
 
-  vec2 gradP = vec2(0.0), lapV = vec2(0.0), advV = vec2(0.0);
-  vec2 lapT  = vec2(0.0), advT = vec2(0.0);
-  float div = 0.0;
+  vec4 wt = texelFetch(uTop,  cTex(cell), 0);
+  vec4 wd = texelFetch(uDeep, cTex(cell), 0);
+  vec4 we = texelFetch(uEta,  cTex(cell), 0);
+  float eta0 = we.x, etai0 = we.y;
+
+  vec2 T1 = vec2(wt.x, wt.w);   // surface layer (temperature, salinity)
+  vec2 T2 = vec2(wd.x, wd.w);   // deep layer    (temperature, salinity)
+  vec2 u1 = wt.yz, u2 = wd.yz;
+  float r1 = uRho0 + rhoAnom(T1.x, T1.y);
+  float r2 = uRho0 + rhoAnom(T2.x, T2.y);
+
+  // shared (barotropic) free-surface gradient and (baroclinic) interface gradient
+  vec2 gradEta = vec2(0.0), gradEtaI = vec2(0.0);
+  vec2 lapV1 = vec2(0.0), advV1 = vec2(0.0);
+  vec2 lapV2 = vec2(0.0), advV2 = vec2(0.0);
+  vec2 lapT1 = vec2(0.0), advT1 = vec2(0.0);
+  vec2 lapT2 = vec2(0.0), advT2 = vec2(0.0);
+  float div1 = 0.0, div2 = 0.0;       // velocity divergence (advection correction)
+  float div1h = 0.0, div2h = 0.0;      // transport divergence (mass continuity)
+
+  float h1 = uH1 + eta0 - etai0;
+  float h2 = uH2 + etai0;
 
   for(int k=0;k<6;k++){
     vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
@@ -173,52 +200,124 @@ vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
     vec4  nb = texelFetch(uNbrB, nTex(cell,k), 0);
     vec2  nrm = nb.xy;
 
-    vec4 sj    = texelFetch(tex,   cTex(j), 0);
-    float landj= texelFetch(uCellB,cTex(j), 0).w;
-    float wet  = (1.0-landj)*(1.0-land);
+    vec4 ct = texelFetch(uTop,  cTex(j), 0);
+    vec4 cd = texelFetch(uDeep, cTex(j), 0);
+    vec4 ce = texelFetch(uEta,  cTex(j), 0);
+    float landj = texelFetch(uCellB, cTex(j), 0).w;
+    float wet = (1.0-landj)*(1.0-land);
 
-    vec2 vj  = xfer(sj.yz, nb.z, nb.w) * (1.0-landj);
-    vec2 trj = vec2(sj.x, sj.w);
-    float pj = oceanP(sj, pk);
+    float etaj = ce.x, etaij = ce.y;
+    vec2 u1j = ct.yz, u2j = cd.yz;
+    vec2 T1j = vec2(ct.x, ct.w), T2j = vec2(cd.x, cd.w);
 
-    gradP += L*0.5*(pj-p0)*nrm*wet;
-    lapV  += (L/d)*(vj-v0)*wet;
-    lapT  += (L/d)*(trj-tr0);
-    float un = 0.5*dot(v0+vj, nrm)*wet;
-    div  += L*un;
-    float w = un > 0.0 ? 0.0 : 1.0;
-    advT += L*un*mix(tr0, trj, w);
-    advV += L*un*mix(v0,  vj,  w);
+    float h1j = uH1 + etaj - etaij;
+    float h2j = uH2 + etaij;
+
+    gradEta  += L*0.5*(etaj  - eta0 )*nrm*wet;
+    gradEtaI += L*0.5*(etaij - etai0)*nrm*wet;
+
+    lapV1 += (L/d)*(u1j - u1)*wet;
+    lapV2 += (L/d)*(u2j - u2)*wet;
+    lapT1 += (L/d)*(T1j - T1);
+    lapT2 += (L/d)*(T2j - T2);
+
+    // velocity divergence (advection correction) and transport divergence (mass)
+    float un1 = 0.5*dot(u1 + u1j, nrm)*wet;
+    float un2 = 0.5*dot(u2 + u2j, nrm)*wet;
+    div1 += L*un1;
+    div2 += L*un2;
+    float un1h = 0.5*dot(h1*u1 + h1j*u1j, nrm)*wet;
+    float un2h = 0.5*dot(h2*u2 + h2j*u2j, nrm)*wet;
+    div1h += L*un1h;
+    div2h += L*un2h;
+    float w1 = un1 > 0.0 ? 0.0 : 1.0;
+    float w2 = un2 > 0.0 ? 0.0 : 1.0;
+    advV1 += L*un1*mix(u1,  u1j,  w1);
+    advV2 += L*un2*mix(u2,  u2j,  w2);
+    advT1 += L*un1*mix(T1,  T1j,  w1);
+    advT2 += L*un2*mix(T2,  T2j,  w2);
   }
 
   float ia = 1.0/area;
-  gradP *= ia; lapV *= ia; lapT *= ia; advV *= ia; advT *= ia; div *= ia;
+  gradEta *= ia; gradEtaI *= ia;
+  lapV1 *= ia; lapV2 *= ia; lapT1 *= ia; lapT2 *= ia;
+  advV1 *= ia; advV2 *= ia; advT1 *= ia; advT2 *= ia;
+  div1  *= ia; div2  *= ia;
+  div1h *= ia; div2h *= ia;
 
-  vec2 acc = -gradP/1027.0 + uNuVel*lapV - advV + v0*div;
-  vec3 v3 = v0.x*e1 + v0.y*e2;
-  vec3 c3 = -2.0*cross(vec3(0.0,uOmega,0.0), v3);
-  acc += vec2(dot(c3,e1), dot(c3,e2));
+  // Momentum: in this explicit, Poisson-free model we use a rigid-lid style where
+  // the shared free-surface pressure gradient is suppressed (it would otherwise
+  // dominate the weak baroclinic signal and re-invert the cell). The circulation
+  // is driven by the BAROCLINIC interface term, which enters the two layers with
+  // OPPOSITE sign (reduced gravity): surface poleward, deep equatorward.
+  float gprime = uGInt*uGrav*GSTRAT/uRho0;
+  vec2 acc1 = gprime*gradEtaI
+            + uNuVel*lapV1 - advV1 + u1*div1;
+  vec2 acc2 = -(r1/r2)*gprime*gradEtaI
+            + uNuVel*lapV2 - advV2 + u2*div2;
+  // interfacial drag: equal-and-opposite momentum exchange between the layers
+  acc1 += -uKface*(u1 - u2);
+  acc2 += -uKface*(u2 - u1);
 
-  vec2 v1 = (v0 + uDt*acc)/(1.0 + uDt*fric);
-  v1 *= (1.0-land);
-  v1 = clamp(v1, vec2(-3.0), vec2(3.0));
+  // Coriolis (rotation, Omega = 0 in the locked-rotation test)
+  vec3 v3a = u1.x*e1 + u1.y*e2;
+  vec3 v3b = u2.x*e1 + u2.y*e2;
+  vec3 c3a = -2.0*cross(vec3(0.0,uOmega,0.0), v3a);
+  vec3 c3b = -2.0*cross(vec3(0.0,uOmega,0.0), v3b);
+  acc1 += vec2(dot(c3a,e1), dot(c3a,e2));
+  acc2 += vec2(dot(c3b,e1), dot(c3b,e2));
 
-  vec2 tr1 = tr0 + uDt*(uNuT*lapT - advT + tr0*div);
-  tr1.x = clamp(tr1.x, 200.0, 360.0);
-  tr1.y = clamp(tr1.y, 5.0, 60.0);
-  if(any(isnan(v1))) v1 = vec2(0.0);
-  if(any(isnan(tr1))) tr1 = tr0;
-  return vec4(tr1.x, v1, tr1.y);
-}
+  vec2 u1n = (u1 + uDt*acc1)/(1.0 + uDt*uFricTop);
+  vec2 u2n = (u2 + uDt*acc2)/(1.0 + uDt*uFricDeep);
+  u1n *= (1.0-land); u2n *= (1.0-land);
+  u1n = clamp(u1n, vec2(-3.0), vec2(3.0));
+  u2n = clamp(u2n, vec2(-3.0), vec2(3.0));
 
-void main(){
-  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
-  if(cell >= uCount){ oTop = vec4(0.0); oDeep = vec4(0.0); return; }
-  vec4 ca = texelFetch(uCellA, cTex(cell), 0);
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
-  vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
-  oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  uPkTop);
-  oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, uPkDeep);
+  vec2 T1n = T1 + uDt*(uNuT*lapT1 - advT1 + T1*div1);
+  vec2 T2n = T2 + uDt*(uNuT*lapT2 - advT2 + T2*div2);
+  T1n.x = clamp(T1n.x, 200.0, 360.0); T1n.y = clamp(T1n.y, 5.0, 60.0);
+  T2n.x = clamp(T2n.x, 200.0, 360.0); T2n.y = clamp(T2n.y, 5.0, 60.0);
+
+  // Continuity (divergence form) -> free surface and interface displacement.
+  //   d(eta)/dt  = -(div h1u1 + div h2u2)   [barotropic / total]
+  //   d(etai)/dt = -(div h2u2)              [interface height]
+  float etaN  = eta0  - uDt*(div1h + div2h);
+  float etaiN = etai0 - uDt*div2h;
+  // gentle damping of the fast barotropic (free-surface) mode keeps the model
+  // stable without a global pressure solve; the baroclinic interface is untouched.
+  etaN -= uDt*uEtaDamp*etaN;
+  etaN  = clamp(etaN,  -20.0, 20.0);
+  etaiN = clamp(etaiN, -uH2 + 1.0, (uH1 + etaN) - 1.0);
+
+  // Conservative vertical mass exchange across the interface (bidirectional).
+  // Convective: surface denser than deep -> downwelling (sinking). Diapycnal: a
+  // gentle relaxation that also drives upwelling elsewhere. F>0 = downwelling.
+  float dr = r1 - r2;
+  float q = 0.0;
+  if(dr > 0.0) q += uConv*dr;     // convective: dense surface sinks (downwelling)
+  q += uDiap*dr;                    // diapycnal: relax stratification (down when unstable,
+                                    // up when stable) -> upwelling elsewhere, closing the cell
+  float h1c = uH1 + etaN - etaiN;
+  float h2c = uH2 + etaiN;
+  float F = clamp(q*uDt, -0.45*h2c, 0.45*h1c);
+  float i1 = 1.0/(h1c - F), i2 = 1.0/(h2c + F);
+  float T1o = (h1c*T1n.x + F*(T2n.x - T1n.x))*i1;
+  float S1o = (h1c*T1n.y + F*(T2n.y - T1n.y))*i1;
+  float T2o = (h2c*T2n.x + F*(T1n.x - T2n.x))*i2;
+  float S2o = (h2c*T2n.y + F*(T1n.y - T2n.y))*i2;
+  vec2 u1o = (h1c*u1n + F*(u2n - u1n))*i1;
+  vec2 u2o = (h2c*u2n + F*(u1n - u2n))*i2;
+  etaiN += F;   // interface moves with the vertical mass flux
+  etaiN = clamp(etaiN, -uH2 + 1.0, (uH1 + etaN) - 1.0);
+
+  if(any(isnan(u1o))) u1o = vec2(0.0);
+  if(any(isnan(u2o))) u2o = vec2(0.0);
+  if(any(isnan(vec2(T1o,S1o)))) { T1o = T1n.x; S1o = T1n.y; }
+  if(any(isnan(vec2(T2o,S2o)))) { T2o = T2n.x; S2o = T2n.y; }
+
+  oTop  = vec4(T1o, u1o, S1o);
+  oDeep = vec4(T2o, u2o, S2o);
+  oEta  = vec4(etaN, etaiN, 0.0, 0.0);
 }`;
 
 var AIR_FS = SHADER_HEAD + SHADER_COMMON + `
@@ -307,12 +406,12 @@ function COUPLE_FS(mode) {
   return SHADER_HEAD + SHADER_COMMON + `
 ${outs}
 
-uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB;
+uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB, uEta;
 uniform float uDt, uTime;
 uniform vec3  uSun;
 uniform float uSolar, uDayNight, uSeasonDecl;
 uniform float uKsurf, uEvap, uWindStress, uConv, uKrad, uLapse;
-uniform float uThermo, uCloudK, uRainK, uNoise, uGreenhouse;
+uniform float uThermo, uCloudK, uRainK, uNoise, uGreenhouse, uRho0;
 
 const float Le   = 2.5e6;
 const float cpA  = 1004.0;
@@ -404,20 +503,21 @@ void main(){
   cloud = mix(cloud, clamp(newCloud, 0.0, 1.0), 0.06);
   rain  = mix(rain, clamp((cond+condl)*uRainK, 0.0, 4.0), 0.10);
 
-  float rt = -0.00017*(Ts-283.0) + 0.00078*(St-35.0);
-  float rd = -0.00017*(Td-283.0) + 0.00078*(Sd-35.0);
-  float mix_ = clamp((uThermo*(1.0 + 900.0*max(0.0, rt-rd)))*uDt, 0.0, 0.25);
-  float dT = mix_*(Td - Ts), dS = mix_*(Sd - St);
-  Ts += dT;   Td -= dT*0.22;
-  St += dS;   Sd -= dS*0.22;
-  vec2 dvm = 0.12*mix_*(vt - vd);
-  vd += dvm; vt -= dvm*0.22;
+  // Vertical mass/tracer exchange between ocean layers is now handled in the
+  // ocean step (conservative, bidirectional). The couple step only applies
+  // surface forcing to the surface layer; the deep layer is passed through.
 
   float nz = hash21(vec2(float(cell), floor(uTime*0.37)))-0.5;
   Tl += uNoise*nz;
 
   float Pl = 101325.0 - 60.0*(Tl - 288.0) + 25.0*(Th - 250.0);
   float Ph = 45000.0  + 75.0*(0.5*(Tl + Th) - 268.0);
+
+  // Freshwater budget: evaporation removes fresh water (raises salinity),
+  // precipitation (rain) returns it (lowers salinity). Uses the surface-layer
+  // thickness so the column salt content is conserved when E == P.
+  float precip = rain * 1.0e-6;                 // fresh-water flux (m/s-ish)
+  St += uDt*(evap - precip)*35.0/(uRho0*1000.0);
 
   Ts = clamp(Ts, 200.0, 360.0);  Td = clamp(Td, 200.0, 360.0);
   Tl = clamp(Tl, 150.0, 360.0);  Th = clamp(Th, 150.0, 360.0);
@@ -426,13 +526,15 @@ void main(){
   vt *= (1.0-land);
 
 ${mode === 'ocean'
-    ? `  oTop  = vec4(Ts, vt, St);
-  oDeep = vec4(Td, vd, Sd);`
+    ? `  vec4 wte = texelFetch(uEta, cTex(cell), 0);
+  oTop  = vec4(Ts, vt, St);
+  oDeep = vec4(Td, vd, Sd);
+  oEta  = wte;`
     : `  oLoA = vec4(vl, Tl, Pl);
   oLoB = vec4(q , cloud, 0.0, 0.0);
   oHiA = vec4(vh, Th, Ph);
   oHiB = vec4(qh, rain, 0.0, 0.0);`}
-}`;
+} `;
 }
 
 var INIT_FS = SHADER_HEAD + SHADER_COMMON + `
@@ -440,6 +542,7 @@ layout(location=0) out vec4 oTop;
 layout(location=1) out vec4 oDeep;
 layout(location=2) out vec4 oLoA;
 layout(location=3) out vec4 oLoB;
+layout(location=4) out vec4 oEta;
 uniform float uSeed;
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -458,6 +561,7 @@ void main(){
   oDeep = vec4(Td, 0.0, 0.0, S+0.3);
   oLoA  = vec4(rn*0.5, rn*0.5, Tl, 101325.0);
   oLoB  = vec4(0.004*c2, 0.0, 0.0, 0.0);
+  oEta  = vec4(0.0, 0.0, 0.0, 0.0);
 }`;
 
 var INIT2_FS = SHADER_HEAD + SHADER_COMMON + `
