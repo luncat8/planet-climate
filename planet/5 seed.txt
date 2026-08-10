@@ -1,3 +1,0 @@
-Use a deterministic seed for init when rebuilding levels, so patterns are more consistent across resolutions.
-
-also seed for Grid(level) to continents also stable
