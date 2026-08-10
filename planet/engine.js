@@ -216,17 +216,24 @@ Planet.prototype.build = function (level) {
   this.texNbrB = this.mkTex(W, H * 6, g.nbrB);
   this.texLookup = this.mkTex(g.lookupW, g.lookupH, g.lookup, 1);
 
+  // State layout (each RGBA32F, ping-ponged A <-> B):
+  //   [0] topS  = (h_top, T_top, S_top, _)
+  //   [1] topV  = (u_top, v_top, _, _)
+  //   [2] deepS = (T_deep, S_deep, _, _)     h_deep = hTotal - h_top (derived)
+  //   [3] deepV = (u_deep, v_deep, _, _)
+  //   [4] loA = (u,v,T,P)  [5] loB = (q,cloud,_,_)
+  //   [6] hiA = (u,v,T,P)  [7] hiB = (q,rain,_,_)
   this.A = []; this.B = [];
-  for (var i = 0; i < 6; i++) {
+  for (var i = 0; i < 8; i++) {
     this.A.push(this.mkTex(W, H, null));
     this.B.push(this.mkTex(W, H, null));
   }
-  this.fbo.dynO = this.mkFbo([this.B[0], this.B[1]]);
-  this.fbo.dynA = this.mkFbo([this.B[2], this.B[3], this.B[4], this.B[5]]);
-  this.fbo.cplO = this.mkFbo([this.A[0], this.A[1]]);
-  this.fbo.cplA = this.mkFbo([this.A[2], this.A[3], this.A[4], this.A[5]]);
-  this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);
-  this.fbo.init2 = this.mkFbo([this.A[4], this.A[5]]);
+  this.fbo.dynO = this.mkFbo([this.B[0], this.B[1], this.B[2], this.B[3]]);
+  this.fbo.dynA = this.mkFbo([this.B[4], this.B[5], this.B[6], this.B[7]]);
+  this.fbo.cplO = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);
+  this.fbo.cplA = this.mkFbo([this.A[4], this.A[5], this.A[6], this.A[7]]);
+  this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);   // ocean
+  this.fbo.init2 = this.mkFbo([this.A[4], this.A[5], this.A[6], this.A[7]]); // air
 
   var pdata = new Float32Array(this.PW * this.PH * 4);
   for (var j = 0; j < this.PW * this.PH; j++) {
@@ -292,7 +299,9 @@ Planet.prototype.reset = function () {
   var W = this.grid.W, H = this.grid.H;
   this.simTime = 0;
   var p = this.prog.init.use();
-  this.gridUniforms(p); p.f('uSeed', Math.random() * 1000);
+  this.gridUniforms(p);
+  p.f('uSeed', Math.random() * 1000)
+    .f('uHtop', this.params.hTop).f('uHtotal', this.params.hTotal);
   this.fullscreen('init', W, H);
   var p2 = this.prog.init2.use();
   this.gridUniforms(p2); p2.f('uSeed', Math.random() * 1000);
@@ -308,15 +317,20 @@ Planet.prototype.couple = function () {
   [['cplO', 'cplO'], ['cplA', 'cplA']].forEach(function (pair) {
     var pr = self.prog[pair[1]].use();
     self.gridUniforms(pr);
-    pr.tex('uTop', src[0]).tex('uDeep', src[1]).tex('uLoA', src[2])
-      .tex('uLoB', src[3]).tex('uHiA', src[4]).tex('uHiB', src[5]);
+    pr.tex('uTopS', src[0]).tex('uTopV', src[1])
+      .tex('uDeepS', src[2]).tex('uDeepV', src[3])
+      .tex('uLoA', src[4]).tex('uLoB', src[5])
+      .tex('uHiA', src[6]).tex('uHiB', src[7]);
     pr.f('uDt', P.dt).f('uTime', self.simTime)
       .v3('uSun', sun[0], sun[1], sun[2])
       .f('uSolar', P.solar).f('uDayNight', P.dayNight).f('uSeasonDecl', self.decl())
       .f('uKsurf', P.kSurf).f('uEvap', P.evap).f('uWindStress', P.windStress)
       .f('uConv', P.conv).f('uKrad', P.kRad).f('uLapse', P.lapse)
       .f('uThermo', P.thermo).f('uCloudK', P.cloudK).f('uRainK', P.rainK)
-      .f('uNoise', P.noise).f('uGreenhouse', P.greenhouse);
+      .f('uNoise', P.noise).f('uGreenhouse', P.greenhouse)
+      .f('uSurfMass', P.surfMass)
+      .f('uVertHeat', P.verticalHeat).f('uVertSalt', P.verticalSalt)
+      .f('uHtot', P.hTotal);
     self.fullscreen(pair[0], W, H);
   });
 };
@@ -341,22 +355,26 @@ Planet.prototype.step = function () {
   var W = this.grid.W, H = this.grid.H;
   var P = this.params;
 
-  var pkTop = 9.81 * 200 * 1027;
+  // Ocean dynamics: flux-form continuity for h_top, pressure gradient
+  // -g*grad(h) on top / +g'*grad(h) on deep, equal-and-opposite inter-layer
+  // drag, then tracer advection + diffusion.  A -> B
   var po = this.prog.ocean.use();
   this.gridUniforms(po);
-  po.tex('uTop', this.A[0]).tex('uDeep', this.A[1])
+  po.tex('uTopS', this.A[0]).tex('uTopV', this.A[1])
+    .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
     .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
     .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
-    .f('uPkTop', pkTop)
-    .f('uPkDeep', pkTop * P.oceanPkRatio)
-    .f('uPkAbyss', pkTop * P.oceanAbyssRatio);
+    .f('uDrag', P.oceanDrag + P.mechanicalFric)
+    .f('uSteric', P.steric).f('uStericRate', P.stericRate)
+    .f('uMassSpring', P.massSpring)
+    .f('uHtot', P.hTotal).f('uHref', P.hTop);
   this.fullscreen('dynO', W, H);
 
   var pa = this.prog.air.use();
   this.gridUniforms(pa);
-  pa.tex('uLoA', this.A[2]).tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
+  pa.tex('uLoA', this.A[4]).tex('uLoB', this.A[5]).tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
     .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelAir).f('uNuT', P.nuTAir)
     .f('uFricLo', P.fricAirLow).f('uFricHi', P.fricAirHigh)
@@ -376,7 +394,7 @@ Planet.prototype.stepParticles = function (dt) {
     var p = this.prog.part.use();
     this.gridUniforms(p);
     p.tex('uPart', src).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[2]).tex('uTop', this.A[0]).tex('uHiA', this.A[4]).tex('uDeep', this.A[1])
+      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH)
       .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', PLANET_R)
       .f('uSeed', Math.random() * 1000)
@@ -427,8 +445,10 @@ Planet.prototype.render = function () {
 
   var g = this.getGlobeProg(P.mode).use();
   this.gridUniforms(g);
-  g.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uLoA', this.A[2])
-    .tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
+  g.tex('uTopS', this.A[0]).tex('uTopV', this.A[1])
+    .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
+    .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
+    .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
     .m4('uMVP', mvp)
     .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
     .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief);
@@ -441,7 +461,7 @@ Planet.prototype.render = function () {
     gl.depthMask(false);
     var cl = this.prog.cloud.use();
     this.gridUniforms(cl);
-    cl.tex('uLoB', this.A[3]).tex('uHiB', this.A[5])
+    cl.tex('uLoB', this.A[5]).tex('uHiB', this.A[7])
       .m4('uMVP', mvp).f('uShellR', 1.02)
       .v3('uSun', sun[0], sun[1], sun[2]).f('uNight', P.nightShading);
     gl.drawElements(gl.TRIANGLES, this.grid.indices.length, gl.UNSIGNED_INT, 0);
@@ -461,7 +481,7 @@ Planet.prototype.render = function () {
     var pp = this.prog.points.use();
     this.gridUniforms(pp);
     pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[2]).tex('uTop', this.A[0]).tex('uHiA', this.A[4]).tex('uDeep', this.A[1])
+      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp).f('uEquirect', 0.0)
       .f('uTrail', P.streamTrail).f('uRadius', PLANET_R)
       .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
@@ -487,8 +507,10 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
 
   var eq = this.getEquiProg(P.mode).use();
   this.gridUniforms(eq);
-  eq.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uLoA', this.A[2])
-    .tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
+  eq.tex('uTopS', this.A[0]).tex('uTopV', this.A[1])
+    .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
+    .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
+    .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
     .tex('uLookup', this.texLookup)
     .v3('uSun', sun[0], sun[1], sun[2])
     .f('uShowLand', P.showLand).f('uNight', P.nightShading);
@@ -502,7 +524,7 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     var cl = this.prog.equiCloud.use();
     this.gridUniforms(cl);
     cl.tex('uLookup', this.texLookup).tex('uCellA', this.texCellA)
-      .tex('uLoB', this.A[3]).tex('uHiB', this.A[5])
+      .tex('uLoB', this.A[5]).tex('uHiB', this.A[7])
       .v3('uSun', sun[0], sun[1], sun[2]).f('uNight', P.nightShading);
     gl.bindVertexArray(this.vaoEmpty);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -521,7 +543,7 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     var pp = this.prog.points.use();
     this.gridUniforms(pp);
     pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[2]).tex('uTop', this.A[0]).tex('uHiA', this.A[4]).tex('uDeep', this.A[1])
+      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
       .f('uTrail', P.streamTrail).f('uRadius', PLANET_R)
       .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)

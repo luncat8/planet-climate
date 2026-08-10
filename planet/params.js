@@ -29,20 +29,44 @@ var PARAMS = {
   kSurf:     { label: 'Sensible heat k',      default: 22,    min: 0,   max: 60,   step: 1,    fmt: function (v) { return v + ' W/m²K'; } },
   windStress:{ label: 'Wind stress (air-side)', default: 2e-6, min: 0, max: 1e-5, step: 1e-7, fmt: function (v) { return v.toExponential(1); } },
   thermo:    { label: 'Thermohaline mixing',  default: 2e-7,  min: 0,   max: 2e-6, step: 2e-8, fmt: function (v) { return v.toExponential(1); } },
-  /* Deep-ocean pressure compensation strength, as a fraction of uPkTop. The
-     deep layer's pressure is driven by the NEGATIVE of the surface layer's
-     buoyancy (a light/warm column above means lower pressure below it) — this
-     is what turns the deep layer into a genuine return limb instead of an
-     independent (and, if too strong, dominant) buoyancy-driven flow. */
-  oceanPkRatio:    { label: 'Deep return strength', default: 0.55, min: 0, max: 1.2, step: 0.02, fmt: function (v) { return v.toFixed(2); } },
-  /* Small direct contribution of the deep layer's OWN density field to its
-     pressure (abyssal circulation), as a fraction of uPkTop. */
-  oceanAbyssRatio: { label: 'Abyssal own-density',  default: 0.12, min: 0, max: 0.5, step: 0.01, fmt: function (v) { return v.toFixed(2); } },
+  /* Inter-layer mechanical drag coefficient (kg/m^3/s). The shear stress
+     tau = (oceanDrag + mechanicalFric) * |u_top - u_deep| * (u_top - u_deep)
+     is applied equally and oppositely to the two layers, weighted by inverse
+     column mass (rho*h), so total ocean momentum is conserved exactly. */
+  oceanDrag:      { label: 'Inter-layer drag r',    default: 2.5e-3, min: 0, max: 2e-2, step: 5e-5, fmt: function (v) { return v.toExponential(1); } },
+  /* Purely mechanical friction between the layers: identical in form to
+     oceanDrag but conceptually independent of the density stratification
+     (unlike the thermohaline exchange). Combined into one effective coeff. */
+  mechanicalFric: { label: 'Mechanical friction',   default: 1e-3, min: 0, max: 5e-3, step: 1e-4, fmt: function (v) { return v.toExponential(1); } },
+  /* Steric (thermal/haline expansion) amplitude, in metres of extra top-layer
+     thickness per unit buoyancy anomaly (alphaT*dT - betaS*dS). This is what
+     turns the T/S field into a sea-surface-height field and hence drives the
+     surface circulation; the deep layer then feels the opposite gradient. */
+  steric:         { label: 'Steric height gain',    default: 500, min: 0, max: 5000, step: 50, fmt: function (v) { return v.toExponential(1); } },
+  /* Rate (1/s) at which h_top relaxes toward its steric equilibrium. */
+  stericRate:     { label: 'Steric relax rate',     default: 1e-6, min: 0, max: 1e-5, step: 1e-7, fmt: function (v) { return v.toExponential(1); } },
+  /* Weak global mass correction (1/s): nudges h_top back toward the reference
+     thickness H_ref so the flux-form continuity integrator cannot drift. */
+  massSpring:     { label: 'Mass spring (global)',  default: 8e-12, min: 0, max: 1e-9, step: 5e-12, fmt: function (v) { return v.toExponential(1); } },
+  /* Extra uniform surface mass forcing on h_top (m/s), on top of E-P. Useful
+     to probe the mass budget; positive thins the top layer. */
+  surfMass:       { label: 'Surface mass forcing',  default: 0, min: -1e-6, max: 1e-6, step: 5e-8, fmt: function (v) { return v.toExponential(1); } },
+  /* Vertical heat exchange coefficient (W/m^2/K): Q = k*(T_deep - T_top),
+     applied symmetrically in heat-content form (top gains, deep loses). */
+  verticalHeat:   { label: 'Vertical heat k',       default: 0.9, min: 0, max: 10, step: 0.05, fmt: function (v) { return v.toFixed(2) + ' W/m²K'; } },
+  /* Vertical salt exchange coefficient (kg/m^2/s per ppt), symmetric. */
+  verticalSalt:   { label: 'Vertical salt k',       default: 5e-7, min: 0, max: 5e-5, step: 5e-7, fmt: function (v) { return v.toExponential(1); } },
   nuVelOcean:{ label: 'Ocean viscosity',      default: 6e3,   min: 0,   max: 4e4,  step: 1e3,  fmt: function (v) { return v.toExponential(1); } },
   cloudK:    { label: 'Cloud sensitivity',    default: 1.7,   min: 0,   max: 4,    step: 0.05 },
   noise:     { label: 'Symmetry-break noise', default: 0.02,  min: 0,   max: 0.2,  step: 0.005 },
   // non-tunable (default only; UI handled by checkboxes / mode / equirect buttons)
   running:        { default: true },
+  /* Ocean geometry: reference top-layer thickness and fixed total depth (m).
+     h_deep = hTotal - h_top is derived, so total ocean volume never changes. */
+  /* ~60 m is a realistic mixed-layer depth; the surface heat capacity is now
+     derived from it (cp*rho*h_top) so heat exchange stays conservative. */
+  hTop:           { default: 60 },
+  hTotal:         { default: 1000 },
   nuTOcean:       { default: 4e3 },
   fricAirHigh:    { default: 2.5e-6 },
   fricOceanTop:   { default: 1.5e-6 },

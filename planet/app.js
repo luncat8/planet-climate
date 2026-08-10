@@ -14,11 +14,12 @@ var LAYER_VIEW = {
     { id: 'humidity', label: 'Hum', title: 'Humidity' },
     { id: 'salinity', label: 'Sal', title: 'Salinity' },
     { id: 'rain', label: 'Rain', title: 'Rain' },
+    { id: 'thick', label: 'h', title: 'Top-layer thickness (m)' },
   ],
   map: {
     highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
     lowAir: { T: 0, P: 2, humidity: 3, speed: 4 },
-    ocean: { T: 1, speed: 5, salinity: 7 },
+    ocean: { T: 1, speed: 5, salinity: 7, thick: 15 },
     deepOcean: { T: 8, speed: 13, salinity: 14 },
   },
 };
