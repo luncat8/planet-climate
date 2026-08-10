@@ -1,0 +1,120 @@
+## The one point they fight over — air–ocean momentum coupling
+
+This is the central disagreement (s37: "critical bug, 50:1 instead of ~1:50"; q36: "false alarm"). **Both are half-wrong.**
+
+The code (`COUPLE_FS`, lines 372–375):
+```glsl
+vec2 rel = vl - vt;
+vec2 dstress = uWindStress*uDt*rel*(1.0-land);
+vt += dstress;        // ocean gains the FULL impulse
+vl -= dstress*0.02;   // air loses 2%
+```
+
+Physically, momentum is conserved across the interface, so the velocity changes scale inversely with `ρ·H`:
+`Δv_air / Δv_ocean = -(ρ_ocean·H_ocean)/(ρ_air·H_air) ≈ -(1027·200)/(1.1·5000) ≈ -37`.
+
+So **the correct ratio is the reverse of what's written**: the *air* should lose ~37× what the *ocean* gains, not the ocean gaining 50× what the air loses. s37 correctly identifies that the direction/magnitude is inverted. **But s37's own proposed fix is broken** — it writes `vl += dstress` (wrong sign) and keeps `vl -= dstress*0.02`, which would *add* momentum to both layers. q36 is right to be wary of applying s37's patch blindly.
+
+In practice it is **not** "critical": the ocean is independently damped by `uFricTop`, so it settles at `vt ≈ 0.04·rel ≈ 1 m/s` (order-correct gyres), and the air's momentum is already removed by the separate `fric` term in `stepAir`. It won't blow up or spin up. The real defect is **non-conservation + wrong asymmetry**, which is a *tuning/realism* issue, not a stability one. The clean fix (verify visually afterward):
+```glsl
+vt += dstress * 0.03;   // ocean gains ~3% (ρ,H ratio)
+vl -= dstress;          // air loses the full impulse
+```
+Low priority — behind resolution and advection sharpening.
+
+## Pressure / Poisson solve — q36 is right, s37 is wrong
+
+s37 demands a pressure-Poisson solve for mass conservation. The model uses **diagnostic hydrostatic pressure** (`Pl = 101325 − 60(Tl−288) + 25(Th−250)`, recomputed every coupling step from temperature) and drives flow by `−∇P/ρ`. There is **no free-surface height** being advected, so there is no incompressibility constraint to enforce. This is the standard primitive-equation / single-layer atmospheric simplification. A Poisson solve here would be wrong overkill. q36 correctly calls this a misunderstanding.
+
+## CFL / stability — both overstate it
+
+q36's headline "critical CFL issue if you raise resolution" is **mostly a false alarm here**, for a specific reason neither review caught: because pressure is *diagnostic* (no dynamic sea-surface height), **there are no fast gravity waves**. The only CFL limit is advective: `dt < Δx / v_max`. At the default `dt=300` (Earth-like preset) and `dt=120` (default):
+- L6 (10k cells, Δx≈111 km): air limit ≈ 1230 s — **safe**.
+- L7 (163k cells, Δx≈56 km): air limit ≈ 620 s — **still safe** at dt=300.
+
+It only becomes dangerous if you *also* push the dt slider to its 1800 s max while at L7+. So adaptive `dt` is nice-to-have hygiene, **not** a blocker. Do not block the resolution increase on it.
+
+## Points they agree on — my take
+
+- **First-order upwind advection** (both flag this): **correct, and this is the real physics-quality limiter**, more than the coupling. `mix(tr0,trj,w)` donor-cell is heavily diffusive — it's why storms look like smeared bands instead of fronts. A TVD/minmod or MacCormack correction would sharpen jets and fronts more than any coupling change. This deserves to be **priority #1 for realism**.
+- **Resolution L5→L6** (both): correct and high-value. Note an actual bug-in-waiting: `app.js` sets `ui.level=6` but `boot()` constructs `new Planet(canvas,5)`. The real default is L5 (2562 cells), which is genuinely too coarse and is exactly why the hex grid dominates the image. Make `boot()` build L6 to match intent. L6 is safe per the CFL math above.
+- **Flat-shaded hexagons** (both): real. `GLOBE_VS` fetches per-cell center via `gl_VertexID` and the mesh is the dual (vertices = cell centers), so it's inherently faceted at L5. L6 already smooths it a lot; for a cleaner look, sample the field **per-fragment** through `uLookup` (as the equirect path already does) instead of per-vertex `texelFetch`.
+- **Equirectangular seam** (`CLAMP_TO_EDGE` on `uLookup`): real but minor. The lookup is the only texture ever sampled with bilinear `texture()` and it's longitudinally periodic, so giving *just that texture* `REPEAT` on S is safe and removes the date-line seam. Low priority.
+
+## Points mischaracterized
+
+- **Particle respawn opacity** (s37 §4): overstated. With `age ∈ [1.0,1.5]` at respawn, `vA = clamp(age,0,1)·clamp(1.5−|age−0.5|·2,0,1)` actually ramps **0→0.5**, not a hard pop to 0.5. Cosmetic, negligible.
+- **"Ocean spins up unrealistically"** (s37 §1): false — `uFricTop` caps it at ~1 m/s.
+- **Hardcoded 1027.0** (s37 §6): true but pure maintainability, negligible.
+- The **southern grid-scale vortex / red band** (s37 §3_clouds): likely the known **12 pentagonal singularities** of the icosahedral grid — a real artifact, but inherent; higher resolution + better staggering are the only real remedies. Under-emphasized by both.
+
+## What I'd actually do, in order
+
+1. **Build L6 by default** (`boot()` → `new Planet(canvas,6)`). One-line, safe, biggest visual win, kills most hex artifacts.
+2. **Sharpen advection** (minmod/TVD limiter in `OCEAN_FS`/`AIR_FS` `advT/advV`). The single best realism improvement; directly creates fronts/storm structure.
+3. **Fix coupling ratio** carefully (`vt += dstress*0.03; vl -= dstress`), verified visually — not S37's snippet. Low risk once tested.
+4. **Per-fragment field sampling** in `GLOBE_FS` (via `uLookup`) to remove faceting independent of resolution.
+5. **`REPEAT` wrap on the lookup texture's S axis** for the map-view seam.
+6. *(Optional)* adaptive `dt` clamp as a safety net, and a soft height/topography field for monsoons — neither is blocking.
+
+Net: s37 is right that the coupling is *physically inverted* but wrong that it's critical and wrong on the pressure solve and CFL; q36 is right to defend the pressure approach and cautious on the coupling patch, but wrong to call the coupling a pure false alarm and it overstates CFL. The highest-value, safest work is **resolution + advection sharpening**, not the coupling.
+
+
+==============
+
+Good experiment — and it's not a misread. It exposes a **real and more fundamental flaw** than the air–sea coupling I criticized earlier. The overturning cell is inverted, and I can trace exactly why from the code.
+
+## Why you get the reverse cell
+
+The ocean has two independent layers, each with its **own baroclinic pressure** (`oceanP`, shader.js lines 151–153):
+
+```glsl
+float oceanP(vec4 s, float pk){ return pk*(uAlphaT*(s.x-283.0) - uBetaS*(s.w-35.0)); }
+```
+
+with `pk` = `9.81*200*1027` for the top but **`9.81*800*1027` for the deep** (engine.js lines 347–348). So the deep layer's buoyancy force is **4× stronger** than the surface's.
+
+Now look at the temperature the init produces (INIT_FS, lines 452–458):
+- Surface: equator `Ts≈301`, pole `Ts≈261` → warm-equator.
+- Deep: equator `Td≈281`, pole `Td≈275` → also warm-equator.
+
+Both layers are warm at the equator and cold at the pole, so **both layers have a warm→cold pressure gradient and both want to flow hot→cold**. Neither is a natural "return" limb. The only difference is:
+- deep friction `uFricDeep = 6e-7` (params) is ~2.5× smaller than surface's `1.5e-6`, **and** the deep's `pk` is 4× larger → the deep gets driven *harder and damps slower*, so it wins the hot→cold limb and runs fast.
+- The surface is left as the slow, residual cold→hot return (plus whatever the wind drags it into).
+
+That is exactly what you observed: **deep = fast, hot, hot→cold; surface = slow, cold, cold→hot.** Confirmed, not an artifact.
+
+## Why it can't self-correct (the deeper bug)
+
+The only vertical coupling is the thermohaline term (shader.js 407–414):
+
+```glsl
+float rt = -0.00017*(Ts-283.0) + 0.00078*(St-35.0);
+float rd = ... // deep analog
+float mix_ = clamp((uThermo*(1.0 + 900.0*max(0.0, rt-rd)))*uDt, 0.0, 0.25);
+float dT = mix_*(Td - Ts), dS = mix_*(Sd - St);
+Ts += dT;  Td -= dT*0.22;          // heat exchange
+vec2 dvm = 0.12*mix_*(vt - vd);    // momentum exchange
+vd += dvm; vt -= dvm*0.22;
+```
+
+Two problems here:
+1. **Convective-only exchange.** `mix_>0` only where `rt > rd`, i.e. where the *surface is denser than the deep*. That's the cold pole. So mixing only ever happens at the pole. It can cool the polar deep a bit, but it **never acts at the warm equator**, so there is no mechanism to drag cold deep water up at the equator or to push surface water down there. A proper cell needs downwelling at the cold end *and* upwelling at the warm end; this code only has one end.
+2. **The pole mix actually warms the polar surface** (`Ts += dT`, with `Td>Ts`), which kills the very cold, dense surface needed to keep sinking. Combined with the fact that the **polar atmosphere warms the polar ocean**: init sets polar air `Tl≈268` but polar ocean `Ts≈261`, so `Fsens = uKsurf*(Ts−Tl) < 0` → the air heats the ocean at the pole. There is no sustained sinking.
+
+The decisive physical point: **a freely baroclinic deep layer can never be the return limb.** In the real ocean the deep return flow runs *opposite* to its own local temperature gradient — it is set by **mass/volume continuity + wind stress curl (Sverdrup), not by the deep layer's own buoyancy**. Your model lets the deep be independently buoyant, so it always collapses into the warm→cold direction. This is why locking rotation (removing Coriolis/organization) makes the inversion obvious: with no gyres to mask it, you see the raw, wrong overturning.
+
+## What this changes about my earlier review
+
+This is a **higher-priority, more important defect** than the air–sea momentum ratio I discussed. The momentum ratio is a tuning issue that produces plausible-looking gyres; the inverted overturning is a *structural* error in how the ocean's vertical circulation is closed. Revised ranking:
+
+1. **Fix the ocean overturning (vertical closure).** Make the deep a *return* limb instead of an independently buoyant layer. Cleanest minimal change: drive the deep primarily by the surface through a much stronger, bidirectional vertical momentum/continuity coupling, and **remove or strongly weaken the deep's own baroclinic pressure drive** (use the *surface* (barotropic) pressure for both layers, keep only a baroclinic *correction* on the surface). This makes the surface carry warm water hot→cold and the deep the mass-balanced cold→hot return.
+2. **Make vertical exchange two-ended.** Let `mix_` also represent diabatic upwelling at the warm end (not only convective sinking at the cold end), so cold deep water is extracted at the equator. And stop the polar mix from warming the surface (it should sink cold water *down*, not pull warmth *up*).
+3. **Fix the polar atmosphere sign** so the polar ocean is actually cooled (sustained sinking), not heated.
+4. Then the earlier items: resolution L5→L6, sharpen advection (minmod), correct coupling ratio, per-fragment shading, `REPEAT` wrap.
+
+Items 1–3 are the real physics fix your experiment points at; 4 is the cosmetic/robustness work.
+
+## Offer
+
+I can implement a first cut of the overturning fix — specifically (a) share a barotropic pressure between the two layers and weaken the deep's independent buoyancy, and (b) strengthen/closethe vertical momentum coupling so the deep becomes the return limb — then you re-run the locked-rotation experiment to check the cell flips to surface-warm-hot→cold / deep-cold-cold→hot. Want me to do that, or would you rather I first sketch the exact GLSL changes for you to review?

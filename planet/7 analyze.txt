@@ -19,6 +19,17 @@ do not trust them. think what is good.
 
 
 
+unzip. 
+
+rename to proper ext.
+
+ look for simulation problems. do not spend time on grid precision or dt. investigate climate model, conserve mass, energy (heat), impulse. Investigate other things that may be implemented not good or flaws.
+
+i make this experiment: lock rotation of planet. i expect ocean heat water move to cold area and deep ocean move to hot area. but in this simulation i got reverse: deep ocean fast move hot water to cold areas and it cold and slow move by surface to hot areas.
+think why is this and can it help to improve your understanding / improvement
+
+
+
 2.jpg
 
 
