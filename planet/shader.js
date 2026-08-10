@@ -1,4 +1,9 @@
 /* shader.js - all GLSL program sources (WebGL2 / GLSL ES 3.00) */
+/* Hard clamp on the sea-surface height anomaly [m]. Shared by the simulation
+   (OCEAN_LAYERS -> ETA_MAX) and by the SSH render mode's normalisation, so the
+   two can never drift apart. */
+var ETA_MAX = 60;
+
 var SHADER_HEAD = `#version 300 es
 precision highp float;
 precision highp int;
@@ -24,7 +29,7 @@ var MODE_FIELDS = [
   'length(ha.xy)/34.0',                      // 12 high-air speed
   'length(wd.yz)/0.25',                      // 13 deep-ocean speed
   '(wd.w-33.0)/4.0',                         // 14 deep-ocean salinity
-  'we.x/60.0*0.5+0.5',                       // 15 sea-surface height (eta, +/-60 m)
+  'we.x/' + ETA_MAX.toFixed(1) + '*0.5+0.5', // 15 sea-surface height (eta, +/-ETA_MAX)
 ];
 // modes that use magnitude (dark-background) coloring; palette-color fields excluded
 var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1 };
@@ -81,7 +86,7 @@ var OCEAN_LAYERS = `
 const float H_TOP0  = 200.0;    // reference top-layer thickness [m]
 const float H_DEEP0 = 800.0;    // reference deep-layer thickness [m]
 const float H_TOTAL = 1000.0;   // fixed total depth  [m]
-const float ETA_MAX = 60.0;     // |eta| clamp keeps both layers safely thick
+const float ETA_MAX = ${ETA_MAX.toFixed(1)};     // |eta| clamp keeps both layers safely thick
 const float RHO0    = 1027.0;   // reference sea-water density [kg/m^3]
 const float CP_W    = 3990.0;   // sea-water heat capacity [J/(kg K)]
 float hTopOf (float eta){ return clamp(H_TOP0 + eta, 20.0, H_TOTAL-20.0); }
@@ -230,6 +235,11 @@ void stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   // thickness-weighted (i.e. genuinely conservative) tracer fluxes
   float divT = 0.0, advHT_T = 0.0, advHS_T = 0.0, lapHT_T = 0.0, lapHS_T = 0.0;
   float divD = 0.0, advHT_D = 0.0, advHS_D = 0.0, lapHT_D = 0.0, lapHS_D = 0.0;
+  // The tracer/continuity budgets need the VOLUME divergence div(h*u), but the
+  // momentum stretching term pairs with the unweighted advection operator
+  // div(u*v) and therefore needs the plain velocity divergence div(u). Mixing
+  // the two would leave a spurious residual wherever the layer thickness varies.
+  float divU_T = 0.0, divU_D = 0.0;
 
   // ---- THE GATHER LOOP: 6 (or 5) neighbours via the baked wrap table ----
   for(int k=0;k<6;k++){
@@ -266,10 +276,11 @@ void stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
     float wT  = unT > 0.0 ? 0.0 : 1.0;       // 1st order upwind
     float hfT = mix(hTop0, hTopj, wT);       // upwind thickness
     divT    += L*unT*hfT;
+    divU_T  += L*unT;
     advHT_T += L*unT*hfT*mix(top0.x, topj.x, wT);
     advHS_T += L*unT*hfT*mix(top0.w, topj.w, wT);
-    lapHT_T += (L/d)*(hTopj*topj.x - hTop0*top0.x)*wet;
-    lapHS_T += (L/d)*(hTopj*topj.w - hTop0*top0.w)*wet;
+    lapHT_T += (L/d)*(hTopj*topj.x - hTop0*top0.x);
+    lapHS_T += (L/d)*(hTopj*topj.w - hTop0*top0.w);
     advVT   += L*unT*mix(vT0, vTj, wT);
 
     // --- deep layer face fluxes ---
@@ -277,24 +288,27 @@ void stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
     float wD  = unD > 0.0 ? 0.0 : 1.0;
     float hfD = mix(hDeep0, hDeepj, wD);
     divD    += L*unD*hfD;
+    divU_D  += L*unD;
     advHT_D += L*unD*hfD*mix(deep0.x, deepj.x, wD);
     advHS_D += L*unD*hfD*mix(deep0.w, deepj.w, wD);
-    lapHT_D += (L/d)*(hDeepj*deepj.x - hDeep0*deep0.x)*wet;
-    lapHS_D += (L/d)*(hDeepj*deepj.w - hDeep0*deep0.w)*wet;
+    lapHT_D += (L/d)*(hDeepj*deepj.x - hDeep0*deep0.x);
+    lapHS_D += (L/d)*(hDeepj*deepj.w - hDeep0*deep0.w);
     advVD   += L*unD*mix(vD0, vDj, wD);
   }
 
   float ia = 1.0/area;
   gradPT *= ia; lapVT *= ia; advVT *= ia;
-  divT *= ia; advHT_T *= ia; advHS_T *= ia; lapHT_T *= ia; lapHS_T *= ia;
+  divT *= ia; divU_T *= ia; advHT_T *= ia; advHS_T *= ia; lapHT_T *= ia; lapHS_T *= ia;
   gradPD *= ia; lapVD *= ia; advVD *= ia;
-  divD *= ia; advHT_D *= ia; advHS_D *= ia; lapHT_D *= ia; lapHS_D *= ia;
+  divD *= ia; divU_D *= ia; advHT_D *= ia; advHS_D *= ia; lapHT_D *= ia; lapHS_D *= ia;
 
   // ---- 1. MASS / VOLUME: discrete continuity for the free surface ----------
   // d(eta)/dt = -div(h_top * u_top). The total depth H_TOTAL is a hard
-  // constant, so whatever the top layer gains the deep layer loses
-  // (h_deep = H_TOTAL - h_top), which is exactly the interface displacement of
-  // a two-layer model: the deep divergence is the return flow of the top one.
+  // constant, so the deep thickness is purely DIAGNOSTIC: h_deep = H_TOTAL -
+  // h_top. That is the usual two-layer interface displacement, and it means the
+  // deep layer's own transport divergence (divD) is NOT what sets its
+  // thickness -- divD is used only for its momentum and tracer fluxes, whose
+  // conserved quantity is the content h*T, not T itself.
   float eta1 = eta0 - uDt*divT;
   eta1 -= uMassFix*eta1*uDt;                 // weak global mass-drift damper
   eta1 = clamp(eta1, -ETA_MAX, ETA_MAX);
@@ -327,8 +341,8 @@ void stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   vec2  fDrag = uDragI*dv*(1.0 + 0.5*length(dv));   // linear + quadratic form
   fDrag *= (1.0-land);
 
-  vec2 accT = -gradPT/RHO0 + uNuVel*lapVT - advVT + vT0*(divT/hTop0) - fDrag/hTop0;
-  vec2 accD = -gradPD/RHO0 + uNuVel*lapVD - advVD + vD0*(divD/hDeep0) + fDrag/hDeep0;
+  vec2 accT = -gradPT/RHO0 + uNuVel*lapVT - advVT + vT0*divU_T - fDrag/hTop0;
+  vec2 accD = -gradPD/RHO0 + uNuVel*lapVD - advVD + vD0*divU_D + fDrag/hDeep0;
 
   // Coriolis as a real 3D cross product, then projected on the tangent plane
   vec3 c3T = -2.0*cross(vec3(0.0,uOmega,0.0), vT0.x*e1 + vT0.y*e2);
@@ -508,7 +522,8 @@ void main(){
   Tl += uDt*(Fsens + 0.10*S)/Ca;
   q  += uDt*evap/(rhoL*Hlo);
 
-  // ---- MASS: the free surface also responds to precipitation minus evaporation
+${mode === 'ocean'
+    ? `  // ---- MASS: the free surface also responds to precipitation minus evaporation
   // (the only true source/sink of ocean volume; the transport part of the
   // continuity equation is integrated in OCEAN_FS).
   float eta1 = eta0 + uDt*(rain*0.001 - evap)/RHO0*(1.0-land);
@@ -520,7 +535,11 @@ void main(){
 
   // Salt is neither created nor destroyed by E-P: evaporation removes water and
   // leaves the salt behind, so the concentration simply follows the thickness.
-  St *= hTop0/hTop1;
+  St *= hTop0/hTop1;`
+    : `  // The air pass never writes the ocean state, so it only needs the CURRENT
+  // layer thicknesses (for the mass-weighted wind stress below), not a new
+  // free surface.
+  float hTop1 = hTop0, hDeep1 = hDeepOf(eta0);`}
 
   // Wind stress: Newton's 3rd law, mass-weighted. The ocean top layer (~200 m
   // of water) has far more inertia per m^2 than the low-air column (~5000 m of
@@ -613,7 +632,6 @@ layout(location=0) out vec4 oTop;
 layout(location=1) out vec4 oDeep;
 layout(location=2) out vec4 oLoA;
 layout(location=3) out vec4 oLoB;
-layout(location=4) out vec4 oEta;
 uniform float uSeed;
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -632,12 +650,14 @@ void main(){
   oDeep = vec4(Td, 0.0, 0.0, S+0.3);
   oLoA  = vec4(rn*0.5, rn*0.5, Tl, 101325.0);
   oLoB  = vec4(0.004*c2, 0.0, 0.0, 0.0);
-  oEta  = vec4(0.0, 0.0, 0.0, 0.0);   // start from a flat, undisturbed sea surface
 }`;
 
 var INIT2_FS = SHADER_HEAD + SHADER_COMMON + `
 layout(location=0) out vec4 oHiA;
 layout(location=1) out vec4 oHiB;
+// eta is initialised here rather than in INIT_FS purely to keep every
+// framebuffer at <= 4 colour attachments (the WebGL2 guaranteed minimum).
+layout(location=2) out vec4 oEta;
 uniform float uSeed;
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -648,6 +668,7 @@ void main(){
   float rn = hash21(vec2(float(cell), uSeed+7.0))-0.5;
   oHiA = vec4(rn*0.5, rn*0.5, 232.0 + 12.0*c2 + rn*0.6, 45000.0);
   oHiB = vec4(0.0008*c2, 0.0, 0.0, 0.0);
+  oEta = vec4(0.0, 0.0, 0.0, 0.0);   // start from a flat, undisturbed sea surface
 }`;
 
 var PART_FS = SHADER_HEAD + SHADER_COMMON + `
@@ -720,13 +741,30 @@ void main(){
   else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
   else                 vel = texelFetch(uDeep, cTex(cell),0).yz*uVelScale;
   vec3 v3 = vel.x*e1 + vel.y*e2;                              // tangent velocity (m/s)
-  vec3 tail = normalize(pos - v3 * (uTrail / uRadius));       // arc back along flow
-  vec3 outp = isTail == 1 ? tail : pos;
+  // Cap the streak offset so a very fast flow combined with a long trail length
+  // cannot draw a pathological line spanning the viewport (visible near the
+  // limb in globe view, or crossing the map in projection view).
+  vec3 off = v3 * (uTrail / uRadius);
+  float ol = length(off);
+  if(ol > 0.6) off *= 0.6 / ol;
+  vec3 tail = normalize(pos - off);                           // arc back along flow
   vA = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
   if(uEquirect > 0.5){
-    vec2 uv = vec2(atan(outp.z,outp.x)/6.2831853+0.5, asin(clamp(outp.y,-1.0,1.0))/3.14159265+0.5);
+    // Project the head and tail independently, but unwrap the tail's longitude
+    // into the head's 2*PI period. A streak that straddles the +/-PI seam would
+    // otherwise land one endpoint at uv.x~=0 and the other at uv.x~=1, drawing a
+    // line straight across the whole map.
+    float hlon = atan(pos.z, pos.x);
+    float tlon = atan(tail.z, tail.x);
+    float dl = tlon - hlon;
+    dl -= 6.2831853 * floor(dl/6.2831853 + 0.5);              // wrap delta to [-PI, PI]
+    tlon = hlon + dl;
+    vec2 huv = vec2(hlon/6.2831853+0.5, asin(clamp(pos.y, -1.0, 1.0))/3.14159265+0.5);
+    vec2 tuv = vec2(tlon/6.2831853+0.5, asin(clamp(tail.y,-1.0, 1.0))/3.14159265+0.5);
+    vec2 uv = isTail == 1 ? tuv : huv;
     gl_Position = vec4(uv*2.0 - 1.0, 0.0, 1.0);
   } else {
+    vec3 outp = isTail == 1 ? tail : pos;
     gl_Position = uMVP * vec4(outp*1.012, 1.0);
   }
   gl_PointSize = uPointSize;

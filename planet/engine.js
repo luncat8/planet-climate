@@ -226,8 +226,8 @@ Planet.prototype.build = function (level) {
   this.fbo.dynA = this.mkFbo([this.B[2], this.B[3], this.B[4], this.B[5]]);
   this.fbo.cplO = this.mkFbo([this.A[0], this.A[1], this.A[6]]);
   this.fbo.cplA = this.mkFbo([this.A[2], this.A[3], this.A[4], this.A[5]]);
-  this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3], this.A[6]]);
-  this.fbo.init2 = this.mkFbo([this.A[4], this.A[5]]);
+  this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);
+  this.fbo.init2 = this.mkFbo([this.A[4], this.A[5], this.A[6]]);
 
   var pdata = new Float32Array(this.PW * this.PH * 4);
   for (var j = 0; j < this.PW * this.PH; j++) {

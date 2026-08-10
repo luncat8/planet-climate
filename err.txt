@@ -1,0 +1,1 @@
+bug in draw strem lines. it sometimes connect old points cause long lines across viewport, especially in projection mode, but in globe mode also
