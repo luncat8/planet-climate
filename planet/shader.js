@@ -726,8 +726,16 @@ uniform float uTrail, uRadius, uEquirect, uVelScale, uAsPoints, uPointSize;
 uniform int uVelMode;
 out float vA;
 void main(){
-  int pid = (uAsPoints > 0.5) ? gl_VertexID : (gl_VertexID >> 1);
-  int isTail = (uAsPoints > 0.5) ? 0 : (gl_VertexID & 1);
+  int pid, seg, isTail;
+  if (uAsPoints > 0.5) {
+    pid = gl_VertexID; seg = 0; isTail = 0;
+  } else {
+    int vid = gl_VertexID;
+    pid = vid / 6;
+    int k = vid - pid*6;          // vid % 6  (0..5)
+    seg = k / 2;                  // 0,1,2 -> centre / +1 / -1 wrap copy
+    isTail = k - seg*2;           // 0 or 1
+  }
   ivec2 t = ivec2(pid % uPDim.x, pid / uPDim.x);
   vec4 p = texelFetch(uPart, t, 0);
   vec3 pos = normalize(p.xyz);
@@ -741,31 +749,38 @@ void main(){
   else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
   else                 vel = texelFetch(uDeep, cTex(cell),0).yz*uVelScale;
   vec3 v3 = vel.x*e1 + vel.y*e2;                              // tangent velocity (m/s)
-  // Cap the streak offset so a very fast flow combined with a long trail length
-  // cannot draw a pathological line spanning the viewport (visible near the
-  // limb in globe view, or crossing the map in projection view).
-  vec3 off = v3 * (uTrail / uRadius);
-  float ol = length(off);
-  if(ol > 0.6) off *= 0.6 / ol;
-  vec3 tail = normalize(pos - off);                           // arc back along flow
+  // Cap the angular extent of the streak so a very fast flow combined with a
+  // long trail cannot paint a pathological line (near the limb in globe view,
+  // or crossing the whole map in projection view).  Clamp the scalar arc length
+  // directly, then back-step along the (unit) flow direction -- this keeps the
+  // streak local to the head so the tail can never wrap past the date line.
+  float s = length(v3) * (uTrail / uRadius);
+  s = min(s, 0.5);                                            // ~30 deg cap
+  vec3 tdir = (length(v3) > 1e-6) ? v3 / length(v3) : vec3(0.0);
+  vec3 tail = normalize(pos - tdir * s);                      // arc back along flow
   vA = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
   if(uEquirect > 0.5){
-    // Project the head and tail independently, but unwrap the tail's longitude
-    // into the head's 2*PI period. A streak that straddles the +/-PI seam would
-    // otherwise land one endpoint at uv.x~=0 and the other at uv.x~=1, drawing a
-    // line straight across the whole map.
-    float hlon = atan(pos.z, pos.x);
+    // Unwrap the tail's longitude into the head's 2*PI period (so a streak
+    // straddling the +/-PI seam stays continuous instead of drawing a line
+    // across the whole map). Then draw THREE copies: the centre streak plus one
+    // shifted by +/-1 in uv.x, so the part that runs off one edge of the map
+    // re-appears on the opposite edge (seam-continuous streamlines).
+    float hlon = lon;
     float tlon = atan(tail.z, tail.x);
     float dl = tlon - hlon;
     dl -= 6.2831853 * floor(dl/6.2831853 + 0.5);              // wrap delta to [-PI, PI]
     tlon = hlon + dl;
-    vec2 huv = vec2(hlon/6.2831853+0.5, asin(clamp(pos.y, -1.0, 1.0))/3.14159265+0.5);
-    vec2 tuv = vec2(tlon/6.2831853+0.5, asin(clamp(tail.y,-1.0, 1.0))/3.14159265+0.5);
-    vec2 uv = isTail == 1 ? tuv : huv;
+    vec2 huv = vec2(hlon/6.2831853+0.5, lat/3.14159265+0.5);
+    vec2 tuv = vec2(tlon/6.2831853+0.5, asin(clamp(tail.y,-1.0,1.0))/3.14159265+0.5);
+    float shift = (seg == 1) ? 1.0 : (seg == 2) ? -1.0 : 0.0;
+    vec2 uv = (isTail == 1 ? tuv : huv) + vec2(shift, 0.0);
     gl_Position = vec4(uv*2.0 - 1.0, 0.0, 1.0);
   } else {
+    // Globe view: only the centre copy is valid; push the +/-1 wrap copies
+    // fully off-screen so they are culled (no 3x overdraw / brightness).
     vec3 outp = isTail == 1 ? tail : pos;
-    gl_Position = uMVP * vec4(outp*1.012, 1.0);
+    if (seg == 0) gl_Position = uMVP * vec4(outp*1.012, 1.0);
+    else gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
   }
   gl_PointSize = uPointSize;
 }`;

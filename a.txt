@@ -1,0 +1,425 @@
+model A suggested this patch . it is for older TS version. so we cant apply it directly. your task is smart implement similar changes
+
+
+
+
+1. Mass / Volume Conservation
+- Introduce a sea-surface height (or equivalent top-layer thickness) field that evolves via a discrete continuity equation: ∂h/∂t + ∇·(h u) = sources − sinks.
+- Treat the total ocean depth as fixed; deep-layer thickness is H_total − h_top.
+- Ensure horizontal divergence in each layer is computed consistently with the velocity update so that net global volume does not drift (add a weak global mass-correction if needed).
+
+2. Momentum Conservation Between Layers
+- Add an explicit inter-layer drag term that transfers momentum between top and deep layers based on their relative velocity. The force should be equal and opposite on both layers to conserve total oceanic momentum.
+- Preferably use a linear or quadratic form proportional to |v_top − v_deep|, with a tunable coefficient.
+
+3. Energy (Heat) Conservation
+- Track heat content in each layer as c_p · ρ · h · T (or equivalent).
+- Ensure vertical exchanges of temperature/heat between layers are symmetric: heat lost by one layer equals heat gained by the other, modulo explicit surface fluxes and radiative losses.
+- Verify that horizontal advection/diffusion operators do not create or destroy net heat beyond prescribed boundary conditions.
+
+4. Inter-Layer Friction / Coupling
+- Replace or augment any existing purely diffusive mixing with a mechanical friction term that resists shear between layers, distinct from thermohaline-driven exchange.
+- This should act on velocities directly and be independent of density stratification (though it may be modulated by stability).
+
+
+283c283
+<     for (let i = 0; i < 6; i++) {
+---
+>     for (let i = 0; i < 7; i++) {
+287c287
+<     this.fbo.dynO = this.mkFbo([this.B[0], this.B[1]]);
+---
+>     this.fbo.dynO = this.mkFbo([this.B[0], this.B[1], this.B[6]]);
+289c289
+<     this.fbo.cplO = this.mkFbo([this.A[0], this.A[1]]);
+---
+>     this.fbo.cplO = this.mkFbo([this.A[0], this.A[1], this.A[6]]);
+291c291
+<     this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);
+---
+>     this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3], this.A[6]]);
+366c366,367
+<         .tex('uLoB', src[3]).tex('uHiA', src[4]).tex('uHiB', src[5]);
+---
+>         .tex('uLoB', src[3]).tex('uHiA', src[4]).tex('uHiB', src[5])
+>         .tex('uEta', src[6]);
+400c401
+<     po.tex('uTop', this.A[0]).tex('uDeep', this.A[1])
+---
+>     po.tex('uTop', this.A[0]).tex('uDeep', this.A[1]).tex('uEta', this.A[6])
+474a476
+>       .tex('uEta', this.A[6])
+51a52
+> layout(location=2) out vec4 oEta;
+54a56
+> uniform sampler2D uEta;
+61,78c63,64
+< // Top layer: classic reduced-gravity dynamic pressure from its OWN buoyancy
+< // (warm/light water "piles up" -> higher sea-surface height -> higher P).
+< // This alone drives the expected warm -> cold surface current.
+< float oceanPTop(vec4 sTop){ return uPkTop*buoy(sTop); }
+< 
+< // Deep layer: hydrostatic pressure at depth is dominated by the *compensating*
+< // signal of whatever water sits above it -- a light/warm top layer means LESS
+< // weight overhead, hence LOWER pressure beneath it, not higher. Using the
+< // deep layer's own (weak, slowly-diffusing) temperature here previously made
+< // both layers respond to the same sign of anomaly, so the deep layer just
+< // replayed (and, being scaled up, overpowered) the surface flow instead of
+< // returning it. Flipping the sign onto the TOP layer's buoyancy is what
+< // actually closes the overturning loop into a proper return limb; a small
+< // direct term from the deep water's own density adds slow abyssal drift.
+< float oceanPDeep(vec4 sDeep, vec4 sTop){ return -uPkDeep*buoy(sTop) + uPkAbyss*buoy(sDeep); }
+< 
+< vec4 stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
+<                sampler2D tex, float fric, bool isDeep)
+---
+> void stepOcean(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
+>                out vec4 outTop, out vec4 outDeep, out vec4 outEta)
+80,84c66,89
+<   vec4 s0 = texelFetch(tex, cTex(cell), 0);
+<   vec4 top0 = isDeep ? texelFetch(uTop, cTex(cell), 0) : s0;
+<   vec2 v0 = s0.yz;
+<   vec2 tr0 = vec2(s0.x, s0.w);
+<   float p0 = isDeep ? oceanPDeep(s0, top0) : oceanPTop(s0);
+---
+>   vec4 top0  = texelFetch(uTop,  cTex(cell), 0);
+>   vec4 deep0 = texelFetch(uDeep, cTex(cell), 0);
+>   float eta0 = texelFetch(uEta,  cTex(cell), 0).r;
+> 
+>   float h_top0  = max(10.0, 200.0 + eta0);
+>   float h_deep0 = max(10.0, 800.0 - eta0);
+> 
+>   // Surface top layer pressure is driven by sea surface height eta (barotropic gravity waves)
+>   float p_top0 = uPkTop * eta0;
+>   // Deep layer pressure is driven by barotropic pressure compensated by top-layer buoyancy (baroclinic)
+>   float p_deep0 = uPkTop * eta0 - uPkDeep * buoy(top0) * h_top0 + uPkAbyss * buoy(deep0) * h_deep0;
+> 
+>   // Let's gather fluxes and gradients
+>   vec2 gradP_top = vec2(0.0), gradP_deep = vec2(0.0);
+>   vec2 lapV_top  = vec2(0.0), lapV_deep  = vec2(0.0);
+>   vec2 advV_top  = vec2(0.0), advV_deep  = vec2(0.0);
+> 
+>   float div_hu_top  = 0.0;
+>   float adv_hT_top  = 0.0, adv_hS_top  = 0.0;
+>   float lap_hT_top  = 0.0, lap_hS_top  = 0.0;
+> 
+>   float div_hu_deep = 0.0;
+>   float adv_hT_deep = 0.0, adv_hS_deep = 0.0;
+>   float lap_hT_deep = 0.0, lap_hS_deep = 0.0;
+86,88c91,92
+<   vec2 gradP = vec2(0.0), lapV = vec2(0.0), advV = vec2(0.0);
+<   vec2 lapT  = vec2(0.0), advT = vec2(0.0);
+<   float div = 0.0;
+---
+>   vec2 v_top0  = top0.yz;
+>   vec2 v_deep0 = deep0.yz;
+90d93
+<   // ---- THE GATHER LOOP: 6 (or 5) neighbours via the baked wrap table ----
+93c96
+<     if(na.w < 0.5) continue;                 // pentagon: only 5 neighbours
+---
+>     if(na.w < 0.5) continue;                 // pentagon
+95,96c98,99
+<     float L = na.y;                          // Voronoi edge length  [m]
+<     float d = na.z;                          // centre distance      [m]
+---
+>     float L = na.y;                          // edge length [m]
+>     float d = na.z;                          // distance [m]
+98c101,105
+<     vec2  nrm = nb.xy;                       // unit outward normal (local basis)
+---
+>     vec2  nrm = nb.xy;                       // outward normal
+> 
+>     vec4 topj  = texelFetch(uTop,  cTex(j), 0);
+>     vec4 deepj = texelFetch(uDeep, cTex(j), 0);
+>     float etaj = texelFetch(uEta,  cTex(j), 0).r;
+100,101d106
+<     vec4 sj    = texelFetch(tex,   cTex(j), 0);
+<     vec4 topj  = isDeep ? texelFetch(uTop, cTex(j), 0) : sj;
+103c108
+<     float wet  = (1.0-landj)*(1.0-land);     // no flow through coastlines
+---
+>     float wet   = (1.0-landj)*(1.0-land);
+105,107c110,111
+<     vec2 vj  = xfer(sj.yz, nb.z, nb.w) * (1.0-landj);
+<     vec2 trj = vec2(sj.x, sj.w);
+<     float pj = isDeep ? oceanPDeep(sj, topj) : oceanPTop(sj);
+---
+>     vec2 vj_top  = xfer(topj.yz,  nb.z, nb.w) * (1.0-landj);
+>     vec2 vj_deep = xfer(deepj.yz, nb.z, nb.w) * (1.0-landj);
+109,117c113,114
+<     gradP += L*0.5*(pj-p0)*nrm*wet;          // Gauss gradient
+<     lapV  += (L/d)*(vj-v0)*wet;              // FV Laplacian
+<     lapT  += (L/d)*(trj-tr0);
+<     float un = 0.5*dot(v0+vj, nrm)*wet;      // face normal velocity
+<     div  += L*un;
+<     float w = un > 0.0 ? 0.0 : 1.0;          // 1st order upwind
+<     advT += L*un*mix(tr0, trj, w);
+<     advV += L*un*mix(v0,  vj,  w);
+<   }
+---
+>     float h_top_j  = max(10.0, 200.0 + etaj);
+>     float h_deep_j = max(10.0, 800.0 - etaj);
+119,120c116,117
+<   float ia = 1.0/area;
+<   gradP *= ia; lapV *= ia; lapT *= ia; advV *= ia; advT *= ia; div *= ia;
+---
+>     float p_topj  = uPkTop * etaj;
+>     float p_deepj = uPkTop * etaj - uPkDeep * buoy(topj) * h_top_j + uPkAbyss * buoy(deepj) * h_deep_j;
+122,126c119,121
+<   vec2 acc = -gradP/1027.0 + uNuVel*lapV - advV + v0*div;
+<   // Coriolis as a real 3D cross product, then projected on the tangent plane
+<   vec3 v3 = v0.x*e1 + v0.y*e2;
+<   vec3 c3 = -2.0*cross(vec3(0.0,uOmega,0.0), v3);
+<   acc += vec2(dot(c3,e1), dot(c3,e2));
+---
+>     // Gauss gradients
+>     gradP_top  += L*0.5*(p_topj - p_top0)*nrm*wet;
+>     gradP_deep += L*0.5*(p_deepj - p_deep0)*nrm*wet;
+128,137c123,228
+<   vec2 v1 = (v0 + uDt*acc)/(1.0 + uDt*fric);
+<   v1 *= (1.0-land);
+<   v1 = clamp(v1, vec2(-3.0), vec2(3.0));
+< 
+<   vec2 tr1 = tr0 + uDt*(uNuT*lapT - advT + tr0*div);
+<   tr1.x = clamp(tr1.x, 200.0, 360.0);
+<   tr1.y = clamp(tr1.y, 5.0, 60.0);
+<   if(any(isnan(v1))) v1 = vec2(0.0);
+<   if(any(isnan(tr1))) tr1 = tr0;
+<   return vec4(tr1.x, v1, tr1.y);
+---
+>     // Laplacian viscosity
+>     lapV_top  += (L/d)*(vj_top - v_top0)*wet;
+>     lapV_deep += (L/d)*(vj_deep - v_deep0)*wet;
+> 
+>     // Top layer volume, heat, and salt fluxes (Requirement 1 & 3)
+>     float un_top = 0.5*dot(v_top0 + vj_top, nrm)*wet;
+>     float h_face_top = un_top > 0.0 ? h_top0 : h_top_j;
+>     float T_face_top = un_top > 0.0 ? top0.x : topj.x;
+>     float S_face_top = un_top > 0.0 ? top0.w : topj.w;
+> 
+>     div_hu_top  += L * un_top * h_face_top;
+>     adv_hT_top  += L * un_top * h_face_top * T_face_top;
+>     adv_hS_top  += L * un_top * h_face_top * S_face_top;
+> 
+>     lap_hT_top  += (L/d) * (h_top_j * topj.x - h_top0 * top0.x);
+>     lap_hS_top  += (L/d) * (h_top_j * topj.w - h_top0 * top0.w);
+> 
+>     // Deep layer volume, heat, and salt fluxes (Requirement 1 & 3)
+>     float un_deep = 0.5*dot(v_deep0 + vj_deep, nrm)*wet;
+>     float h_face_deep = un_deep > 0.0 ? h_deep0 : h_deep_j;
+>     float T_face_deep = un_deep > 0.0 ? deep0.x : deepj.x;
+>     float S_face_deep = un_deep > 0.0 ? deep0.w : deepj.w;
+> 
+>     div_hu_deep  += L * un_deep * h_face_deep;
+>     adv_hT_deep  += L * un_deep * h_face_deep * T_face_deep;
+>     adv_hS_deep  += L * un_deep * h_face_deep * S_face_deep;
+> 
+>     lap_hT_deep  += (L/d) * (h_deep_j * deepj.x - h_deep0 * deep0.x);
+>     lap_hS_deep  += (L/d) * (h_deep_j * deepj.w - h_deep0 * deep0.w);
+> 
+>     // Upwind velocity advection
+>     float w_top = un_top > 0.0 ? 0.0 : 1.0;
+>     advV_top += L * un_top * mix(v_top0, vj_top, w_top);
+> 
+>     float w_deep = un_deep > 0.0 ? 0.0 : 1.0;
+>     advV_deep += L * un_deep * mix(v_deep0, vj_deep, w_deep);
+>   }
+> 
+>   float ia = 1.0/area;
+>   gradP_top *= ia; lapV_top *= ia; advV_top *= ia;
+>   div_hu_top *= ia; adv_hT_top *= ia; adv_hS_top *= ia;
+>   lap_hT_top *= ia; lap_hS_top *= ia;
+> 
+>   gradP_deep *= ia; lapV_deep *= ia; advV_deep *= ia;
+>   div_hu_deep *= ia; adv_hT_deep *= ia; adv_hS_deep *= ia;
+>   lap_hT_deep *= ia; lap_hS_deep *= ia;
+> 
+>   // 1. Sea-surface height & layer thickness evolution (Requirement 1)
+>   float h_top1 = h_top0 - uDt * div_hu_top;
+>   h_top1 = clamp(h_top1, 10.0, 390.0);
+>   float eta1 = h_top1 - 200.0;
+> 
+>   // Prevent global volume drift
+>   eta1 -= 1e-5 * eta1 * uDt;
+>   eta1 = clamp(eta1, -150.0, 150.0);
+>   h_top1 = 200.0 + eta1;
+>   float h_deep1 = 1000.0 - h_top1;
+> 
+>   // 2. Conserve energy (heat) and salt (Requirement 3)
+>   float hT_top1 = h_top0 * top0.x - uDt * adv_hT_top + uDt * uNuT * lap_hT_top;
+>   float T_top1 = clamp(hT_top1 / h_top1, 200.0, 360.0);
+> 
+>   float hS_top1 = h_top0 * top0.w - uDt * adv_hS_top + uDt * uNuT * lap_hS_top;
+>   float S_top1 = clamp(hS_top1 / h_top1, 5.0, 60.0);
+> 
+>   float hT_deep1 = h_deep0 * deep0.x - uDt * adv_hT_deep + uDt * uNuT * lap_hT_deep;
+>   float T_deep1 = clamp(hT_deep1 / h_deep1, 200.0, 360.0);
+> 
+>   float hS_deep1 = h_deep0 * deep0.w - uDt * adv_hS_deep + uDt * uNuT * lap_hS_deep;
+>   float S_deep1 = clamp(hS_deep1 / h_deep1, 5.0, 60.0);
+> 
+>   // 3. Momentum & Coriolis updates with inter-layer drag (Requirement 2 & 4)
+>   vec2 v_rel = v_top0 - v_deep0;
+>   float v_rel_mag = length(v_rel);
+>   //Cd is mechanical shear drag coefficient proportional to nuVelOcean
+>   float Cd = uNuVel * 5e-5;
+>   vec2 f_drag = Cd * v_rel * (1.0 + 0.5 * v_rel_mag);
+> 
+>   // Top layer acceleration
+>   vec2 acc_top = -gradP_top/1027.0 + uNuVel*lapV_top - advV_top + v_top0*(div_hu_top/h_top0);
+>   vec3 v3_top = v_top0.x*e1 + v_top0.y*e2;
+>   vec3 c3_top = -2.0*cross(vec3(0.0,uOmega,0.0), v3_top);
+>   acc_top += vec2(dot(c3_top,e1), dot(c3_top,e2));
+>   acc_top -= f_drag / h_top0; // drag acts equally and opposite
+> 
+>   // Deep layer acceleration
+>   vec2 acc_deep = -gradP_deep/1027.0 + uNuVel*lapV_deep - advV_deep + v_deep0*(div_hu_deep/h_deep0);
+>   vec3 v3_deep = v_deep0.x*e1 + v_deep0.y*e2;
+>   vec3 c3_deep = -2.0*cross(vec3(0.0,uOmega,0.0), v3_deep);
+>   acc_deep += vec2(dot(c3_deep,e1), dot(c3_deep,e2));
+>   acc_deep += f_drag / h_deep0; // drag acts equally and opposite
+> 
+>   vec2 v_top1 = (v_top0 + uDt*acc_top)/(1.0 + uDt*uFricTop);
+>   v_top1 *= (1.0-land);
+>   v_top1 = clamp(v_top1, vec2(-3.0), vec2(3.0));
+> 
+>   vec2 v_deep1 = (v_deep0 + uDt*acc_deep)/(1.0 + uDt*uFricDeep);
+>   v_deep1 *= (1.0-land);
+>   v_deep1 = clamp(v_deep1, vec2(-3.0), vec2(3.0));
+> 
+>   if (any(isnan(v_top1))) v_top1 = vec2(0.0);
+>   if (any(isnan(v_deep1))) v_deep1 = vec2(0.0);
+> 
+>   outTop  = vec4(T_top1, v_top1, S_top1);
+>   outDeep = vec4(T_deep1, v_deep1, S_deep1);
+>   outEta  = vec4(eta1, 0.0, 0.0, 0.0);
+142c233
+<   if(cell >= uCount){ oTop = vec4(0.0); oDeep = vec4(0.0); return; }
+---
+>   if(cell >= uCount){ oTop = vec4(0.0); oDeep = vec4(0.0); oEta = vec4(0.0); return; }
+146,147c237
+<   oTop  = stepOcean(cell, n, e1, e2, ca.w, cb.w, uTop,  uFricTop,  false);
+<   oDeep = stepOcean(cell, n, e1, e2, ca.w, cb.w, uDeep, uFricDeep, true);
+---
+>   stepOcean(cell, n, e1, e2, ca.w, cb.w, oTop, oDeep, oEta);
+241c331
+<     ? `layout(location=0) out vec4 oTop;\nlayout(location=1) out vec4 oDeep;`
+---
+>     ? `layout(location=0) out vec4 oTop;\nlayout(location=1) out vec4 oDeep;\nlayout(location=2) out vec4 oEta;`
+244c334
+< uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB;
+---
+> uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB, uEta;
+281a372
+>   float eta0 = texelFetch(uEta, cTex(cell), 0).r;
+304c395,408
+<   Ts += uDt*(Fsol_s - Fsens - Le*evap)/Cw;
+---
+>   // Track sea surface height evolution from precipitation/evaporative fluxes (Requirement 1)
+>   float eta_new = eta0 + uDt * (rain * 0.001 - evap / 1027.0);
+>   eta_new -= 1e-5 * eta_new * uDt; // Weak global mass correction
+>   eta_new = clamp(eta_new, -150.0, 150.0);
+> 
+>   float h_top_old = max(10.0, 200.0 + eta0);
+>   float h_top_new = max(10.0, 200.0 + eta_new);
+>   float h_deep    = max(10.0, 800.0 - eta_new);
+> 
+>   // Surface heat flux applies to the top layer (Requirement 3)
+>   float Ts_flux = Ts + uDt * (Fsol_s - Fsens - Le*evap) / Cw;
+>   // Salinity mass is conserved, concentrated or diluted by top-layer thickness changes (Requirement 3)
+>   float St_flux = St * (h_top_old / h_top_new);
+> 
+307d410
+<   St += uDt*(evap - rain*0.001)*35.0/(1027.0*40.0);
+309,315c412
+<   // Wind stress: Newton's 3rd law, mass-weighted. The ocean top layer
+<   // (~200 m of water) has far more inertia per m^2 than the low-air column
+<   // (~5000 m of thin air): massRatio = (rhoL*Hlo)/(rho_w*H_top) ~= 1/37, so
+<   // the SAME momentum flux barely nudges the ocean but strongly decelerates
+<   // the wind. (Previously this was backwards: the ocean got the full
+<   // impulse and the air lost only 2%, which pumped spurious kinetic energy
+<   // into the ocean and let it dominate/overpower the real circulation.)
+---
+>   // Wind stress: Newton's 3rd law, mass-weighted dynamically using h_top_new
+318c415
+<   float massRatio = (rhoL*Hlo)/(1027.0*200.0);
+---
+>   float massRatio = (rhoL*Hlo)/(1027.0*h_top_new);
+363c460
+<   float rt = -0.00017*(Ts-283.0) + 0.00078*(St-35.0);   // relative density
+---
+>   float rt = -0.00017*(Ts_flux-283.0) + 0.00078*(St_flux-35.0);   // relative density
+366,376c463,474
+<   // Mass-weighted (thickness-weighted) exchange, consistent with the 200 m /
+<   // 800 m top/deep layer depths assumed elsewhere: the thin top layer should
+<   // respond ~4x more than the thick deep layer per unit of heat/salt/momentum
+<   // exchanged, so that the deep ocean acts as a slow, high-inertia return
+<   // limb instead of mirroring (and, when over-weighted, overpowering) the
+<   // surface circulation.
+<   const float wTopEx = 0.8;   // = Hdeep/(Htop+Hdeep), Htop=200 Hdeep=800
+<   const float wDeepEx = 0.2;  // = Htop /(Htop+Hdeep)
+<   float dT = mix_*(Td - Ts), dS = mix_*(Sd - St);
+<   Ts += dT*wTopEx;   Td -= dT*wDeepEx;
+<   St += dS*wTopEx;   Sd -= dS*wDeepEx;
+---
+> 
+>   // Symmetric, thickness-weighted exchange of heat, salt and momentum (Requirement 3)
+>   float total_h = h_top_new + h_deep;
+>   float wTopEx = h_deep / total_h;
+>   float wDeepEx = h_top_new / total_h;
+> 
+>   float dT = mix_*(Td - Ts_flux), dS = mix_*(Sd - St_flux);
+>   Ts = Ts_flux + dT*wTopEx;
+>   Td -= dT*wDeepEx;
+>   St = St_flux + dS*wTopEx;
+>   Sd -= dS*wDeepEx;
+> 
+397c495,496
+<   oDeep = vec4(Td, vd, Sd);`
+---
+>   oDeep = vec4(Td, vd, Sd);
+>   oEta  = vec4(eta_new, 0.0, 0.0, 0.0);`
+411a511
+> layout(location=4) out vec4 oEta;
+429a530
+>   oEta  = vec4(0.0, 0.0, 0.0, 0.0);
+527c628
+< uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB;
+---
+> uniform sampler2D uTop, uDeep, uLoA, uLoB, uHiA, uHiB, uEta;
+552c653,654
+<   else v = (ha.z-215.0)/45.0;                        // high air T
+---
+>   else if(mode==9) v = (ha.z-215.0)/45.0;            // high air T
+>   else v = (texelFetch(uEta, cTex(cell), 0).r + 75.0)/150.0; // SSH anomaly (-75m to +75m)
+6a7
+>   'Sea-surface height',
+233a234,259
+> 
+> ---
+> 
+> ## 9. Physical Conservation Laws and Advanced Inter-Layer Ocean Coupling
+> 
+> To ensure the planetary climate behaves as a closed, physically consistent system, the ocean model enforces strict conservation laws:
+> 
+> 1. **Mass / Volume Conservation:**
+>    - Introduced a sea-surface height ($\eta$) field stored in a double-buffered auxiliary texture.
+>    - The top layer thickness is $h_{top} = 200.0 + \eta$, and the deep layer thickness is $h_{deep} = 800.0 - \eta$. Total ocean depth $H_{total} = 1000$ m is strictly constant.
+>    - Evolved $\eta$ via a discrete, conservative finite-volume continuity equation: $\frac{\partial \eta}{\partial t} = -\nabla \cdot (h_{top} \mathbf{u}_{top}) + \text{rain} - \text{evap}$, using upwind face thickness values.
+>    - Prevents global volume drift with a high-precision mass-correction relaxer.
+> 
+> 2. **Momentum Conservation Between Layers:**
+>    - Added a direct mechanical drag term resisting shear: $\mathbf{F}_{drag} = C_{drag} \cdot (\mathbf{u}_{top} - \mathbf{u}_{deep}) \cdot (1 + 0.5 |\mathbf{u}_{top} - \mathbf{u}_{deep}|)$.
+>    - Acceleration changes are equal and opposite, weighted by respective layers' mass/thickness: $\mathbf{a}_{drag\_top} = -\mathbf{F}_{drag} / (\rho_0 h_{top})$ and $\mathbf{a}_{drag\_deep} = \mathbf{F}_{drag} / (\rho_0 h_{deep})$. Total oceanic momentum is exactly conserved.
+> 
+> 3. **Energy (Heat) and Salinity Conservation:**
+>    - Tracks heat content as $C_p \rho_0 h T$ and salinity mass as $h S$.
+>    - Evolved temperature and salinity in conservative flux-form: $Q^{new} = Q^{old} - \Delta t \cdot \nabla \cdot (h \mathbf{u} T) + \Delta t \cdot \nu \cdot \nabla^2(h T)$.
+>    - Evolved vertical exchanges symmetrically and thickness-weighted: $\Delta T_{top} = H_{mix} \cdot w_{top}$ and $\Delta T_{deep} = -H_{mix} \cdot w_{deep}$, where weights $w_{top} = h_{deep} / (h_{top} + h_{deep})$ and $w_{deep} = h_{top} / (h_{top} + h_{deep})$ adapt dynamically. Net global heat is conserved.
+>    - Evaporation removes water but leaves salt behind, naturally concentrating salinity under the updated $h_{top}$ thickness. Rain dilutes it similarly. No salt is ever created or destroyed.
+> 
+> 4. **Inter-Layer Coupling / Friction:**
+>    - Integrates explicit mechanical shear friction during the dynamics step, which matches real-world oceanic viscosity at the interface of boundary layers.
+>    - Added a new **Sea-surface height** rendering view mode (Mode 10) to let the user visualize real-time dynamic tides, piling-up of water, and gyres.
+

@@ -478,7 +478,7 @@ Planet.prototype.render = function () {
       .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
     gl.bindVertexArray(this.vaoEmpty);
-    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
+    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 6));
   }
   gl.depthMask(true);
   gl.disable(gl.BLEND);
@@ -538,7 +538,7 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
       .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
     gl.bindVertexArray(this.vaoEmpty);
-    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
+    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 6));
   }
   gl.depthMask(true);
   gl.disable(gl.BLEND);
