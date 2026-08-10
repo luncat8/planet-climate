@@ -327,9 +327,12 @@ Planet.prototype.decl = function () {
 Planet.prototype.sunDir = function () {
   var d = this.decl();
   
-  // calculate  Sun's longitude with planet's angular velocity (omega).
-  // If omega = 0, the planet is tidally locked.
-  var lon = this.params.omega * this.simTime; 
+  // omegaOrbit alone controls how fast the sub-solar point slides across the
+  // surface (the day/night cycle) — independent of omegaSpin, which only feeds
+  // the Coriolis term. Set omegaOrbit = 0 to freeze the sun entirely (tidal
+  // lock) while keeping a physically-motivated Coriolis force from the
+  // planet's real rotation.
+  var lon = this.params.omegaOrbit * this.simTime;
   
   return [Math.cos(d) * Math.cos(lon), Math.sin(d), Math.cos(d) * Math.sin(lon)];
 };
@@ -338,20 +341,23 @@ Planet.prototype.step = function () {
   var W = this.grid.W, H = this.grid.H;
   var P = this.params;
 
+  var pkTop = 9.81 * 200 * 1027;
   var po = this.prog.ocean.use();
   this.gridUniforms(po);
   po.tex('uTop', this.A[0]).tex('uDeep', this.A[1])
-    .f('uDt', P.dt).f('uOmega', P.omega)
+    .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
     .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
     .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
-    .f('uPkTop', 9.81 * 200 * 1027).f('uPkDeep', 9.81 * 800 * 1027);
+    .f('uPkTop', pkTop)
+    .f('uPkDeep', pkTop * P.oceanPkRatio)
+    .f('uPkAbyss', pkTop * P.oceanAbyssRatio);
   this.fullscreen('dynO', W, H);
 
   var pa = this.prog.air.use();
   this.gridUniforms(pa);
   pa.tex('uLoA', this.A[2]).tex('uLoB', this.A[3]).tex('uHiA', this.A[4]).tex('uHiB', this.A[5])
-    .f('uDt', P.dt).f('uOmega', P.omega)
+    .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelAir).f('uNuT', P.nuTAir)
     .f('uFricLo', P.fricAirLow).f('uFricHi', P.fricAirHigh)
     .f('uRhoLo', 1.1).f('uRhoHi', 0.55);

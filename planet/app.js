@@ -79,6 +79,8 @@ var ui = {
   level: 6,
   stats: { fps: 0, days: 0, cells: 0, level: 6 },
   err: null,
+  // remembered sun rate so un-ticking "tidally locked" restores the old value
+  lockedOrbit: 6.2831853 / 86400,
   // element refs
   runBtn: null,
   layerRadios: {},
@@ -150,6 +152,7 @@ function refreshDynamic() {
   Object.keys(ui.checks).forEach(function (k) {
     ui.checks[k].checked = P[k] > 0.5;
   });
+  if (ui.lockChk) ui.lockChk.checked = P.omegaOrbit < 1e-9;
   Object.keys(ui.knobVals).forEach(function (key) {
     var def = PARAMS[key];
     var v = P[key];
@@ -358,6 +361,30 @@ function buildUI() {
     lab.appendChild(inp);
     panel.appendChild(lab);
   });
+
+  // Tidal lock: freezes the sun's apparent motion (omegaOrbit = 0) while
+  // leaving the planet's real spin -- and therefore Coriolis -- untouched.
+  var lockLab = el('label', 'chk');
+  var lockSpan = el('span', null, 'Tidally locked (freeze sun)');
+  lockSpan.title = "Freezes the sun's apparent motion (omegaOrbit = 0) while leaving the planet's real spin — and thus Coriolis — untouched.";
+  lockLab.appendChild(lockSpan);
+  var lockInp = document.createElement('input');
+  lockInp.type = 'checkbox';
+  lockInp.className = 'accent-cyan-400';
+  lockInp.onchange = function () {
+    var P = ui.planet && ui.planet.params;
+    if (!P) return;
+    if (lockInp.checked) {
+      if (P.omegaOrbit > 1e-9) ui.lockedOrbit = P.omegaOrbit;
+      setParam('omegaOrbit', 0);
+    } else {
+      setParam('omegaOrbit', ui.lockedOrbit || PARAMS.omegaOrbit.default);
+    }
+    syncSliders();
+  };
+  ui.lockChk = lockInp;
+  lockLab.appendChild(lockInp);
+  panel.appendChild(lockLab);
 
   // subdivision level
   panel.appendChild(el('div', 'lab', 'Subdivision level'));
