@@ -1,9 +1,13 @@
 /* geodesics.js - icosahedral dual-hex grid generation (pure mesh math, no WebGL) */
 var PLANET_R = 6.371e6;
 
-function Grid(level, seed) {
+function Grid(level, seed, hTop) {
   this.level = level;
   this.seed = seed === undefined ? 12345 : seed;
+  // Global reference mixed-layer scale (params.hTop): the per-cell refHTop
+  // profile below is expressed as a multiple of it, so the slider still sets
+  // the overall thickness of the top layer.
+  this.hTop = hTop === undefined ? 60 : hTop;
 }
 
 Grid.mulberry32 = function (a) {
@@ -32,6 +36,7 @@ Grid.sub = function (a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
 
 Grid.prototype.build = function () {
   var level = this.level, seed = this.seed;
+  var hTopScale = this.hTop / 60;
   var t = (1 + Math.sqrt(5)) / 2;
   var pos = [
     [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
@@ -153,7 +158,7 @@ Grid.prototype.build = function () {
     // mixed-layer depth deepens toward the poles (thermocline structure)
     var latb = Math.asin(Math.max(-1, Math.min(1, pos[ib][1])));
     var x01 = Math.abs(latb) / (Math.PI / 2);
-    var mld = 50 + 950 * x01 * x01;
+    var mld = (50 + 950 * x01 * x01) * hTopScale;
     mld = Math.min(mld, 0.8 * dep);
     var s = Math.min(1, Math.max(0, dep / REFD));
     var ramp = s * s * (3 - 2 * s);                    // smoothstep(0, REFD, dep)
@@ -168,6 +173,10 @@ Grid.prototype.build = function () {
   var cellA = new Float32Array(W * H * 4);
   var cellB = new Float32Array(W * H * 4);
   var bathy = new Float32Array(W * H * 4);
+  // Texels past V are padding. COUPLE_FS has no cell<uCount guard, so give the
+  // padding a valid depth too: otherwise [MARG, D-MARG] inverts there and the
+  // coupling pass divides by a negative h_deep.
+  for (var ip = 0; ip < W * H; ip++) bathy[ip * 4] = DFLOOR;
   var nbrA = new Float32Array(W * H * 6 * 4);
   var nbrB = new Float32Array(W * H * 6 * 4);
 

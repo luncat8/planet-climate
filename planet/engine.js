@@ -209,7 +209,7 @@ Planet.prototype.getEquiProg = function (m) {
 Planet.prototype.build = function (level) {
   var gl = this.gl;
   this.destroyGrid();
-  var g = new Grid(level).build();
+  var g = new Grid(level, undefined, this.params.hTop).build();
   this.grid = g;
   var W = g.W, H = g.H;
 
@@ -293,6 +293,7 @@ Planet.prototype.destroyGrid = function () {
 
 Planet.prototype.gridUniforms = function (p) {
   p.iv2('uDim', this.grid.W, this.grid.H).i('uCount', this.grid.V)
+    .f('uMaxDepth', this.grid.maxDepth)
     .tex('uCellA', this.texCellA).tex('uCellB', this.texCellB)
     .tex('uNbrA', this.texNbrA).tex('uNbrB', this.texNbrB)
     .tex('uBathy', this.texBathy).tex('uLand', this.texMask);

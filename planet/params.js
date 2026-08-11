@@ -80,11 +80,10 @@ var PARAMS = {
   running:        { default: true },
   /* Ocean geometry. The sea-floor depth is now PER CELL (a real heightmap
      exported by geodesics.js as uBathy.x) and h_deep = depth - h_top is
-     derived, so the total ocean volume never changes. hTop/hTotal remain only
-     as legacy global scales; the per-cell reference thickness lives in
-     uBathy.y. */
+     derived, so the total ocean volume never changes. hTop is no longer a
+     global thickness: it scales the per-cell reference profile in
+     Grid.build(), so changing it requires a rebuild (see Planet.build). */
   hTop:           { default: 60 },
-  hTotal:         { default: 1000 },
   /* Deep-layer LINEAR background friction; the dominant term is now the
      quadratic, depth-scaled bottom drag (bottomDragCd), so this is only a tiny
      residual damping instead of the old 19-day-everywhere constant. */

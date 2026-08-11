@@ -25,7 +25,7 @@ var MODE_FIELDS = [
   'length(wd.yz)/0.25',                      // 13 deep-ocean speed
   '(wd.w-33.0)/4.0',                         // 14 deep-ocean salinity
   'ht/1200.0',                             // 15 top-layer thickness h_top (m)
-  'dep/4000.0',                            // 16 sea-floor depth (m)
+  'dep/uMaxDepth',                         // 16 sea-floor depth (m)
 ];
 // modes that use magnitude (dark-background) coloring; palette-color fields excluded
 var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1 };
@@ -72,6 +72,7 @@ uniform sampler2D uNbrA;     // idx , edgeLen , dist , valid
 uniform sampler2D uNbrB;     // nx , ny , rotA , rotB
 uniform sampler2D uBathy;    // depth , refHTop , seaLevel , rawHeight  (STATIC)
 uniform sampler2D uLand;     // dynamic land mask in .x  (one snapshot per step)
+uniform float uMaxDepth;     // deepest sea floor [m], for normalising depth views
 
 // Shared clamp margin for the top/deep layer thicknesses: every cell is
 // guaranteed depth >= 30 m by the mesh generator, so [MARG, D-MARG] is a
@@ -138,7 +139,6 @@ ${OCEAN_UNPACK}
   vec4 ha = texelFetch(uHiA,  cTex(cell),0);
   vec4 hb = texelFetch(uHiB,  cTex(cell),0);
   vec4 ca = texelFetch(uCellA,cTex(cell),0);
-  vec4 cb = texelFetch(uCellB,cTex(cell),0);
 
 ${modeValueSrc(m)}
   float vVal = clamp(v, 0.0, 1.0);
@@ -235,8 +235,7 @@ void main(){
     return;
   }
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
-  vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
+  vec3 n = normalize(ca.xyz);
   float area = ca.w;
   float land = cellLand(cell);          // dynamic mask: one snapshot per step
   float D    = cellDepth(cell);         // per-cell sea-floor depth [m]
@@ -374,14 +373,20 @@ void main(){
   // energy every step (~3%/step at default spin, ~64%/step at max), which was
   // previously only hidden by the velocity clamp.  The (1+(dt*f)^2) denominator
   // makes the rotation exactly energy conserving and unconditionally stable.
+  //
+  // SIGN: the tangent basis is e1 = norm(cross(n, AXIS)), e2 = cross(e1, n),
+  // so e1 x e2 = -n -- it is LEFT handed, not the usual east/north/up. Working
+  // -2*Omega x v out in this basis gives acc = (-f*w, +f*u), NOT the textbook
+  // (+f*w, -f*u), so the off-diagonal terms below are flipped accordingly.
+  // Getting this backwards silently mirrors every gyre and jet.
   float fc = 2.0*uOmega*n.y;
   float fd = uDt*fc;
   float fden = 1.0 + fd*fd;
 
   vec2 pT = vt0 + uDt*accT;
   vec2 pD = vd0 + uDt*accD;
-  vec2 vt1 = vec2(pT.x + fd*pT.y, pT.y - fd*pT.x)/(fden*(1.0 + uDt*uFricTop));
-  vec2 vd1 = vec2(pD.x + fd*pD.y, pD.y - fd*pD.x)/(fden*(1.0 + uDt*fricDeepEff));
+  vec2 vt1 = vec2(pT.x - fd*pT.y, pT.y + fd*pT.x)/(fden*(1.0 + uDt*uFricTop));
+  vec2 vd1 = vec2(pD.x - fd*pD.y, pD.y + fd*pD.x)/(fden*(1.0 + uDt*fricDeepEff));
   vt1 *= (1.0-land); vd1 *= (1.0-land);
   vt1 = clamp(vt1, vec2(-3.0), vec2(3.0));
   vd1 = clamp(vd1, vec2(-3.0), vec2(3.0));
@@ -429,7 +434,7 @@ layout(location=3) out vec4 oHiB;
 uniform sampler2D uLoA, uLoB, uHiA, uHiB;
 uniform float uDt, uOmega, uNuVel, uNuT, uFricLo, uFricHi, uRhoLo, uRhoHi;
 
-void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
+void stepAir(int cell, vec3 n, float area, float land,
              sampler2D tA, sampler2D tB, float fric, float rho,
              out vec4 outA, out vec4 outB)
 {
@@ -472,11 +477,12 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   vec2 acc = -gradP/rho + uNuVel*lapV - advV + v0*div;
 
   // Semi-implicit (energy-conserving) Coriolis, same 2x2 solve as the ocean.
+  // Same left-handed-basis sign convention: acc = (-f*w, +f*u).
   float f = fric*(1.0 + 2.0*land);
   float fc = 2.0*uOmega*n.y;
   float fd = uDt*fc;
   vec2  pv = v0 + uDt*acc;
-  vec2  v1 = vec2(pv.x + fd*pv.y, pv.y - fd*pv.x)/((1.0 + fd*fd)*(1.0 + uDt*f));
+  vec2  v1 = vec2(pv.x - fd*pv.y, pv.y + fd*pv.x)/((1.0 + fd*fd)*(1.0 + uDt*f));
   v1 = clamp(v1, vec2(-90.0), vec2(90.0));
 
   vec3 tr1 = tr0 + uDt*(uNuT*lapT - advT + tr0*div);
@@ -494,11 +500,10 @@ void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
   if(cell >= uCount){ oLoA=vec4(0.0); oLoB=vec4(0.0); oHiA=vec4(0.0); oHiB=vec4(0.0); return; }
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
-  vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
+  vec3 n = normalize(ca.xyz);
   float land = cellLand(cell);
-  stepAir(cell, n, e1, e2, ca.w, land, uLoA, uLoB, uFricLo, uRhoLo, oLoA, oLoB);
-  stepAir(cell, n, e1, e2, ca.w, land, uHiA, uHiB, uFricHi, uRhoHi, oHiA, oHiB);
+  stepAir(cell, n, ca.w, land, uLoA, uLoB, uFricLo, uRhoLo, oLoA, oLoB);
+  stepAir(cell, n, ca.w, land, uHiA, uHiB, uFricHi, uRhoHi, oHiA, oHiB);
 }`;
 
 /* Coupling pass. Compiled twice (ocean / air): both variants read all 8 state
@@ -550,7 +555,6 @@ float meanInsol(float lat, float decl){
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz);
   float land = cellLand(cell);       // SAME snapshot the dynamics passes used
   float D    = cellDepth(cell);
@@ -909,7 +913,6 @@ ${modeSampleFnSrc(m)}
 void main(){
   int cell = gl_VertexID;
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz);
   vec4 lb = texelFetch(uLoB, cTex(cell),0);
   vec4 hb = texelFetch(uHiB, cTex(cell),0);
