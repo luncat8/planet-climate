@@ -558,12 +558,107 @@ The atmosphere has its own damping and no reported symptom, but the same
 
 ---
 
-### Phase 8 — Optional / stretch
+### Phase 8 — Forward-backward gravity-wave stabiliser — **DONE** (`d73d2a9`)
 
-- **8.1 `AIR_FS` implicit Coriolis.** Apply the now-proven `coriFric()` to the air solver.
-- **8.2 Barotropic divergence correction.** Addresses §1.1c. A Jacobi/multigrid projection so `div(h_t·u_t + h_d·u_d) = 0`. Real work (iterative solve on an unstructured hex grid); only worth it if the deep flow visibly ignores bathymetry after Phase 2b.
-- **8.3 PGF rebalance toward true `g'`.** Split `accT` into an explicit barotropic proxy + a genuine `-g'∇eta` baroclinic term. Physically correct but *will* require retuning every preset — defer until Phase 6.1 diagnostics can quantify what changed.
-- **8.4 Grid-cached bathymetry.** Bathymetry generation adds cost to `build()`, which runs on every resolution change (`app.js:rebuild`). Cache by `(level, seed)`.
+*Unplanned phase, opened by a user report after Phase 7: the polar checkerboard
+was gone, but at level 6-7 waves now grew across the **whole map**. Level 5, or
+a small `dt`, stayed clean.*
+
+**Not a Phase 7 regression.** The 2x2 attribution (L6, dt=600, `gMaxEta` by day)
+showed legacy is *worse*: `rhieChow:0, coriCN:false` hits 16 by day 4, while the
+Phase 7 default takes until day 10. Phase 7 slowed the growth; it never caused it.
+
+**Root cause.** `h_top` and `u_top` are an oscillator. Linearised about a rest
+thickness `H`: `eta_t = -H*div(u)`, `u_t = -g*grad(eta)`, `c = sqrt(g*H)`. Both
+halves were stepped explicitly, so the mass update used the *old* `u` and the
+momentum update the *old* `eta`. Forward Euler on an oscillator has gain
+`sqrt(1+(c*k*dt)^2) > 1` at **every** `dt` — there is no stable timestep, only a
+slow one. Integrated to a fixed physical time, `ln(amp) ~ T*c^2*k^2*dt/2`:
+linear in `dt`, quadratic in `1/dx`, and proportional to `H`.
+
+Confirmed on all three axes at fixed sim time:
+
+| axis | result |
+|---|---|
+| `dt` (L6, 10 d) | `gMaxEta` 0.69 / 1.48 / 14.10 at dt = 120 / 300 / 600 — monotonic, **no knee** |
+| `dx` (dt=600) | L5 quiet, L6 divergent, L7 grows even at dt=120 |
+| `c^2` (L6, dt=600) | `hTop` 60->240 is ~18x worse; `D` 1000->4298 barely matters |
+
+The last row corrected an earlier wrong diagnosis of mine (`c = sqrt(g*D)` with a
+CFL knee). The relevant speed is `sqrt(g*h_top)` — the **top-layer** thickness,
+not the column depth — so this is not a CFL threshold that a smaller `dt` escapes.
+
+**Fix — forward-backward ordering, mass side.** Advance `u` first, substitute the
+new `u` into the mass equation:
+
+    eta1 = eta0 - dt*H*div(u0) + dt^2*g*H*lap(eta0)
+
+The extra term is a **scalar** Laplacian of `eta`, accumulated from neighbour
+values the existing loop already fetches — no second pass, no wider stencil. It
+touches only `eta`, so the rotational/geostrophic flow is untouched.
+
+**Self-limiting coefficient.** `mDif = sum(L/d)/area` is the diagonal of the
+discrete Laplacian, so `nu2 = fbStab*dt^2*g*h*mDif` *is* the local `(c*k*dt)^2`,
+and the gain applied is `nu2/(1+nu2)`: ~0 where the timestep is already
+comfortable, saturating where it is stiff. This is essential, not a refinement —
+see the rejected attempts below.
+
+**Results** (`bathyMode:1`):
+
+| case | fbStab=0 | fbStab=30 |
+|---|---|---|
+| L6 dt=600, 10 d `gMaxEta` | 14.10 | **0.69** |
+| L6 dt=600, 10 d `gMaxSpd` | 4.24 (clamp-saturated) | **0.10** |
+| L7 dt=120, 5 d `gMaxEta` | 1.27 and accelerating | **0.62**, near-linear |
+
+Signal preserved (dt=120, 1600 steps, `meanSpd`): L5 -0.07%, L6 -4%, L7
+0.02964->0.01910 — it engages hardest exactly where the problem is worst.
+Conservation (L5, 5000->8000 steps): volume +0.000e+00%, salt +2.983e-04%,
+heat -2.817e-03%; 0 NaN, 0 clampHits, no shader logs.
+
+**Verification.** `{rhieChow:0, coriCN:false, fbStab:0}` still reproduces the
+pre-Phase-7 head bitwise (L5 `3a86de87`, L6 `94122d57`); `fbStab` 0 vs 30 give
+different hashes (`e09e2f62` vs `e2055b45`), proving the term is wired and not
+dead code. Render smoke: 12 programs / 36 paths / 0 failures.
+
+**Two rejected attempts, recorded so they are not retried:**
+
+1. **Momentum-side** `accT += fbStab*dt*g*h*lap(u)`. Stabilises well (`gMaxEta`
+   14.1->0.69) but costs **30-44% of mean surface speed**: `lap(u) == grad(div u)`
+   only for curl-free flow, so it damps the gyres too.
+2. **Mass-side with a uniform coefficient.** The `dt^2*g*H*k^2` term scales as
+   `1/dx^2`, so a fixed `fbStab=0.5` cost 10% of `meanSpd` at L5 but **55% at L7** —
+   over-damping the finest grid hardest, exactly backwards.
+
+A third trap: the *first* adaptive gain looked perfect on signal metrics (L5/L6
+bitwise-unchanged) precisely because `nu2 ~ 0.07` meant it applied only ~6% of the
+needed correction — the fix was neutered. **Always re-run the failing case after
+making a fix gentler**; unchanged signal metrics are a red flag, not a success.
+And check a calibrated coefficient against its slider bounds: the adaptive form
+needs `fbStab ~ 30`, but it first shipped with default 1.0 / max 2 (the same
+mistake as `rhieChow=0.25` in Phase 7).
+
+**Harness additions.** `noise.js` gained global amplitude metrics
+(`gRmsEta`/`gMaxEta`/`gRmsSpd`/`gMaxSpd`), `--marks=`, and `protocolTimeout: 0`.
+The pre-existing metrics were all *interior high-pass residuals* and were
+structurally blind to a whole-map mode — the symptom was invisible until this
+was added.
+
+**New param:** `fbStab` — 'Gravity-wave stab.', default **30**, range 0-100,
+step 1. Schema is now **60** sliders. `0` restores the legacy explicit scheme.
+
+---
+
+### Phase 9 — Optional / stretch
+
+- **9.1 `AIR_FS` explicit-scheme defects.** *Promoted — now two known issues.*
+  `AIR_FS` still uses explicit Coriolis (`coriFric()` is reusable), **and** it
+  almost certainly has the same forward-Euler gravity-wave defect fixed above.
+  No symptom is reported yet because the atmosphere has stronger damping, but
+  the analysis carries over directly.
+- **9.2 Barotropic divergence correction.** Addresses §1.1c. A Jacobi/multigrid projection so `div(h_t·u_t + h_d·u_d) = 0`. Real work (iterative solve on an unstructured hex grid); only worth it if the deep flow visibly ignores bathymetry after Phase 2b.
+- **9.3 PGF rebalance toward true `g'`.** Split `accT` into an explicit barotropic proxy + a genuine `-g'∇eta` baroclinic term. Physically correct but *will* require retuning every preset — defer until Phase 6.1 diagnostics can quantify what changed.
+- **9.4 Grid-cached bathymetry.** Bathymetry generation adds cost to `build()`, which runs on every resolution change (`app.js:rebuild`). Cache by `(level, seed)`.
 
 ---
 

@@ -22,6 +22,9 @@ const LEVEL = parseInt(arg('level', '5'), 10);
 const STEPS = parseInt(arg('steps', '500'), 10);
 const PATCH = JSON.parse(arg('params', '{}'));
 const SERIES = process.argv.includes('--series');
+// --marks=0,100,200,...  custom sampling points for the series
+const MARKS_ARG = (process.argv.find(a => a.startsWith('--marks=')) || '').split('=')[1];
+const MARKS = MARKS_ARG ? MARKS_ARG.split(',').map(Number) : null;
 const OUT = arg('out', '');
 
 (async () => {
@@ -30,6 +33,7 @@ const OUT = arg('out', '');
     args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
            '--use-angle=swiftshader', '--disable-gpu-sandbox',
            '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
+    protocolTimeout: 0,   // long step loops run inside one evaluate() call
   });
   const page = await browser.newPage();
   const logs = [];
@@ -39,7 +43,8 @@ const OUT = arg('out', '');
     await page.addScriptTag({ content: fs.readFileSync(path.join(DIR, f), 'utf8') });
   }
 
-  const res = await page.evaluate(async (LEVEL, STEPS, PATCH, SERIES) => {
+  page.setDefaultTimeout(0);
+  const res = await page.evaluate(async (LEVEL, STEPS, PATCH, SERIES, MARKS) => {
     Math.random = () => 0.5;
     window.requestAnimationFrame = () => 0;
     const planet = new Planet(document.getElementById('c'), LEVEL);
@@ -82,6 +87,7 @@ const OUT = arg('out', '');
       for (let b = 0; b < NB; b++) acc.push({ n:0, h2:0, s2:0, e2:0, hmag:0, smag:0 });
       let gh = 0, gs = 0, ge = 0, n = 0;
       let worst = { r: 0, lat: 0 };
+      let ge2 = 0, gemax = 0, gsmax = 0, gspd2 = 0, nAll = 0;
       for (let c = 0; c < V; c++) {
         if (cellB[c*4+3] > 0.5) continue;           // skip land
         const D = cellC ? cellC[c*4] : planet.params.hTotal;
@@ -95,6 +101,13 @@ const OUT = arg('out', '');
           sh += topS[j*4]; su += topV[j*4]; sv += topV[j*4+1];
           se += topS[j*4] - (cellC ? cellC[j*4+1] : hRef);
           k2++;
+        }
+        {   // global (all wet cells) amplitude, independent of the interior filter
+          const eG = topS[c*4] - hRef;
+          const sG = Math.hypot(topV[c*4], topV[c*4+1]);
+          ge2 += eG*eG; gspd2 += sG*sG; nAll++;
+          if (Math.abs(eG) > gemax) gemax = Math.abs(eG);
+          if (sG > gsmax) gsmax = sG;
         }
         if (!allWet || k2 === 0) continue;          // interior cells only
         const rh = topS[c*4] - sh/k2;
@@ -123,20 +136,28 @@ const OUT = arg('out', '');
         rmsH: +Math.sqrt(gh/n).toPrecision(4),
         rmsSpd: +Math.sqrt(gs/n).toPrecision(4),
         rmsEta: +Math.sqrt(ge/n).toPrecision(4),
+        // global amplitude over every wet cell: this is what "waves on the
+        // whole map" shows up in, and it is NOT a high-pass residual.
+        gRmsEta: nAll ? +Math.sqrt(ge2/nAll).toPrecision(4) : 0,
+        gMaxEta: +gemax.toPrecision(4),
+        gRmsSpd: nAll ? +Math.sqrt(gspd2/nAll).toPrecision(4) : 0,
+        gMaxSpd: +gsmax.toPrecision(4),
         worst, bins,
       };
     }
 
     const series = [];
     if (SERIES) {
-      const marks = [0, 50, 100, 200, 400, 800, 1600, 3200];
+      const marks = MARKS || [0, 50, 100, 200, 400, 800, 1600, 3200];
       let done = 0;
       for (const m of marks) {
         if (m > STEPS) break;
         while (done < m) { planet.step(); done++; }
         const s = measure();
         series.push({ step: m, rmsH: s.rmsH, rmsSpd: s.rmsSpd,
-                      polar: s.bins[5].rmsH, equat: s.bins[0].rmsH });
+                      polar: s.bins[5].rmsH, equat: s.bins[0].rmsH,
+                      gRmsEta: s.gRmsEta, gMaxEta: s.gMaxEta,
+                      gRmsSpd: s.gRmsSpd, gMaxSpd: s.gMaxSpd });
       }
       while (done < STEPS) { planet.step(); done++; }
     } else {
@@ -144,7 +165,7 @@ const OUT = arg('out', '');
     }
     const final = measure();
     return { series, final, dt: planet.params.dt, spacingKm: null };
-  }, LEVEL, STEPS, PATCH, SERIES);
+  }, LEVEL, STEPS, PATCH, SERIES, MARKS);
 
   const out = { level: LEVEL, steps: STEPS, params: PATCH, ...res, errors: logs };
   console.log(JSON.stringify(out, null, 2));

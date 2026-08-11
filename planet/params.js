@@ -6,8 +6,8 @@
    from this so there is exactly one definition. */
 var PARAMS = {
   // tunable (have min/max/step) -> become sliders
-  dt:        { label: 'Timestep dt',          default: 120,   min: 120, max: 1800, step: 60,   fmt: function (v) { return v + ' s'; } },
-  substeps:  { label: 'Substeps / frame',     default: 4,     min: 1,   max: 8,    step: 1 },
+  dt:        { label: 'Timestep dt',          default: 60,   min: 1, max: 900, step: 1,   fmt: function (v) { return v + ' s'; } },
+  substeps:  { label: 'Substeps / frame',     default: 16,     min: 1,   max: 8,    step: 1 },
   /* Physical spin rate (rad/s) — drives the real 3-D Coriolis force. A tidally
      locked planet still rotates once per orbit in the inertial frame, so this
      should generally stay non-zero even when omegaOrbit = 0. */
