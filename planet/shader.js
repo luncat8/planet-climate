@@ -146,7 +146,10 @@ ${modeMagSrc(m)}
 }
 
 var EQUI_CLOUD_FS = SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uLookup, uCellA, uLoB, uHiB;
+// NOTE: uCellA/uCellB/uNbrA/uNbrB are already declared by SHADER_COMMON.
+// Re-declaring uCellA here was a compile error ('redefinition') that silently
+// disabled the cloud deck in equirect/map mode.
+uniform sampler2D uLookup, uLoB, uHiB;
 uniform vec3 uSun;
 uniform float uNight;
 in vec2 vUv;
