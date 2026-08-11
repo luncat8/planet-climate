@@ -128,10 +128,46 @@ Grid.prototype.build = function () {
     if (land[i4] > 0.5) landCount++;
   }
 
+  /* ---- BATHYMETRY -------------------------------------------------------
+     The same `height[]` noise that produced the land mask is reused as a real
+     sea-floor heightmap (it used to be discarded).  Per cell we store
+       x = depth    [m]  sea-floor depth below the reference sea level
+       y = refHTop  [m]  reference (equilibrium) top-layer thickness
+       z = seaLevel [m]  reference sea level (0 for now, kept for later use)
+       w = height        the raw noise value, handy for debugging / views
+     `depth` is floored at DFLOOR so that even continental cells have a valid
+     [margin, D-margin] interval for the thickness clamps in the shaders; the
+     continents stay land through cellB.w regardless. */
+  var Dmax = 4000.0;     // abyssal depth of the deepest cell
+  var DFLOOR = 30.0;     // never let a cell be thinner than this
+  var REFD = 300.0;      // depth over which the mixed layer ramps up
+  var MINH = 10.0;       // minimum reference top-layer thickness
+  var MARGIN = 5.0;      // must match the shader-side clamp margin
+  var minHeight = sorted[0];
+  var oceanDepth = new Float32Array(V);
+  var refHTop = new Float32Array(V);
+  for (var ib = 0; ib < V; ib++) {
+    var f = (thr - height[ib]) / (thr - minHeight);
+    f = Math.min(1, Math.max(0, f));
+    var dep = Math.max(DFLOOR, f * Dmax);
+    // mixed-layer depth deepens toward the poles (thermocline structure)
+    var latb = Math.asin(Math.max(-1, Math.min(1, pos[ib][1])));
+    var x01 = Math.abs(latb) / (Math.PI / 2);
+    var mld = 50 + 950 * x01 * x01;
+    mld = Math.min(mld, 0.8 * dep);
+    var s = Math.min(1, Math.max(0, dep / REFD));
+    var ramp = s * s * (3 - 2 * s);                    // smoothstep(0, REFD, dep)
+    var rh = mld * ramp;
+    rh = Math.min(Math.max(rh, MINH), dep - MARGIN);
+    oceanDepth[ib] = dep;
+    refHTop[ib] = rh;
+  }
+
   var W = 256;
   var H = Math.ceil(V / W);
   var cellA = new Float32Array(W * H * 4);
   var cellB = new Float32Array(W * H * 4);
+  var bathy = new Float32Array(W * H * 4);
   var nbrA = new Float32Array(W * H * 6 * 4);
   var nbrB = new Float32Array(W * H * 6 * 4);
 
@@ -176,6 +212,10 @@ Grid.prototype.build = function () {
     cellB[i6 * 4 + 1] = e1n[1];
     cellB[i6 * 4 + 2] = e1n[2];
     cellB[i6 * 4 + 3] = land[i6];
+    bathy[i6 * 4 + 0] = oceanDepth[i6];
+    bathy[i6 * 4 + 1] = refHTop[i6];
+    bathy[i6 * 4 + 2] = 0.0;
+    bathy[i6 * 4 + 3] = height[i6];
 
     for (var k3 = 0; k3 < 6; k3++) {
       var base = (i6 + k3 * W * H) * 4;
@@ -252,6 +292,7 @@ Grid.prototype.build = function () {
 
   return {
     level: level, V: V, W: W, H: H, cellA: cellA, cellB: cellB,
+    bathy: bathy, maxDepth: Dmax,
     nbrA: nbrA, nbrB: nbrB, indices: indices,
     lookup: lookup, lookupW: lookupW, lookupH: lookupH,
     landFraction: landCount / V,

@@ -38,6 +38,20 @@ var PARAMS = {
      oceanDrag but conceptually independent of the density stratification
      (unlike the thermohaline exchange). Combined into one effective coeff. */
   mechanicalFric: { label: 'Mechanical friction',   default: 1e-3, min: 0, max: 5e-3, step: 1e-4, fmt: function (v) { return v.toExponential(1); } },
+  /* Stratification dependence of the inter-layer drag. The effective drag is
+     uDrag * mix(1, 1/(1+5*Ri)^2, stratDrag) with the bulk Richardson number
+     Ri = g'*h_top/|u_top-u_deep|^2, so a strong pycnocline nearly shuts the
+     vertical momentum exchange off while a weakly stratified, strongly sheared
+     column keeps the full drag. 0 reproduces the old constant-drag behaviour. */
+  stratDrag:      { label: 'Stratified drag (Ri)',  default: 1, min: 0, max: 1, step: 0.05 },
+  /* Quadratic bottom-drag coefficient: r = Cd*|u_deep|/max(h_deep,10 m), i.e.
+     a bottom stress -Cd*|u|*u spread over the deep layer. Strong on shallow
+     shelves (hours-days), weak in the abyss (hundreds of days). */
+  bottomDragCd:   { label: 'Bottom drag Cd',        default: 2.5e-3, min: 0, max: 1e-2, step: 1e-4, fmt: function (v) { return v.toExponential(1); } },
+  /* How many steps between recomputations of the dynamic coastline. The mask
+     is only ever refreshed at a step boundary, so every pass within one step
+     sees the same land snapshot. */
+  maskEvery:      { label: 'Coastline update every', default: 16, min: 1, max: 128, step: 1, fmt: function (v) { return v + ' steps'; } },
   /* Steric (thermal/haline expansion) amplitude, in metres of extra top-layer
      thickness per unit buoyancy anomaly (alphaT*dT - betaS*dS). This is what
      turns the T/S field into a sea-surface-height field and hence drives the
@@ -64,16 +78,20 @@ var PARAMS = {
   noise:     { label: 'Symmetry-break noise', default: 0.02,  min: 0,   max: 0.2,  step: 0.005 },
   // non-tunable (default only; UI handled by checkboxes / mode / equirect buttons)
   running:        { default: true },
-  /* Ocean geometry: reference top-layer thickness and fixed total depth (m).
-     h_deep = hTotal - h_top is derived, so total ocean volume never changes. */
-  /* ~60 m is a realistic mixed-layer depth; the surface heat capacity is now
-     derived from it (cp*rho*h_top) so heat exchange stays conservative. */
+  /* Ocean geometry. The sea-floor depth is now PER CELL (a real heightmap
+     exported by geodesics.js as uBathy.x) and h_deep = depth - h_top is
+     derived, so the total ocean volume never changes. hTop/hTotal remain only
+     as legacy global scales; the per-cell reference thickness lives in
+     uBathy.y. */
   hTop:           { default: 60 },
   hTotal:         { default: 1000 },
+  /* Deep-layer LINEAR background friction; the dominant term is now the
+     quadratic, depth-scaled bottom drag (bottomDragCd), so this is only a tiny
+     residual damping instead of the old 19-day-everywhere constant. */
+  fricOceanDeep:  { default: 1e-8 },
   nuTOcean:       { default: 4e3 },
   fricAirHigh:    { default: 2.5e-6 },
   fricOceanTop:   { default: 1.5e-6 },
-  fricOceanDeep:  { default: 6e-7 },
   rainK:          { default: 2200 },
   dayNight:       { default: 1 },
   mode:           { default: 0 },

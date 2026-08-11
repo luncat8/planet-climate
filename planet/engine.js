@@ -109,7 +109,9 @@ function Planet(canvas, level) {
   this.A = []; this.B = [];
   this.texCellA = null; this.texCellB = null;
   this.texNbrA = null; this.texNbrB = null;
+  this.texBathy = null; this.texMask = null;
   this.texLookup = null;
+  this.stepCount = 0;
   this.part = [];
   this.PW = 160; this.PH = 160;
 
@@ -183,6 +185,7 @@ Planet.prototype.compile = function () {
   this.prog.cplA = new Prog(gl, QUAD_VS, COUPLE_FS('air'), 'coupleAir');
   this.prog.init = new Prog(gl, QUAD_VS, INIT_FS, 'init');
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
+  this.prog.mask = new Prog(gl, QUAD_VS, MASK_FS, 'mask');
   this.prog.part = new Prog(gl, QUAD_VS, PART_FS, 'part');
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
@@ -215,11 +218,18 @@ Planet.prototype.build = function (level) {
   this.texNbrA = this.mkTex(W, H * 6, g.nbrA);
   this.texNbrB = this.mkTex(W, H * 6, g.nbrB);
   this.texLookup = this.mkTex(g.lookupW, g.lookupH, g.lookup, 1);
+  // Static per-cell bathymetry: (depth, refHTop, seaLevel, rawHeight).
+  // Never written by the simulation, so sum(h_top + h_deep) == sum(depth) is
+  // conserved by construction.
+  this.texBathy = this.mkTex(W, H, g.bathy);
+  // Dynamic land mask (single channel). Read-only during a step; refreshed by
+  // maskPass at step boundaries only (see step()).
+  this.texMask = this.mkTex(W, H, null, 1);
 
   // State layout (each RGBA32F, ping-ponged A <-> B):
   //   [0] topS  = (h_top, T_top, S_top, _)
   //   [1] topV  = (u_top, v_top, _, _)
-  //   [2] deepS = (T_deep, S_deep, _, _)     h_deep = hTotal - h_top (derived)
+  //   [2] deepS = (T_deep, S_deep, _, _)     h_deep = depth(cell) - h_top (derived)
   //   [3] deepV = (u_deep, v_deep, _, _)
   //   [4] loA = (u,v,T,P)  [5] loB = (q,cloud,_,_)
   //   [6] hiA = (u,v,T,P)  [7] hiB = (q,rain,_,_)
@@ -234,6 +244,7 @@ Planet.prototype.build = function (level) {
   this.fbo.cplA = this.mkFbo([this.A[4], this.A[5], this.A[6], this.A[7]]);
   this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);   // ocean
   this.fbo.init2 = this.mkFbo([this.A[4], this.A[5], this.A[6], this.A[7]]); // air
+  this.fbo.mask = this.mkFbo([this.texMask]);
 
   var pdata = new Float32Array(this.PW * this.PH * 4);
   for (var j = 0; j < this.PW * this.PH; j++) {
@@ -270,7 +281,7 @@ Planet.prototype.build = function (level) {
 Planet.prototype.destroyGrid = function () {
   var gl = this.gl;
   var partTexs = this.part.reduce(function (a, s) { return a.concat(s.tex); }, []);
-  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texNbrA, this.texNbrB, this.texLookup]);
+  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texNbrA, this.texNbrB, this.texLookup, this.texBathy, this.texMask]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
@@ -283,7 +294,26 @@ Planet.prototype.destroyGrid = function () {
 Planet.prototype.gridUniforms = function (p) {
   p.iv2('uDim', this.grid.W, this.grid.H).i('uCount', this.grid.V)
     .tex('uCellA', this.texCellA).tex('uCellB', this.texCellB)
-    .tex('uNbrA', this.texNbrA).tex('uNbrB', this.texNbrB);
+    .tex('uNbrA', this.texNbrA).tex('uNbrB', this.texNbrB)
+    .tex('uBathy', this.texBathy).tex('uLand', this.texMask);
+};
+
+/* Recompute the dynamic coastline. MUST only be called at a step boundary,
+   after the ocean/air/coupling passes of the step have completed, so that all
+   passes of any single step see one consistent land snapshot. Writes only
+   texMask; state textures are never touched. */
+Planet.prototype.maskPass = function () {
+  var W = this.grid.W, H = this.grid.H;
+  var p = this.prog.mask.use();
+  // NOTE: deliberately not gridUniforms() -- texMask is the render target here,
+  // so it must not also be bound as uLand (feedback loop).
+  p.iv2('uDim', W, H).i('uCount', this.grid.V)
+    .tex('uCellA', this.texCellA).tex('uCellB', this.texCellB)
+    .tex('uBathy', this.texBathy)
+    .tex('uTopS', this.A[0])
+    .f('uFloodMargin', 10.0).f('uFloodTrans', 40.0);
+  this.fullscreen('mask', W, H);
+  this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
 };
 Planet.prototype.fullscreen = function (fboName, w, h) {
   var gl = this.gl;
@@ -298,14 +328,16 @@ Planet.prototype.fullscreen = function (fboName, w, h) {
 Planet.prototype.reset = function () {
   var W = this.grid.W, H = this.grid.H;
   this.simTime = 0;
+  this.stepCount = 0;
   var p = this.prog.init.use();
   this.gridUniforms(p);
-  p.f('uSeed', Math.random() * 1000)
-    .f('uHtop', this.params.hTop).f('uHtotal', this.params.hTotal);
+  p.f('uSeed', Math.random() * 1000);
   this.fullscreen('init', W, H);
   var p2 = this.prog.init2.use();
   this.gridUniforms(p2); p2.f('uSeed', Math.random() * 1000);
   this.fullscreen('init2', W, H);
+  // the land mask must exist before the first step reads it
+  this.maskPass();
 };
 
 Planet.prototype.couple = function () {
@@ -329,8 +361,7 @@ Planet.prototype.couple = function () {
       .f('uThermo', P.thermo).f('uCloudK', P.cloudK).f('uRainK', P.rainK)
       .f('uNoise', P.noise).f('uGreenhouse', P.greenhouse)
       .f('uSurfMass', P.surfMass)
-      .f('uVertHeat', P.verticalHeat).f('uVertSalt', P.verticalSalt)
-      .f('uHtot', P.hTotal);
+      .f('uVertHeat', P.verticalHeat).f('uVertSalt', P.verticalSalt);
     self.fullscreen(pair[0], W, H);
   });
 };
@@ -367,9 +398,9 @@ Planet.prototype.step = function () {
     .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
     .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
     .f('uDrag', P.oceanDrag + P.mechanicalFric)
+    .f('uStratDrag', P.stratDrag).f('uBottomCd', P.bottomDragCd)
     .f('uSteric', P.steric).f('uStericRate', P.stericRate)
-    .f('uMassSpring', P.massSpring)
-    .f('uHtot', P.hTotal).f('uHref', P.hTop);
+    .f('uMassSpring', P.massSpring);
   this.fullscreen('dynO', W, H);
 
   var pa = this.prog.air.use();
@@ -383,6 +414,13 @@ Planet.prototype.step = function () {
 
   this.couple();
   this.simTime += P.dt;
+  this.stepCount++;
+
+  // STEP BOUNDARY: every pass above saw one and the same land snapshot. Only
+  // now, with the step fully finished, may the coastline be refreshed (and
+  // only every maskEvery steps -- real coastlines move very slowly).
+  var every = Math.max(1, Math.round(P.maskEvery));
+  if (this.stepCount % every === 0) this.maskPass();
 };
 
 Planet.prototype.stepParticles = function (dt) {

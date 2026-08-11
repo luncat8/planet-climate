@@ -24,7 +24,8 @@ var MODE_FIELDS = [
   'length(ha.xy)/34.0',                      // 12 high-air speed
   'length(wd.yz)/0.25',                      // 13 deep-ocean speed
   '(wd.w-33.0)/4.0',                         // 14 deep-ocean salinity
-  '(ht-50.0)/20.0',                        // 15 top-layer thickness h_top (m)
+  'ht/1200.0',                             // 15 top-layer thickness h_top (m)
+  'dep/4000.0',                            // 16 sea-floor depth (m)
 ];
 // modes that use magnitude (dark-background) coloring; palette-color fields excluded
 var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1 };
@@ -45,6 +46,7 @@ var OCEAN_UNPACK = `
   vec4 wt = vec4(_tS.y, _tV.xy, _tS.z);
   vec4 wd = vec4(_dS.x, _dV.xy, _dS.y);
   float ht = _tS.x;
+  float dep = texelFetch(uBathy, cTex(cell),0).x;
 `;
 function modeSampleFnSrc(m) {
   return 'float sampleVal(int cell){\n' +
@@ -68,9 +70,20 @@ uniform sampler2D uCellA;    // pos.xyz , area
 uniform sampler2D uCellB;    // east.xyz, land
 uniform sampler2D uNbrA;     // idx , edgeLen , dist , valid
 uniform sampler2D uNbrB;     // nx , ny , rotA , rotB
+uniform sampler2D uBathy;    // depth , refHTop , seaLevel , rawHeight  (STATIC)
+uniform sampler2D uLand;     // dynamic land mask in .x  (one snapshot per step)
+
+// Shared clamp margin for the top/deep layer thicknesses: every cell is
+// guaranteed depth >= 30 m by the mesh generator, so [MARG, D-MARG] is a
+// non-empty interval everywhere.
+const float MARG = 5.0;
 
 ivec2 cTex(int i){ int y = i / uDim.x; return ivec2(i - y*uDim.x, y); }
 ivec2 nTex(int i,int k){ int y = i / uDim.x; return ivec2(i - y*uDim.x, y + k*uDim.y); }
+
+float cellDepth(int i){ return texelFetch(uBathy, cTex(i), 0).x; }   // sea-floor depth [m]
+float cellHref (int i){ return texelFetch(uBathy, cTex(i), 0).y; }   // reference h_top [m]
+float cellLand (int i){ return texelFetch(uLand , cTex(i), 0).x; }   // dynamic land mask
 
 vec2 xfer(vec2 v, float ra, float rb){ return vec2(ra*v.x - rb*v.y, rb*v.x + ra*v.y); }
 
@@ -129,7 +142,7 @@ ${OCEAN_UNPACK}
 
 ${modeValueSrc(m)}
   float vVal = clamp(v, 0.0, 1.0);
-  float vLand = cb.w;
+  float vLand = cellLand(cell);
 
   vec3 base = pal(vVal);
 ${modeMagSrc(m)}
@@ -173,8 +186,9 @@ void main(){
      topV  = (u_top, v_top, _, _)         surface velocity (local tangent basis)
      deepS = (T_deep, S_deep, _, _)       abyssal scalars
      deepV = (u_deep, v_deep, _, _)       abyssal velocity
-   h_deep = uHtot - h_top is DERIVED, so the total ocean volume is fixed by
-   construction and only the interface between the two layers moves.
+   h_deep = depth(cell) - h_top is DERIVED from the STATIC per-cell bathymetry
+   (uBathy.x), so the total ocean volume sum(D*area) is fixed by construction
+   and only the interface between the two layers moves.
 
    * MASS: h_top obeys the flux-form continuity equation
        dh/dt + div(h*u) = S
@@ -196,9 +210,13 @@ layout(location=3) out vec4 oDeepV;
 uniform sampler2D uTopS, uTopV, uDeepS, uDeepV;
 uniform float uDt, uOmega, uNuVel, uNuT, uFricTop, uFricDeep, uAlphaT, uBetaS;
 uniform float uDrag;         // effective inter-layer drag coeff (kg/m^3/s)
+uniform float uStratDrag;    // 0 = constant drag, 1 = full Richardson suppression
+uniform float uBottomCd;     // quadratic bottom-drag coefficient (dimensionless)
 uniform float uSteric, uStericRate; // buoyancy -> equilibrium thickness, and its rate
 uniform float uMassSpring;   // weak global mass correction (1/s)
-uniform float uHtot, uHref;  // total ocean depth / reference top thickness (m)
+
+const float A_RI   = 5.0;    // Pacanowski-Philander shape parameter
+const float MIN_HD = 10.0;   // depth floor in the bottom-stress denominator [m]
 
 // Buoyancy anomaly of a layer: positive = warm/fresh = light.
 float buoy(float T, float S){ return uAlphaT*(T-283.0) - uBetaS*(S-35.0); }
@@ -219,14 +237,17 @@ void main(){
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
-  float area = ca.w, land = cb.w;
+  float area = ca.w;
+  float land = cellLand(cell);          // dynamic mask: one snapshot per step
+  float D    = cellDepth(cell);         // per-cell sea-floor depth [m]
+  float href = cellHref(cell);          // per-cell reference top thickness [m]
 
   vec4  ts0 = texelFetch(uTopS , cTex(cell), 0);   // (h, T, S, _)
   vec2  vt0 = texelFetch(uTopV , cTex(cell), 0).xy;
   vec4  ds0 = texelFetch(uDeepS, cTex(cell), 0);   // (T, S, _, _)
   vec2  vd0 = texelFetch(uDeepV, cTex(cell), 0).xy;
   float h0  = ts0.x;
-  float hd0 = uHtot - h0;
+  float hd0 = D - h0;
   vec2  trT0 = ts0.yz;          // (T_top,  S_top)
   vec2  trD0 = ds0.xy;          // (T_deep, S_deep)
 
@@ -235,6 +256,7 @@ void main(){
   float divF = 0.0;             // div(h_top*u_top): the mass flux
   float divT = 0.0, divD = 0.0; // div(u) per layer (advective-form correction)
   vec2  gradH = vec2(0.0);      // grad(h_top)
+  vec2  gradHr = vec2(0.0);     // grad(h_ref): the PERMANENT reference gradient
   vec2  lapVt = vec2(0.0), lapVd = vec2(0.0);
   vec2  advVt = vec2(0.0), advVd = vec2(0.0);
   vec2  lapTt = vec2(0.0), lapTd = vec2(0.0);
@@ -253,7 +275,7 @@ void main(){
     vec4  dsj = texelFetch(uDeepS, cTex(j), 0);
     vec2  vtj = texelFetch(uTopV , cTex(j), 0).xy;
     vec2  vdj = texelFetch(uDeepV, cTex(j), 0).xy;
-    float landj = texelFetch(uCellB, cTex(j), 0).w;
+    float landj = cellLand(j);
     float wet = (1.0-landj)*(1.0-land);      // no flow through coastlines
 
     vtj = xfer(vtj, nb.z, nb.w) * (1.0-landj);
@@ -270,7 +292,10 @@ void main(){
     divD += L*unD;
 
     // sea-surface-height gradient (Gauss), drives both layers (opposite signs)
-    gradH += L*0.5*(tsj.x - h0)*nrm*wet;
+    gradH  += L*0.5*(tsj.x - h0)*nrm*wet;
+    // same FV stencil for the static reference thickness, so the permanent
+    // bathymetric part of grad(h_top) can be subtracted below (perturbation form)
+    gradHr += L*0.5*(cellHref(j) - href)*nrm*wet;
 
     lapVt += (L/d)*(vtj-vt0)*wet;
     lapVd += (L/d)*(vdj-vd0)*wet;
@@ -288,7 +313,7 @@ void main(){
   }
 
   float ia = 1.0/area;
-  divF *= ia; divT *= ia; divD *= ia; gradH *= ia;
+  divF *= ia; divT *= ia; divD *= ia; gradH *= ia; gradHr *= ia;
   lapVt *= ia; lapVd *= ia; advVt *= ia; advVd *= ia;
   lapTt *= ia; lapTd *= ia; advTt *= ia; advTd *= ia;
 
@@ -302,35 +327,61 @@ void main(){
   //     interface around without a systematic volume trend.
   //   * uMassSpring: a tiny global correction that removes any residual drift
   //     of the flux-form integrator + surface forcing.
-  float hEq = uHref + uSteric*buoy(ts0.y, ts0.z);
+  float hEq = href + uSteric*buoy(ts0.y, ts0.z);
+  hEq = clamp(hEq, MARG, D - MARG);
   float h1 = h0 - uDt*divF
                 - uDt*uStericRate*(h0 - hEq)
-                - uDt*uMassSpring*(h0 - uHref);
-  h1 = clamp(h1, 40.0, uHtot - 40.0);
+                - uDt*uMassSpring*(h0 - href);
+  h1 = clamp(h1, MARG, D - MARG);
   if(isnan(h1)) h1 = h0;
-  float hd1 = uHtot - h1;
+  float hd1 = D - h1;
 
   // ---- MOMENTUM ----------------------------------------------------------
-  // top:  -g *grad(h)  (flow away from a thick/warm column)
-  // deep: +g'*grad(h)  (opposite sign -> return limb)
-  vec2 accT = -9.81*gradH + uNuVel*lapVt - advVt + vt0*divT;
-  vec2 accD = +gp  *gradH + uNuVel*lapVd - advVd + vd0*divD;
+  // PERTURBATION-FORM pressure gradient.  h_ref is now per-cell, so it carries
+  // a PERMANENT spatial gradient of order tens of metres.  Driving the layers
+  // with grad(h_top) directly would turn that static bathymetric signal into a
+  // permanent, clamp-saturating geostrophic current.  Both layers therefore
+  // see only the DYNAMIC departure grad(h_top - h_ref); a state at rest with
+  // h_top == h_ref feels exactly zero force, while the steric circulation
+  // (which is an anomaly about h_ref) is preserved unchanged.
+  vec2 gradP = gradH - gradHr;
+  vec2 accT = -9.81*gradP + uNuVel*lapVt - advVt + vt0*divT;
+  vec2 accD = +gp  *gradP + uNuVel*lapVd - advVd + vd0*divD;
 
   // inter-layer stress, EQUAL AND OPPOSITE, inverse-column-mass weighted:
   //   d(rho*h_top*u_top + rho*h_deep*u_deep)/dt = -tau + tau = 0
-  vec2  dv  = vt0 - vd0;
-  vec2  tau = uDrag*length(dv)*dv;                  // N/m^2
-  accT -= tau/(1027.0*max(h1 , 40.0));
-  accD += tau/(1027.0*max(hd1, 40.0));
+  // The coefficient is now stratification dependent: with a bulk Richardson
+  // number Ri = g'*h_top/|du|^2 a strong pycnocline (large Ri) suppresses the
+  // vertical momentum exchange in Pacanowski-Philander form 1/(1+a*Ri)^2,
+  // while weakly stratified / strongly sheared columns keep the full drag.
+  vec2  dv   = vt0 - vd0;
+  float dvm  = length(dv);
+  float Ri   = max(gp, 0.0)*max(h1, MARG)/max(dvm*dvm, 1e-6);
+  float supp = 1.0/(1.0 + A_RI*max(Ri, 0.0));
+  supp = supp*supp;
+  float dragEff = uDrag*mix(1.0, supp, clamp(uStratDrag, 0.0, 1.0));
+  vec2  tau = dragEff*dvm*dv;                       // N/m^2
+  accT -= tau/(1027.0*max(h1 , MARG));
+  accD += tau/(1027.0*max(hd1, MARG));
 
-  // Coriolis as a real 3D cross product, projected on the tangent plane
-  vec3 c3t = -2.0*cross(vec3(0.0,uOmega,0.0), vt0.x*e1 + vt0.y*e2);
-  vec3 c3d = -2.0*cross(vec3(0.0,uOmega,0.0), vd0.x*e1 + vd0.y*e2);
-  accT += vec2(dot(c3t,e1), dot(c3t,e2));
-  accD += vec2(dot(c3d,e1), dot(c3d,e2));
+  // Bottom friction: quadratic bottom stress spread over the deep layer,
+  //   dv/dt = -Cd*|v|*v/h_deep  ->  linearised rate r = Cd*|v|/h_deep.
+  // Shallow shelves damp in hours-to-days, the abyss in hundreds of days,
+  // instead of the old depth-independent constant.
+  float fricDeepEff = uFricDeep + uBottomCd*length(vd0)/max(hd1, MIN_HD);
 
-  vec2 vt1 = (vt0 + uDt*accT)/(1.0 + uDt*uFricTop);
-  vec2 vd1 = (vd0 + uDt*accD)/(1.0 + uDt*uFricDeep);
+  // Coriolis: SEMI-IMPLICIT 2x2 rotation solve.  Forward Euler injects
+  // energy every step (~3%/step at default spin, ~64%/step at max), which was
+  // previously only hidden by the velocity clamp.  The (1+(dt*f)^2) denominator
+  // makes the rotation exactly energy conserving and unconditionally stable.
+  float fc = 2.0*uOmega*n.y;
+  float fd = uDt*fc;
+  float fden = 1.0 + fd*fd;
+
+  vec2 pT = vt0 + uDt*accT;
+  vec2 pD = vd0 + uDt*accD;
+  vec2 vt1 = vec2(pT.x + fd*pT.y, pT.y - fd*pT.x)/(fden*(1.0 + uDt*uFricTop));
+  vec2 vd1 = vec2(pD.x + fd*pD.y, pD.y - fd*pD.x)/(fden*(1.0 + uDt*fricDeepEff));
   vt1 *= (1.0-land); vd1 *= (1.0-land);
   vt1 = clamp(vt1, vec2(-3.0), vec2(3.0));
   vd1 = clamp(vd1, vec2(-3.0), vec2(3.0));
@@ -356,10 +407,10 @@ void main(){
   // the interface motion, exactly as the vertical-exchange term does.
   float dEnt = h1 - h0;
   if(dEnt > 0.0){          // interface deepens: deep water joins the top layer
-    float f = clamp(dEnt/max(h1, 40.0), 0.0, 1.0);
+    float f = clamp(dEnt/max(h1, MARG), 0.0, 1.0);
     trT1 += f*(trD1 - trT1);
   } else if(dEnt < 0.0){   // interface shoals: top water is detrained downward
-    float f = clamp(-dEnt/max(hd1, 40.0), 0.0, 1.0);
+    float f = clamp(-dEnt/max(hd1, MARG), 0.0, 1.0);
     trD1 += f*(trT1 - trD1);
   }
 
@@ -419,12 +470,13 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   gradP *= ia; lapV *= ia; lapT *= ia; advV *= ia; advT *= ia; div *= ia;
 
   vec2 acc = -gradP/rho + uNuVel*lapV - advV + v0*div;
-  vec3 v3 = v0.x*e1 + v0.y*e2;
-  vec3 c3 = -2.0*cross(vec3(0.0,uOmega,0.0), v3);
-  acc += vec2(dot(c3,e1), dot(c3,e2));
 
+  // Semi-implicit (energy-conserving) Coriolis, same 2x2 solve as the ocean.
   float f = fric*(1.0 + 2.0*land);
-  vec2 v1 = (v0 + uDt*acc)/(1.0 + uDt*f);
+  float fc = 2.0*uOmega*n.y;
+  float fd = uDt*fc;
+  vec2  pv = v0 + uDt*acc;
+  vec2  v1 = vec2(pv.x + fd*pv.y, pv.y - fd*pv.x)/((1.0 + fd*fd)*(1.0 + uDt*f));
   v1 = clamp(v1, vec2(-90.0), vec2(90.0));
 
   vec3 tr1 = tr0 + uDt*(uNuT*lapT - advT + tr0*div);
@@ -444,15 +496,16 @@ void main(){
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
-  stepAir(cell, n, e1, e2, ca.w, cb.w, uLoA, uLoB, uFricLo, uRhoLo, oLoA, oLoB);
-  stepAir(cell, n, e1, e2, ca.w, cb.w, uHiA, uHiB, uFricHi, uRhoHi, oHiA, oHiB);
+  float land = cellLand(cell);
+  stepAir(cell, n, e1, e2, ca.w, land, uLoA, uLoB, uFricLo, uRhoLo, oLoA, oLoB);
+  stepAir(cell, n, e1, e2, ca.w, land, uHiA, uHiB, uFricHi, uRhoHi, oHiA, oHiB);
 }`;
 
 /* Coupling pass. Compiled twice (ocean / air): both variants read all 8 state
    textures but each writes only its own <= 4 attachments.
 
    Conservation invariants (per cell):
-     MASS      h_top + h_deep = uHtot exactly (h_deep is derived);
+     MASS      h_top + h_deep = depth(cell) exactly (h_deep is derived);
                E-P and uSurfMass move the interface, never the total volume.
      MOMENTUM  wind stress is exchanged with inverse-column-mass weighting, so
                the air loses exactly the impulse the ocean gains.
@@ -476,7 +529,6 @@ uniform float uThermo, uCloudK, uRainK, uNoise, uGreenhouse;
 uniform float uSurfMass;   // extra uniform surface mass forcing on h_top (m/s)
 uniform float uVertHeat;   // vertical heat exchange coeff [W/m^2/K]
 uniform float uVertSalt;   // vertical salt exchange coeff [kg/m^2/s per ppt]
-uniform float uHtot;       // total ocean depth [m]
 
 const float Le   = 2.5e6;
 const float cpA  = 1004.0;
@@ -500,7 +552,8 @@ void main(){
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz);
-  float land = cb.w;
+  float land = cellLand(cell);       // SAME snapshot the dynamics passes used
+  float D    = cellDepth(cell);
   float lat = asin(clamp(n.y,-1.0,1.0));
 
   vec4 ts = texelFetch(uTopS , cTex(cell), 0);   // (h_top, T_top, S_top, _)
@@ -512,8 +565,8 @@ void main(){
   vec4 ha = texelFetch(uHiA , cTex(cell), 0);
   vec4 hb = texelFetch(uHiB , cTex(cell), 0);
 
-  float hT = clamp(ts.x, 40.0, uHtot-40.0);
-  float hD = uHtot - hT;
+  float hT = clamp(ts.x, MARG, D-MARG);
+  float hD = D - hT;
   float Ts = ts.y, St = ts.z;      float Td = ds.x, Sd = ds.y;
   vec2  vl = la.xy,  vh = ha.xy;
   float Tl = la.z,   Th = ha.z;
@@ -551,8 +604,8 @@ void main(){
 
   // ---- SURFACE MASS FLUX: only the interface moves, total volume is fixed --
   float hT0 = hT;
-  hT = clamp(hT - uDt*(EmP/rhoW + uSurfMass*(1.0-land)), 40.0, uHtot-40.0);
-  hD = uHtot - hT;
+  hT = clamp(hT - uDt*(EmP/rhoW + uSurfMass*(1.0-land)), MARG, D-MARG);
+  hD = D - hT;
   // The interface moved, so water crossed it and must carry its T and S along
   // (same entrainment/detrainment bookkeeping as in the dynamics pass).
   float dEnt = hT - hT0;
@@ -665,11 +718,10 @@ layout(location=0) out vec4 oTopS;    // (h_top, T_top, S_top, _)
 layout(location=1) out vec4 oTopV;    // (u_top, v_top, _, _)
 layout(location=2) out vec4 oDeepS;   // (T_deep, S_deep, _, _)
 layout(location=3) out vec4 oDeepV;   // (u_deep, v_deep, _, _)
-uniform float uSeed, uHtop, uHtotal;
+uniform float uSeed;
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 n = normalize(ca.xyz);
   float lat = asin(clamp(n.y,-1.0,1.0));
   float c2 = cos(lat)*cos(lat);
@@ -677,7 +729,11 @@ void main(){
   float Ts = 273.0 + 28.0*c2 - 12.0*(1.0-c2) + rn*0.8;
   float Td = 275.0 + 6.0*c2 + rn*0.4;
   float S  = 34.7 + 1.2*cos(2.0*lat) + rn*0.2;
-  oTopS  = vec4(clamp(uHtop + rn*0.5, 40.0, uHtotal-40.0), Ts, S, 0.0);
+  // Seed the interface at the per-cell reference thickness, so the model
+  // starts in the state the perturbation-form PGF regards as "at rest".
+  float D    = max(cellDepth(cell), 2.0*MARG + 1.0);
+  float href = cellHref(cell);
+  oTopS  = vec4(clamp(href + rn*0.5, MARG, D-MARG), Ts, S, 0.0);
   oTopV  = vec4(0.0);
   oDeepS = vec4(Td, S+0.3, 0.0, 0.0);
   oDeepV = vec4(0.0);
@@ -700,6 +756,38 @@ void main(){
   oLoB = vec4(0.004*c2, 0.0, 0.0, 0.0);
   oHiA = vec4(rn*0.5, rn*0.5, 232.0 + 12.0*c2 + rn*0.6, 45000.0);
   oHiB = vec4(0.0008*c2, 0.0, 0.0, 0.0);
+}`;
+
+/* ---------------------------------------------------------------------------
+   DYNAMIC COASTLINE.  Writes the land mask texture that every other pass then
+   READS (uLand).  It is deliberately a separate, throttled pass:
+
+   HARD TIMING RULE - the mask is recomputed ONLY at a step boundary, after the
+   ocean dynamics, air dynamics and coupling passes of that step have all
+   finished.  Within one step every pass therefore sees the exact same land
+   snapshot; a cell can never be "ocean" for the dynamics (advecting h_top,
+   exchanging momentum and heat) and "land" for the coupling, which would
+   create spurious mass/heat sources or NaNs.
+
+   It writes ONLY the mask, never a state texture: a flipping cell keeps its
+   h_top untouched and simply stops advecting (velocities are multiplied by
+   1-land everywhere), then relaxes toward its local refHTop.  Continents
+   (cellB.w) are always land, whatever h_top does. */
+var MASK_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 oMask;
+uniform sampler2D uTopS;
+uniform float uFloodMargin, uFloodTrans;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  float base = texelFetch(uCellB, cTex(cell), 0).w;   // static continent base
+  float D    = cellDepth(cell);
+  float ht   = texelFetch(uTopS, cTex(cell), 0).x;
+  // Water column left underneath the top layer; a shallow cell dries out when
+  // the top layer no longer fits inside the local depth.
+  float flood = smoothstep(uFloodMargin, uFloodMargin + uFloodTrans, D - ht);
+  float land = clamp(max(base, 1.0 - flood), 0.0, 1.0);
+  if(isnan(land)) land = base;
+  oMask = vec4(land, 0.0, 0.0, 0.0);
 }`;
 
 var PART_FS = SHADER_HEAD + SHADER_COMMON + `
@@ -843,10 +931,10 @@ void main(){
   float v = wAcc > 0.0 ? mix(v0, vAcc/wAcc, 0.35) : v0;
 
   vVal = clamp(v, 0.0, 1.0);
-  vLand = cb.w;
+  vLand = cellLand(cell);
   vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
   vN = n;
-  vPos = n*(1.0 + uRelief*cb.w);
+  vPos = n*(1.0 + uRelief*vLand);
   gl_Position = uMVP*vec4(vPos, 1.0);
 }`;
 }

@@ -1,0 +1,67 @@
+level 5 V 10242 cell~ 223 km
+level 6 V 40962 cell~ 112 km
+level 7 V 163842 cell~ 56 km
+
+top, FULL g (as coded)           c=  24.26 m/s  CFL@dt1800,dx111km=0.39
+top, reduced g                   c=   1.10 m/s  CFL@dt1800,dx111km=0.02
+deep g-prime h=940               c=   4.34 m/s  CFL@dt1800,dx111km=0.07
+deep g-prime h=3940              c=   8.88 m/s  CFL@dt1800,dx111km=0.14
+
+dh=    1m over 1000km : u_geo(full g)=    0.10 m/s   u_geo(g'=0.02)= 0.000 m/s
+dh=  100m over 1000km : u_geo(full g)=    9.81 m/s   u_geo(g'=0.02)= 0.020 m/s
+dh=  100m over 3000km : u_geo(full g)=    3.27 m/s   u_geo(g'=0.02)= 0.007 m/s
+
+Coriolis fwd-Euler energy growth/step, f*dt= 0.252 -> 3.13 % per step
+
+
+=== A. Pressure-gradient coefficient: the blocker for per-cell h_ref ===
+  g   (current code): permanent tilt  50m/3000km -> u_geo=   1.6350 m/s
+  g   (current code): permanent tilt 200m/2000km -> u_geo=   9.8100 m/s
+  g'  (reduced gravity): permanent tilt  50m/3000km -> u_geo=   0.0033 m/s
+  g'  (reduced gravity): permanent tilt 200m/2000km -> u_geo=   0.0200 m/s
+
+=== B. Gravity-wave CFL, dx=112km (level 6) ===
+  current -g*grad(h), top      c= 24.26 m/s  CFL(dt=1800)=0.390
+  g' baroclinic, top           c=  1.10 m/s  CFL(dt=1800)=0.018
+  g' baroclinic, abyss 4km     c=  8.94 m/s  CFL(dt=1800)=0.144
+
+=== C. Quadratic bottom drag  r = Cd|u|/h   (Cd=2.5e-3) ===
+  open-ocean top layer       r=4.17e-06 1/s  tau=     2.8 d
+  shelf, collapsed column    r=3.00e-05 1/s  tau=     0.4 d
+  abyssal plain              r=1.25e-08 1/s  tau=   925.9 d
+  slope/sill                 r=3.13e-07 1/s  tau=    37.0 d
+  current fricOceanTop 1.5e-6 -> 7.7 d ; fricOceanDeep 6e-7 -> 19.3 d (abyss far too strong)
+
+=== D. Bulk Richardson number across interface ===
+  du=0.02 g'= 0.02 h= 60 -> Ri=    3000.0  PacanowskiPhilander 1/(1+5Ri)^2=4.444e-09
+  du=0.15 g'= 0.02 h= 60 -> Ri=      53.3  PacanowskiPhilander 1/(1+5Ri)^2=1.396e-05
+  du= 0.4 g'=0.005 h= 40 -> Ri=       1.2  PacanowskiPhilander 1/(1+5Ri)^2=1.902e-02
+
+
+
+Two-layer PGF forms (shader.js:316-317):
+  code: accT = -9.81*gradH   accD = +gp*gradH   with gp~0.02
+  theory (1.5-layer): accT = -g_prime*gradH, accD = +g_prime*gradH
+
+=> top-layer PGF is currently ~490x too strong. Consequences once grad(h) has
+   a PERMANENT topographic/h_ref component (i.e. after per-cell h_ref lands):
+   tilt  20m/2000km -> u_geo =    0.98 m/s  (velocity clamp is 3.0) | with g'=0.0020 m/s
+   tilt  50m/3000km -> u_geo =    1.63 m/s  (velocity clamp is 3.0) | with g'=0.0033 m/s
+   tilt 200m/2000km -> u_geo =    9.81 m/s  (velocity clamp is 3.0) | with g'=0.0200 m/s
+
+Free-surface option, artificial-lid gravity for CFL<=0.5 at H=4000m:
+  c_max=31.1 m/s -> g_eff <= 0.242 m/s^2 (vs true 9.81)
+
+Semi-implicit Coriolis check, f*dt at omega=3.6e-4 (slider max), dt=1800:
+  f*dt=1.30; fwd-Euler energy gain/step = 63.7%  -> unstable, needs Crank-Nicolson
+
+
+
+GLOBE_VS declared samplers: 8 ['uDeepS', 'uDeepV', 'uHiA', 'uHiB', 'uLoA', 'uLoB', 'uTopS', 'uTopV']
+OCEAN_FS declared samplers: 4 ['uDeepS', 'uDeepV', 'uTopS', 'uTopV']
+COUPLE_FS declared samplers: 8 ['uDeepS', 'uDeepV', 'uHiA', 'uHiB', 'uLoA', 'uLoB', 'uTopS', 'uTopV']
+
+SHADER_COMMON samplers: uCellA uCellB uNbrA uNbrB = 4 (added to every program)
+GLOBE_VS total vertex-stage units = 8 state + 4 grid = 12; +uCellC -> 13 (WebGL2 min MAX_VERTEX_TEXTURE_IMAGE_UNITS = 16) OK
+
+readPixels reduction cost: 256x161 RGBA32F = 644 KB per texture per probe -> cheap at 1 Hz

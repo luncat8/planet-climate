@@ -1,0 +1,285 @@
+# Updated Refactoring & Implementation Plan: Enhanced Ocean Physics
+
+## Critical Findings from Diagnostic Data
+
+The diagnostic data reveals several critical issues that must be addressed before or alongside the new features. These findings significantly change the implementation priorities and approach.
+
+---
+
+## CRITICAL ISSUE 1: Pressure Gradient Force Error (BLOCKER)
+
+**Problem:**
+- Current code uses `g = 9.81 m/s²` for top-layer pressure gradient force
+- Should use reduced gravity `g' ≈ 0.02 m/s²` (baroclinic mode)
+- Top-layer PGF is **~490x too strong**
+
+**Consequences:**
+Once per-cell h_ref or depth-dependent features are added, permanent topographic tilts will create massive spurious geostrophic currents:
+
+| Tilt | Current g=9.81 (m/s) | Correct g'=0.02 (m/s) | Status |
+|------|---------------------|----------------------|--------|
+| 50m/3000km | 1.63 | 0.0033 | Exceeds realistic values |
+| 200m/2000km | 9.81 | 0.020 | **Exceeds velocity clamp (3.0)** |
+
+**This is a BLOCKER for Feature 4 (per-cell h_ref) and any depth-dependent features.**
+
+---
+
+## CRITICAL ISSUE 2: Coriolis Integration Instability
+
+**Problem:**
+- Forward Euler scheme unstable for large f*dt values
+- At maximum slider settings (ω=3.6e⁻⁴, dt=1800): f*dt = 1.30
+- Energy growth: **63.7% per step → completely unstable**
+
+**Required Fix:**
+Implement semi-implicit (Crank-Nicolson) Coriolis treatment before enabling high rotation rates or large time steps.
+
+---
+
+## CRITICAL ISSUE 3: Bottom Friction Calibration
+
+**Problem:**
+Current uniform friction coefficients are poorly calibrated:
+- Abyssal plain: current τ ≈ 19 days vs realistic ~925 days (quadratic drag)
+- Too strong damping in deep ocean, too weak near coasts
+
+**Solution:**
+Depth-dependent quadratic bottom friction is essential for realistic dynamics.
+
+---
+
+## Revised Implementation Order
+
+Based on the diagnostic data, the implementation order must be changed:
+
+### Phase 0: Critical Fixes (Before New Features)
+
+1. **Fix Pressure Gradient Force Formulation**
+   - Change top-layer PGF from `-g*grad(h)` to `-g'*grad(h)`
+   - This is a simple code change but fundamental physics correction
+   - Must be done before any per-cell h_ref or depth features
+
+2. **Implement Semi-Implicit Coriolis Integration**
+   - Replace forward Euler with Crank-Nicolson scheme
+   - Enables stable operation at high rotation rates and large time steps
+
+3. **Calibrate Bottom Friction**
+   - Switch to quadratic bottom drag formulation: `r = Cd|u|/h`
+   - Use depth-dependent form (requires Feature 1)
+
+### Phase 1: Core Infrastructure
+
+4. **Feature 1: Per-Cell Ocean Depth**
+   - Now safe to implement with corrected PGF
+   - Enables realistic bottom friction and reference thickness
+
+5. **Feature 3: Depth-Dependent Bottom Friction** (moved up)
+   - Implement immediately after per-cell depth
+   - Use quadratic formulation based on diagnostic data
+
+### Phase 2: Advanced Features
+
+6. **Feature 4: Per-Cell Reference h_top**
+   - Now safe with corrected PGF and proper friction
+   - Can encode realistic thermocline variations
+
+7. **Feature 2: Stratification-Dependent Drag**
+   - Implement last as it's less critical for stability
+   - Use Richardson number-based formulation from diagnostic data
+
+---
+
+## Updated Feature Specifications
+
+### Feature 0A: Pressure Gradient Force Correction (NEW)
+
+**Current Code:**
+```glsl
+vec2 accT = -9.81*gradH + uNuVel*lapVt - advVt + vt0*divT;
+vec2 accD = +gp*gradH + uNuVel*lapVd - advVd + vd0*divD;
+```
+
+**Required Change:**
+```glsl
+// Use reduced gravity for BOTH layers (baroclinic mode)
+vec2 accT = -gp*gradH + uNuVel*lapVt - advVt + vt0*divT;
+vec2 accD = +gp*gradH + uNuVel*lapVd - advVd + vd0*divD;
+```
+
+**Impact:**
+- Eliminates spurious currents from permanent tilts
+- Enables per-cell h_ref and depth-dependent features
+- Reduces CFL constraint significantly (0.39 → 0.018)
+
+---
+
+### Feature 0B: Semi-Implicit Coriolis Integration (NEW)
+
+**Current Code:**
+```glsl
+vec3 c3t = -2.0*cross(vec3(0.0,uOmega,0.0), vt0.x*e1 + vt0.y*e2));
+accT += vec2(dot(c3t,e1), dot(c3t,e2)));
+// ... similar for deep layer
+```
+
+**Required Change:**
+Implement Crank-Nicolson scheme:
+```glsl
+// Semi-implicit Coriolis: v1 = (v0 + dt*a) / (1 + 0.5*dt*f²)
+// where f is the Coriolis parameter at this latitude
+float f = 2.0*uOmega*n.y; // n.y = sin(lat)
+float fn = 0.5*dt*f;
+vec3 c3t = -2.0*cross(vec3(0.0,uOmega,0.0), vt0.x*e1 + vt0.y*e2));
+accT += vec2(dot(c3t,e1), dot(c3t,e2))); / (1.0 + fn*fn);
+// ... similar for deep layer
+```
+
+**Impact:**
+- Stable for all f*dt values
+- Enables high rotation rates and large time steps
+
+---
+
+### Feature 1: Per-Cell Ocean Depth (Updated)
+
+**Recommended Variant: 1A or 1B**
+
+Based on texture unit analysis:
+- GLOBE_VS uses 12 units, adding uCellC → 13 (within limit of 16)
+- OCEAN_FS and COUPLE_FS use fewer units
+
+**Option A (Cleaner):** New dedicated depth texture `uCellC` storing H(cell) per cell
+- Pros: Clean separation, extensible for future bathymetry data
+- Cons: Additional texture fetches (~4 per ocean shader invocation)
+
+**Option B (Efficient):** Encode in existing `uCellA` or `uCellB` textures
+- Replace area channel if not critically needed elsewhere
+- Or use unused channels if available
+
+**Depth Field Generation:**
+- Procedural generation with lat/lon dependence + hash noise
+- Continental shelves: shallow (<200m) near coasts
+- Abyssal plains: deep (3000-6000m) in ocean basins
+- Smooth transitions to avoid numerical issues
+
+---
+
+### Feature 3: Depth-Dependent Bottom Friction (Updated Priority)
+
+**Recommended Variant: 3C with depth dependence**
+
+Based on diagnostic data, use quadratic bottom drag:
+```glsl
+// Quadratic bottom friction coefficient
+float Cd = 0.0025; // Standard value
+float r = Cd * length(vd) / max(h_deep, 10.0); // Depth-dependent
+```
+
+**Expected Damping Times (from diagnostic data):**
+- Open ocean top layer: τ ≈ 2.8 days
+- Shelf/collapsed column: τ ≈ 0.4 days
+- Abyssal plain: τ ≈ 925 days
+- Slope/sill regions: τ ≈ 37 days
+
+**Implementation:**
+```glsl
+// In ocean dynamics pass, replace uniform friction with depth-dependent form
+float r_bottom = Cd * length(vd) / max(h_deep, 10.0);
+vec2 vd1 = (vd0 + uDt*accD) / (1.0 + uDt*r_bottom);
+```
+
+---
+
+### Feature 4: Per-Cell Reference h_top (Updated)
+
+**Recommended Variant: 4B or 4C**
+
+Based on PGF correction, now safe to implement with realistic variations.
+
+**Option B (Simple):** Proportional to local total depth
+```glsl
+float H_ref = f * H(cell); // f ≈ 0.1-0.2 depending on latitude
+```
+
+**Option C (Realistic):** Latitude-dependent profile + depth modulation
+```glsl
+// Thermocline depth varies with latitude: ~50m in tropics, ~1000m at poles
+float lat = asin(n.y);
+float H_ref_lat = 50.0 + 950.0 * pow(abs(lat)/M_PI_2, 2.0);
+H_ref = min(H_ref_lat, 0.8 * H(cell)); // Ensure < total depth
+```
+
+**Impact:**
+- Enables realistic thermocline structure
+- Affects steric sea level response and vertical exchange rates
+
+---
+
+### Feature 2: Stratification-Dependent Drag (Updated)
+
+**Recommended Variant: 2A with Richardson number**
+
+Based on diagnostic data, use Pacanowski-Philander formulation:
+```glsl
+// Compute bulk Richardson number across interface
+float Ri = g_prime * h_interface / max(length(dv)^2, 1e-6);
+float mixing_efficiency = 1.0 / pow(1.0 + 5.0*Ri, 2.0);
+
+// Apply to drag coefficient
+float drag_coeff = uDrag * mixing_efficiency;
+vec2 tau = drag_coeff * length(dv) * dv;
+```
+
+**Expected Behavior (from diagnostic data):**
+- Strong stratification (Ri=3000): mixing suppressed by factor of 4.4e-9
+- Moderate stratification (Ri=53): mixing reduced to ~1.4e-5
+- Weak stratification (Ri=1.2): mixing at ~1.9%
+
+---
+
+## Updated Validation Requirements
+
+### Additional Tests Based on Diagnostic Data:
+
+1. **PGF Correction Verification:**
+   - Verify geostrophic balance with corrected PGF formulation
+   - Test with known tilt scenarios to confirm expected velocities
+
+2. **Coriolis Stability Test:**
+   - Run simulation at maximum rotation rate and time step
+   - Verify no energy growth from Coriolis term alone
+
+3. **Bottom Friction Calibration:**
+   - Compare damping times in different depth regimes with diagnostic data
+   - Ensure abyssal plain not overdamped
+
+4. **Stratification Effects:**
+   - Test mixing suppression at various Richardson numbers
+   - Verify consistency with Pacanowski-Philander formulation
+
+---
+
+## Summary of Changes to Original Plan
+
+1. **Added Phase 0** for critical fixes before new features:
+   - PGF correction (essential blocker)
+   - Semi-implicit Coriolis integration
+   - Bottom friction calibration
+
+2. **Changed implementation order:**
+   - Feature 3 (bottom friction) moved up to Phase 1
+   - Feature 4 (per-cell h_ref) moved down to Phase 2
+   - Feature 2 (stratification drag) remains last
+
+3. **Updated feature specifications** based on diagnostic data:
+   - Specific formulations and parameters from analysis
+   - Realistic ranges and expected behaviors
+
+4. **Added validation requirements** for critical fixes
+
+---
+
+## Recommendation
+
+The diagnostic data reveals fundamental physics issues that must be addressed before implementing the new features. The revised plan prioritizes these corrections to ensure stability and accuracy of the enhanced ocean model.

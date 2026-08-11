@@ -15,12 +15,13 @@ var LAYER_VIEW = {
     { id: 'salinity', label: 'Sal', title: 'Salinity' },
     { id: 'rain', label: 'Rain', title: 'Rain' },
     { id: 'thick', label: 'h', title: 'Top-layer thickness (m)' },
+    { id: 'depth', label: 'D', title: 'Sea-floor depth (m)' },
   ],
   map: {
     highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
     lowAir: { T: 0, P: 2, humidity: 3, speed: 4 },
     ocean: { T: 1, speed: 5, salinity: 7, thick: 15 },
-    deepOcean: { T: 8, speed: 13, salinity: 14 },
+    deepOcean: { T: 8, speed: 13, salinity: 14, depth: 16 },
   },
 };
 
