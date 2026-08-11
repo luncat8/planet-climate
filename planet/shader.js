@@ -275,6 +275,8 @@ uniform float uHtot, uHref;  // legacy global depth / reference thickness (m)
                              // (superseded per-cell by uCellC; kept for INIT)
 uniform float uPgfTop;       // pressure-gradient gain, top layer  [m/s^2 per m]
 uniform float uPgfDeepGain;  // multiplier on the deep layer's g'  [-]
+uniform float uRhieChow;     // Rhie-Chow face-velocity smoothing  [-] 0 = legacy
+uniform float uCoriCN;       // 1 = Crank-Nicolson Coriolis, 0 = legacy explicit
 
 // Buoyancy anomaly of a layer: positive = warm/fresh = light.
 float buoy(float T, float S){ return uAlphaT*(T-283.0) - uBetaS*(S-35.0); }
@@ -284,6 +286,19 @@ float gPrime(float Tt, float St, float Td, float Sd){
   float rhoT = 1027.0*(1.0 - uAlphaT*(Tt-283.0) + uBetaS*(St-35.0));
   float rhoD = 1027.0*(1.0 - uAlphaT*(Td-283.0) + uBetaS*(Sd-35.0));
   return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
+}
+
+/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
+   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
+vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
+  float D = 1.0 + dt*fric;
+  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
+     in exact arithmetic but round differently in float32. */
+  if(c == 0.0) return (v0 + dt*acc)/D;
+  float P = v0.x + dt*acc.x - c*v0.y;
+  float Q = v0.y + dt*acc.y + c*v0.x;
+  float den = D*D + c*c;
+  return vec2(D*P - c*Q, D*Q + c*P)/den;
 }
 
 void main(){
@@ -298,7 +313,13 @@ void main(){
   float area = ca.w, land = cb.w;
 
   vec4  ts0 = texelFetch(uTopS , cTex(cell), 0);   // (h, T, S, _)
-  vec2  vt0 = texelFetch(uTopV , cTex(cell), 0).xy;
+  vec4  tv0 = texelFetch(uTopV , cTex(cell), 0);   // (u, v, grad(eta).x, grad(eta).y)
+  vec2  vt0 = tv0.xy;
+  /* .zw carry LAST step's cell-centred grad(eta) in this cell's local basis.
+     Storing it costs nothing (the channels were unused) and lets the
+     Rhie-Chow correction below compare a compact face gradient against the
+     averaged cell gradient without a second pass over the neighbours. */
+  vec2  gPrev0 = tv0.zw;
   vec4  ds0 = texelFetch(uDeepS, cTex(cell), 0);   // (T, S, _, _)
   vec2  vd0 = texelFetch(uDeepV, cTex(cell), 0).xy;
   float h0  = ts0.x;
@@ -342,9 +363,31 @@ void main(){
     vtj = xfer(vtj, nb.z, nb.w) * (1.0-landj);
     vdj = xfer(vdj, nb.z, nb.w) * (1.0-landj);
 
-    // face-normal velocities (the SAME quantities used by every operator below)
+    /* Face-normal velocities -- the SAME quantities used by every operator
+       below, so mass, tracer and momentum transport stay consistent.
+
+       RHIE-CHOW / odd-even decoupling.  The plain average 0.5*(v0+vj).n is
+       BLIND to a grid-scale checkerboard: for v0 = +a, vj = -a it returns
+       exactly 0, so an odd-even oscillation generates no mass divergence,
+       feels no pressure response, and is never damped.  That null space is
+       the reason the noise in the polar caps survived even dt = 5 s -- it is
+       a defect of the collocated (A-grid) SPATIAL stencil, not a CFL limit,
+       so shrinking dt cannot touch it.
+
+       The standard cure is to build the face velocity from a COMPACT
+       face-centred pressure gradient instead of an averaged cell-centred
+       one.  The two agree to 2nd order for smooth fields and differ only for
+       grid-scale modes, so the correction below is invisible to the resolved
+       flow but gives the checkerboard the pressure feedback it was missing.
+       gPrev is lagged one step, which is normal practice and keeps this to a
+       single pass.  uRhieChow = 0 restores the legacy stencil exactly. */
     float unT = 0.5*dot(vt0+vtj, nrm)*wet;
     float unD = 0.5*dot(vd0+vdj, nrm)*wet;
+    vec2  gPrevJ = xfer(texelFetch(uTopV, cTex(j), 0).zw, nb.z, nb.w);
+    float dEtaF  = (tsj.x - h0) - (cellHref(j) - hRef0);
+    float gComp  = dEtaF/d;                        // compact face gradient
+    float gAvg   = 0.5*dot(gPrev0 + gPrevJ, nrm);  // averaged cell gradient
+    unT -= uRhieChow*uDt*uPgfTop*(gComp - gAvg)*wet;
 
     // --- CONTINUITY: mass flux through this face = L * h_face * u_n --------
     float hFace = 0.5*(h0 + tsj.x);
@@ -372,8 +415,7 @@ void main(){
        only the first makes the reference term vanish EXACTLY in float32 when
        hRef is uniform, so a flat slab reproduces the original bit for bit
        instead of drifting by rounding. */
-    float dEta = (tsj.x - h0) - (cellHref(j) - hRef0);
-    gradH += L*0.5*dEta*nrm*wet;
+    gradH += L*0.5*dEtaF*nrm*wet;
 
     lapVt += (L/d)*(vtj-vt0)*wet;
     lapVd += (L/d)*(vdj-vd0)*wet;
@@ -446,11 +488,35 @@ void main(){
   accT -= tau/(1027.0*max(h1 , hLo));
   accD += tau/(1027.0*max(hd1, hLo));
 
-  // Coriolis as a real 3D cross product, projected on the tangent plane
-  vec3 c3t = -2.0*cross(vec3(0.0,uOmega,0.0), vt0.x*e1 + vt0.y*e2);
-  vec3 c3d = -2.0*cross(vec3(0.0,uOmega,0.0), vd0.x*e1 + vd0.y*e2);
-  accT += vec2(dot(c3t,e1), dot(c3t,e2));
-  accD += vec2(dot(c3d,e1), dot(c3d,e2));
+  /* Coriolis.  Projecting the real 3-D cross product onto the tangent plane
+     leaves exactly the traditional in-plane rotation at rate
+         f = 2*Omega*n.y        (n.y = sin(latitude))
+     because the tangential part of Omega crosses into the surface normal and
+     drops out of the projection.
+
+     Evaluating that rotation EXPLICITLY (a += dt*f*perp(v0)) is unstable in
+     the strict sense: it multiplies |v| by sqrt(1+(f*dt)^2) every single
+     step.  The gain is tiny per step but it is a PRODUCT, and it scales with
+     sin(lat), so it is largest exactly at the poles -- which is why the
+     instability grew from the polar caps.  At Omega = 3.6e-4 and dt = 1800 s
+     the polar gain is 1.637 per step.
+
+     Crank-Nicolson evaluates the rotation at the midpoint (v0+v1)/2, which is
+     norm-preserving for any f*dt, and the 2x2 system has a closed form.
+     Folding the (already implicit) friction denominator D into the same solve
+     keeps one consistent update:
+         D*v1 = v0 + dt*acc + c*perp(v0+v1),   c = dt*f/2,  D = 1+dt*fric
+     =>  v1 = ( D*P - c*Q , D*Q + c*P ) / (D^2 + c^2)
+     with P = v0.x + dt*acc.x - c*v0.y,  Q = v0.y + dt*acc.y + c*v0.x.  */
+  float fCor = 2.0*uOmega*n.y;
+  /* Legacy explicit path, kept verbatim (not algebraically rearranged) so
+     uCoriCN = 0 reproduces the pre-fix result BIT FOR BIT. */
+  if(uCoriCN < 0.5){
+    vec3 c3t = -2.0*cross(vec3(0.0,uOmega,0.0), vt0.x*e1 + vt0.y*e2);
+    vec3 c3d = -2.0*cross(vec3(0.0,uOmega,0.0), vd0.x*e1 + vd0.y*e2);
+    accT += vec2(dot(c3t,e1), dot(c3t,e2));
+    accD += vec2(dot(c3d,e1), dot(c3d,e2));
+  }
 
   /* ---- FRICTION -------------------------------------------------------
      Bottom stress is quadratic, tau_b = rho*Cd*|u|*u, so as a linear rate it
@@ -473,8 +539,9 @@ void main(){
   float topTouchesBed = 1.0 - smoothstep(1.0, 3.0, Dep/max(h1, hLo));
   float fricT = uFricTop *depthTaper + rBotT*topTouchesBed;
   float fricD = uFricDeep*depthTaper + rBotD;
-  vec2 vt1 = (vt0 + uDt*accT)/(1.0 + uDt*fricT);
-  vec2 vd1 = (vd0 + uDt*accD)/(1.0 + uDt*fricD);
+  float cCor = (uCoriCN >= 0.5) ? 0.5*uDt*fCor : 0.0;
+  vec2 vt1 = coriFric(vt0, accT, uDt, fricT, cCor);
+  vec2 vd1 = coriFric(vd0, accD, uDt, fricD, cCor);
   vt1 *= (1.0-land); vd1 *= (1.0-land);
   vt1 = clamp(vt1, vec2(-3.0), vec2(3.0));
   vd1 = clamp(vd1, vec2(-3.0), vec2(3.0));
@@ -508,7 +575,11 @@ void main(){
   }
 
   oTopS  = vec4(h1, trT1.x, trT1.y, 0.0);
-  oTopV  = vec4(vt1, 0.0, 0.0);
+  /* .zw = this step's grad(eta), the lagged input to next step's Rhie-Chow
+     face interpolation. Held at 0 when the correction is off so that
+     uRhieChow = 0 reproduces the legacy state bit for bit, channels included
+     (the verification harness hashes raw texture bytes). */
+  oTopV  = vec4(vt1, (uRhieChow > 0.0) ? gradH : vec2(0.0));
   oDeepS = vec4(trD1.x, trD1.y, 0.0, 0.0);
   oDeepV = vec4(vd1, 0.0, 0.0);
 }`;
@@ -582,6 +653,19 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   outB = vec4(tr1.y, tr1.z, b0.z, b0.w);
 }
 
+/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
+   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
+vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
+  float D = 1.0 + dt*fric;
+  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
+     in exact arithmetic but round differently in float32. */
+  if(c == 0.0) return (v0 + dt*acc)/D;
+  float P = v0.x + dt*acc.x - c*v0.y;
+  float Q = v0.y + dt*acc.y + c*v0.x;
+  float den = D*D + c*c;
+  return vec2(D*P - c*Q, D*Q + c*P)/den;
+}
+
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
   if(cell >= uCount){ oLoA=vec4(0.0); oLoB=vec4(0.0); oHiA=vec4(0.0); oHiB=vec4(0.0); return; }
@@ -639,6 +723,19 @@ float meanInsol(float lat, float decl){
   return max(0.0,(h0*sin(lat)*sin(decl) + cos(lat)*cos(decl)*sin(h0))/3.14159265);
 }
 
+/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
+   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
+vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
+  float D = 1.0 + dt*fric;
+  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
+     in exact arithmetic but round differently in float32. */
+  if(c == 0.0) return (v0 + dt*acc)/D;
+  float P = v0.x + dt*acc.x - c*v0.y;
+  float Q = v0.y + dt*acc.y + c*v0.x;
+  float den = D*D + c*c;
+  return vec2(D*P - c*Q, D*Q + c*P)/den;
+}
+
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
@@ -649,7 +746,8 @@ void main(){
 
   vec4 ts = texelFetch(uTopS , cTex(cell), 0);   // (h_top, T_top, S_top, _)
   vec4 ds = texelFetch(uDeepS, cTex(cell), 0);   // (T_deep, S_deep, _, _)
-  vec2 vt = texelFetch(uTopV , cTex(cell), 0).xy;
+  vec4 tv = texelFetch(uTopV , cTex(cell), 0);
+  vec2 vt = tv.xy;
   vec2 vd = texelFetch(uDeepV, cTex(cell), 0).xy;
   vec4 la = texelFetch(uLoA , cTex(cell), 0);
   vec4 lb = texelFetch(uLoB , cTex(cell), 0);
@@ -810,7 +908,10 @@ void main(){
 
 ${mode === 'ocean'
     ? `  oTopS  = vec4(hT, Ts, St, 0.0);
-  oTopV  = vec4(vt, 0.0, 0.0);
+  /* .zw is the lagged grad(eta) the ocean step stores for its Rhie-Chow face
+     interpolation. The coupling pass must PRESERVE it -- zeroing it here would
+     silently disable the checkerboard damping every other pass. */
+  oTopV  = vec4(vt, tv.zw);
   oDeepS = vec4(Td, Sd, 0.0, 0.0);
   oDeepV = vec4(vd, 0.0, 0.0);`
     : `  oLoA = vec4(vl, Tl, Pl);
@@ -826,6 +927,19 @@ layout(location=1) out vec4 oTopV;    // (u_top, v_top, _, _)
 layout(location=2) out vec4 oDeepS;   // (T_deep, S_deep, _, _)
 layout(location=3) out vec4 oDeepV;   // (u_deep, v_deep, _, _)
 uniform float uSeed, uHtop, uHtotal;
+/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
+   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
+vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
+  float D = 1.0 + dt*fric;
+  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
+     in exact arithmetic but round differently in float32. */
+  if(c == 0.0) return (v0 + dt*acc)/D;
+  float P = v0.x + dt*acc.x - c*v0.y;
+  float Q = v0.y + dt*acc.y + c*v0.x;
+  float den = D*D + c*c;
+  return vec2(D*P - c*Q, D*Q + c*P)/den;
+}
+
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);
@@ -851,6 +965,19 @@ layout(location=1) out vec4 oLoB;
 layout(location=2) out vec4 oHiA;
 layout(location=3) out vec4 oHiB;
 uniform float uSeed;
+/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
+   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
+vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
+  float D = 1.0 + dt*fric;
+  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
+     in exact arithmetic but round differently in float32. */
+  if(c == 0.0) return (v0 + dt*acc)/D;
+  float P = v0.x + dt*acc.x - c*v0.y;
+  float Q = v0.y + dt*acc.y + c*v0.x;
+  float den = D*D + c*c;
+  return vec2(D*P - c*Q, D*Q + c*P)/den;
+}
+
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
   vec4 ca = texelFetch(uCellA, cTex(cell), 0);

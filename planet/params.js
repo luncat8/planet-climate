@@ -70,6 +70,11 @@ var PARAMS = {
      surface, so the full g here acts as a barotropic-pressure proxy that is
      what actually produces realistic surface currents. Exposed rather than
      hard-coded so it can be rebalanced without editing GLSL. */
+  /* Rhie-Chow face-velocity smoothing. Removes the collocated-grid odd-even
+     (checkerboard) null mode, which is invisible to the mass equation and
+     therefore undamped at ANY timestep. ~0.25 is enough; 0 = legacy stencil. */
+  rhieChow:   { label: 'Rhie-Chow damping',   default: 1.0,   min: 0, max: 4, step: 0.05,
+    tip: 'Suppresses grid-scale checkerboard noise. 0 reproduces the old A-grid stencil.' },
   pgfTop:     { label: 'PGF gain (top)',      default: 9.81,  min: 0, max: 20, step: 0.05,
                 fmt: function (v) { return v.toFixed(2); } },
   /* Multiplier on the deep layer's +g'*grad(eta) return-limb forcing. */
@@ -131,6 +136,11 @@ var PARAMS = {
     tip: 'Background friction is scaled by this/max(D, this), so the abyss is not over-damped.' },
   /* Deterministic seed for grid generation AND state initialisation. Was
      Math.random() in reset(), which made runs unreproducible. */
+  /* Crank-Nicolson Coriolis. The explicit rotation multiplies |v| by
+     sqrt(1+(f*dt)^2) EVERY step -- a compounding gain that peaks at the poles
+     (f ~ sin(lat)), which is what made the instability grow from the caps.
+     CN is norm-preserving for any f*dt. false = legacy explicit. */
+  coriCN:         { default: true },
   seed:           { default: 12345 },
   nuTOcean:       { default: 4e3 },
   fricAirHigh:    { default: 2.5e-6 },
