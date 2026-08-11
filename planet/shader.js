@@ -65,6 +65,19 @@ function modeSampleFnSrc(m) {
 function modeMagSrc(m) {
   return MODE_MAG[m] ? 'base = mix(vec3(0.02,0.03,0.07), base, pow(vVal,0.7));' : '';
 }
+/* Modes 16/17 show time-invariant geometry (bathymetry, interface displacement)
+   rather than a lit surface field. Shading them with the day/night terminator
+   hides half the map for no reason, so they render unlit with land as flat
+   grey so the coastline still reads. */
+var MODE_GEOM = { 16: 1, 17: 1 };
+function modeLitSrc(m, expr) {
+  return MODE_GEOM[m] ? 'lit = 1.0;' : '';
+}
+function modeLandSrc(m) {
+  return MODE_GEOM[m]
+    ? 'base = mix(base, vec3(0.16,0.17,0.20), vLand);'
+    : 'base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);';
+}
 
 var SHADER_COMMON = `
 uniform ivec2 uDim;          // W, H of the cell texture
@@ -186,12 +199,13 @@ ${modeValueSrc(m)}
 
   vec3 base = pal(vVal);
 ${modeMagSrc(m)}
-  base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
+${modeLandSrc(m)}
 
   // day/night uses the real cell normal (blocky, crisp) — not a smooth reconstruction
   vec3 n = normalize(ca.xyz);
   float d = max(0.0, dot(n, uSun));
   float lit = mix(1.0, 0.16 + 0.9*d, uNight);
+${modeLitSrc(m)}
 
   vec3 col = base * lit;
   o = vec4(col, 1.0);
@@ -1018,10 +1032,11 @@ vec3 pal(float t){
 void main(){
   vec3 base = pal(vVal);
 ${modeMagSrc(m)}
-  base = mix(base, base*vec3(0.72,0.88,0.62)+vec3(0.10,0.09,0.02), uShowLand*vLand*0.45);
+${modeLandSrc(m)}
   vec3 N = normalize(vN);
   float d = max(0.0, dot(N, uSun));
   float lit = mix(1.0, 0.16 + 0.9*d, uNight);
+${modeLitSrc(m)}
   vec3 V = normalize(uEye - vPos);
   float rim = pow(1.0 - max(0.0,dot(N,V)), 3.0);
   vec3 col = base*lit + vec3(0.20,0.42,0.85)*rim*0.55;

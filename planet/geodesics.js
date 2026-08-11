@@ -10,6 +10,10 @@ function Grid(level, seed, opts) {
   this.seed = seed === undefined ? 12345 : seed;
   var o = opts || {};
   this.opt = {
+    /* Fallback only: a bare `new Grid(level)` with no options gets the legacy
+       flat slab, so the module keeps its pre-refactor standalone behaviour.
+       The app never relies on this -- engine.js always passes params.bathyMode
+       through, whose schema default in params.js is 1 (procedural). */
     bathyMode:  o.bathyMode  === undefined ? 0     : o.bathyMode,
     hTotal:     o.hTotal     === undefined ? 1000  : o.hTotal,
     hTop:       o.hTop       === undefined ? 60    : o.hTop,

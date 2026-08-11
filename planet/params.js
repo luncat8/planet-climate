@@ -107,22 +107,28 @@ var PARAMS = {
      h_deep = hTotal - h_top is derived, so total ocean volume never changes. */
   /* ~60 m is a realistic mixed-layer depth; the surface heat capacity is now
      derived from it (cp*rho*h_top) so heat exchange stays conservative. */
-  hTop:           { default: 60 },
-  hTotal:         { default: 1000 },
+  hTop:           { label: 'Ref mixed-layer h', default: 60, min: 20, max: 200, step: 5,
+    tip: 'Reference top-layer thickness (m). Per-cell h_ref is capped by local depth.' },
+  hTotal:         { label: 'Slab total depth', default: 1000, min: 200, max: 6000, step: 100,
+    tip: 'Ocean depth used when bathyMode = 0 (flat slab).' },
   /* Bathymetry source: 0 = flat legacy slab (D == hTotal everywhere, exactly
      reproduces the pre-refactor ocean), 1 = procedural shelf/slope/abyss. */
-  bathyMode:      { default: 1 },
+  bathyMode:      { label: 'Bathymetry mode', default: 1, min: 0, max: 1, step: 1,
+    tip: '0 = flat legacy slab, 1 = procedural shelf/slope/abyss.' },
   /* Nominal minimum thickness of either layer (m). Was the literal 40.0
      repeated in 8 places in shader.js; on a shallow shelf it is scaled down
      per-cell by hLimits() so the clamp range can never invert. */
-  hMin:           { default: 40 },
+  hMin:           { label: 'Min layer thickness', default: 40, min: 5, max: 100, step: 5,
+    tip: 'Nominal floor on either layer (m); scaled down per-cell on shallow shelves.' },
   /* Depth (m) below which a column is treated as a well-mixed shelf sea
      rather than a two-layer stratified ocean. */
-  dShelf:         { default: 200 },
+  dShelf:         { label: 'Shelf depth', default: 200, min: 30, max: 1000, step: 10,
+    tip: 'Depth (m) below which a column is treated as a well-mixed shelf sea.' },
   /* Reference depth for the linear (background) friction taper: the legacy
      depth-blind rate is scaled by fricDepthRef/max(D, fricDepthRef), so the
      abyss is no longer damped as hard as a 60 m surface layer. */
-  fricDepthRef:   { default: 1000 },
+  fricDepthRef:   { label: 'Friction depth ref', default: 1000, min: 100, max: 5000, step: 100,
+    tip: 'Background friction is scaled by this/max(D, this), so the abyss is not over-damped.' },
   /* Deterministic seed for grid generation AND state initialisation. Was
      Math.random() in reset(), which made runs unreproducible. */
   seed:           { default: 12345 },
