@@ -223,6 +223,8 @@ layout(location=3) out vec4 oDeepV;
 
 uniform sampler2D uTopS, uTopV, uDeepS, uDeepV;
 uniform float uDt, uOmega, uNuVel, uNuT, uFricTop, uFricDeep, uAlphaT, uBetaS;
+uniform float uCdBottom;     // quadratic bottom-drag coefficient [-]
+uniform float uFricDepthRef; // reference depth for the linear friction taper [m]
 uniform float uDrag;         // effective inter-layer drag coeff (kg/m^3/s)
 uniform float uSteric, uStericRate; // buoyancy -> equilibrium thickness, and its rate
 uniform float uMassSpring;   // weak global mass correction (1/s)
@@ -399,8 +401,29 @@ void main(){
   accT += vec2(dot(c3t,e1), dot(c3t,e2));
   accD += vec2(dot(c3d,e1), dot(c3d,e2));
 
-  vec2 vt1 = (vt0 + uDt*accT)/(1.0 + uDt*uFricTop);
-  vec2 vd1 = (vd0 + uDt*accD)/(1.0 + uDt*uFricDeep);
+  /* ---- FRICTION -------------------------------------------------------
+     Bottom stress is quadratic, tau_b = rho*Cd*|u|*u, so as a linear rate it
+     is Cd*|u|/h: it depends on how much water column the stress is shared
+     over. The old code applied one depth-blind rate everywhere, which
+     over-damps the abyss by ~50x (6e-7 /s = 19 days, against a physical
+     ~900 days for a 4 km column at 0.02 m/s) while under-damping shelves.
+
+     The background rate is additionally tapered by fricDepthRef/D so the
+     deep ocean is not spun down by what is really a surface-layer drag.
+     Both are folded into the SAME implicit denominator the code already
+     used, so the scheme stays unconditionally stable even where the shelf
+     drag rate is large (0.4-day e-folding at dt=1800 s). */
+  float rBotT = uCdBottom*length(vt0)/max(h1 , hLo);
+  float rBotD = uCdBottom*length(vd0)/max(hd1, hLo);
+  float depthTaper = uFricDepthRef/max(Dep, uFricDepthRef);
+  /* The top layer only feels the sea floor where the column is so shallow
+     that it is effectively unstratified (shelf seas); in a deep column the
+     deep layer shields it. */
+  float topTouchesBed = 1.0 - smoothstep(1.0, 3.0, Dep/max(h1, hLo));
+  float fricT = uFricTop *depthTaper + rBotT*topTouchesBed;
+  float fricD = uFricDeep*depthTaper + rBotD;
+  vec2 vt1 = (vt0 + uDt*accT)/(1.0 + uDt*fricT);
+  vec2 vd1 = (vd0 + uDt*accD)/(1.0 + uDt*fricD);
   vt1 *= (1.0-land); vd1 *= (1.0-land);
   vt1 = clamp(vt1, vec2(-3.0), vec2(3.0));
   vd1 = clamp(vd1, vec2(-3.0), vec2(3.0));

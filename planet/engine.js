@@ -391,6 +391,7 @@ Planet.prototype.step = function () {
     .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
     .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
+    .f('uCdBottom', P.cdBottom).f('uFricDepthRef', P.fricDepthRef)
     .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
     .f('uDrag', P.oceanDrag + P.mechanicalFric)
     .f('uSteric', P.steric).f('uStericRate', P.stericRate)
