@@ -1,9 +1,23 @@
 /* geodesics.js - icosahedral dual-hex grid generation (pure mesh math, no WebGL) */
 var PLANET_R = 6.371e6;
 
-function Grid(level, seed) {
+/* Grid(level, seed, opts)
+   opts carries the ocean-geometry parameters needed to build the static
+   per-cell bathymetry field (uCellC). Defaults reproduce the legacy flat slab
+   so an omitted opts is always safe. */
+function Grid(level, seed, opts) {
   this.level = level;
   this.seed = seed === undefined ? 12345 : seed;
+  var o = opts || {};
+  this.opt = {
+    bathyMode:  o.bathyMode  === undefined ? 0     : o.bathyMode,
+    hTotal:     o.hTotal     === undefined ? 1000  : o.hTotal,
+    hTop:       o.hTop       === undefined ? 60    : o.hTop,
+    depthMax:   o.depthMax   === undefined ? 4000  : o.depthMax,
+    shelfWidth: o.shelfWidth === undefined ? 250e3 : o.shelfWidth,
+    bathyRough: o.bathyRough === undefined ? 0.35  : o.bathyRough,
+    dShelf:     o.dShelf     === undefined ? 200   : o.dShelf,
+  };
 }
 
 Grid.mulberry32 = function (a) {
@@ -250,10 +264,127 @@ Grid.prototype.build = function () {
     }
   }
 
+  /* ===================================================================
+     STATIC PER-CELL OCEAN GEOMETRY  ->  uCellC = (D, hRef, bedElev, coastDist)
+
+     D         total ocean depth at this cell (m)
+     hRef      reference/undisturbed top-layer thickness (m). The dynamic
+               PGF uses eta = hTop - hRef so that resting bathymetry produces
+               NO pressure gradient; see the sigma-coordinate note in PLAN.md.
+     bedElev   solid-surface elevation (m): >0 on land, -D in the ocean.
+     coastDist distance to the nearest land cell (m).
+     =================================================================== */
+  var opt = this.opt;
+
+  /* --- distance to coast: multi-source label-correcting shortest path over
+         the dual-hex adjacency. O(V) in practice, exact great-circle cost. */
+  var coastDist = new Float32Array(V);
+  var INF = 1e20;
+  var queue = new Int32Array(V * 8), qHead = 0, qTail = 0;
+  var inQ = new Uint8Array(V);
+  for (var ci = 0; ci < V; ci++) {
+    if (land[ci] > 0.5) { coastDist[ci] = 0; queue[qTail++] = ci; inQ[ci] = 1; }
+    else coastDist[ci] = INF;
+  }
+  /* An all-ocean world has no sources: leave every distance saturated so the
+     profile degenerates to a uniform abyssal plain instead of dividing by 0. */
+  if (qTail === 0) { for (var cj = 0; cj < V; cj++) coastDist[cj] = opt.shelfWidth * 4 + 1; }
+  while (qHead < qTail) {
+    var cu = queue[qHead++]; inQ[cu] = 0;
+    if (qHead > V * 4) { /* compact the ring buffer */
+      var rem = qTail - qHead;
+      queue.copyWithin(0, qHead, qTail); qHead = 0; qTail = rem;
+    }
+    var ringU = rings[cu], du = coastDist[cu];
+    for (var ri = 0; ri < ringU.length; ri++) {
+      var cv = ringU[ri];
+      var dotUV = Math.min(1, Math.max(-1, Grid.dot(pos[cu], pos[cv])));
+      var w = PLANET_R * Math.acos(dotUV);
+      if (du + w < coastDist[cv] - 1e-3) {
+        coastDist[cv] = du + w;
+        if (!inQ[cv]) {
+          if (qTail >= queue.length) { queue.copyWithin(0, qHead, qTail); qTail -= qHead; qHead = 0; }
+          queue[qTail++] = cv; inQ[cv] = 1;
+        }
+      }
+    }
+  }
+
+  /* --- rank-normalise the fbm terrain so roughness is resolution- and
+         seed-independent (`sorted` is already the ascending height array). */
+  function heightRank(h) {
+    var lo = 0, hi = sorted.length - 1;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (sorted[mid] < h) lo = mid + 1; else hi = mid; }
+    return sorted.length > 1 ? lo / (sorted.length - 1) : 0.5;
+  }
+
+  var cellC = new Float32Array(W * H * 4);
+  var minDepth = Math.max(5, opt.dShelf * 0.15);
+
+  /* The shelf must be RESOLVABLE. Mean cell spacing at level 5 is ~220 km, so
+     a nominal 250 km shelf would be crossed in a single cell and the shallow
+     water would vanish entirely (measured: min depth 3370 m, i.e. no shelf at
+     all). Three corrections:
+       - measure distance from the coastLINE, not from the land cell CENTRE,
+         by crediting half a cell spacing;
+       - model a near-flat SHELF plateau (~dShelf) ending at a steep SLOPE
+         down to the abyss, which is both the real shape of a margin and far
+         more robust than one long smooth ramp;
+       - floor the plateau at ~0.9 spacings so the first wet ring always lands
+         on the shelf instead of being swallowed by the slope. */
+  var spacing = Math.sqrt(4 * Math.PI * PLANET_R * PLANET_R / V);
+  var shelfW = Math.max(opt.shelfWidth, 0.9 * spacing);   // flat shelf
+  var slopeW = Math.max(opt.shelfWidth, 1.5 * spacing);   // shelf-break slope
+  for (var i9 = 0; i9 < V; i9++) {
+    var D, hRef, bed;
+    var rank = heightRank(height[i9]);          // 0..1, 0.7+ is land
+    if (opt.bathyMode === 0) {
+      /* Legacy flat slab -- bit-for-bit the pre-refactor ocean. */
+      D = opt.hTotal;
+      hRef = opt.hTop;
+      bed = -opt.hTotal;
+    } else {
+      /* shelf -> slope -> abyss ramp driven by distance from land */
+      var edgeDist = Math.max(0, coastDist[i9] - 0.5 * spacing);
+      /* flat shelf out to shelfW, then slope over slopeW to the abyss */
+      var t = Math.min(1, Math.max(0, (edgeDist - shelfW) / slopeW));
+      t = t * t * (3 - 2 * t);                                    // smoothstep
+      D = opt.dShelf + (opt.depthMax - opt.dShelf) * t;
+      /* Ridges/trenches: reuse the terrain fbm, centred so the mean depth is
+         preserved, and scaled by t so coastlines stay shallow. */
+      D *= 1 + opt.bathyRough * (2 * rank - 1) * 0.45 * t;
+      D = Math.min(opt.depthMax * 1.25, Math.max(minDepth, D));
+      /* Top layer cannot claim more than ~40% of a shallow column. */
+      hRef = Math.min(opt.hTop, 0.4 * D);
+      bed = -D;
+    }
+    if (land[i9] > 0.5) {
+      /* Land: report a real elevation for shading/relief instead of the old
+         binary uRelief*land step. Depth is kept finite so any clamp that
+         touches a dry cell still sees a sane range. */
+      bed = (rank - 0.7) / 0.3 * 2500;
+      D = Math.max(minDepth, opt.bathyMode === 0 ? opt.hTotal : opt.dShelf);
+      hRef = Math.min(opt.hTop, 0.4 * D);
+    }
+    cellC[i9 * 4 + 0] = D;
+    cellC[i9 * 4 + 1] = hRef;
+    cellC[i9 * 4 + 2] = bed;
+    cellC[i9 * 4 + 3] = coastDist[i9] === INF ? 0 : coastDist[i9];
+  }
+
+  /* Exact static invariant the runtime probe re-checks: total ocean volume. */
+  var oceanVol = 0, oceanArea = 0;
+  for (var i10 = 0; i10 < V; i10++) {
+    if (land[i10] > 0.5) continue;
+    oceanVol += cellC[i10 * 4] * cellA[i10 * 4 + 3];
+    oceanArea += cellA[i10 * 4 + 3];
+  }
+
   return {
-    level: level, V: V, W: W, H: H, cellA: cellA, cellB: cellB,
+    level: level, V: V, W: W, H: H, cellA: cellA, cellB: cellB, cellC: cellC,
     nbrA: nbrA, nbrB: nbrB, indices: indices,
     lookup: lookup, lookupW: lookupW, lookupH: lookupH,
     landFraction: landCount / V,
+    oceanVolume: oceanVol, oceanArea: oceanArea,
   };
 };

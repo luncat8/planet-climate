@@ -206,12 +206,23 @@ Planet.prototype.getEquiProg = function (m) {
 Planet.prototype.build = function (level) {
   var gl = this.gl;
   this.destroyGrid();
-  var g = new Grid(level).build();
+  /* Grid generation now depends on the ocean-geometry params (bathymetry is
+     baked into the static uCellC texture), so any change to those must go
+     through rebuild(), not a live uniform update. Seeded explicitly: reset()
+     used to call Math.random(), which made runs unreproducible. */
+  var gp = this.params || {};
+  var g = new Grid(level, gp.seed === undefined ? 12345 : gp.seed, {
+    bathyMode:  gp.bathyMode,  hTotal:     gp.hTotal,
+    hTop:       gp.hTop,       depthMax:   gp.depthMax,
+    shelfWidth: gp.shelfWidth, bathyRough: gp.bathyRough,
+    dShelf:     gp.dShelf,
+  }).build();
   this.grid = g;
   var W = g.W, H = g.H;
 
   this.texCellA = this.mkTex(W, H, g.cellA);
   this.texCellB = this.mkTex(W, H, g.cellB);
+  this.texCellC = this.mkTex(W, H, g.cellC);
   this.texNbrA = this.mkTex(W, H * 6, g.nbrA);
   this.texNbrB = this.mkTex(W, H * 6, g.nbrB);
   this.texLookup = this.mkTex(g.lookupW, g.lookupH, g.lookup, 1);
@@ -236,10 +247,11 @@ Planet.prototype.build = function (level) {
   this.fbo.init2 = this.mkFbo([this.A[4], this.A[5], this.A[6], this.A[7]]); // air
 
   var pdata = new Float32Array(this.PW * this.PH * 4);
+  var prnd = Grid.mulberry32(((this.params.seed === undefined ? 12345 : this.params.seed) ^ 0x9e37) >>> 0);
   for (var j = 0; j < this.PW * this.PH; j++) {
-    var z = Math.random() * 2 - 1, a = Math.random() * 6.2831853, r = Math.sqrt(1 - z * z);
+    var z = prnd() * 2 - 1, a = prnd() * 6.2831853, r = Math.sqrt(1 - z * z);
     pdata[j * 4] = r * Math.cos(a); pdata[j * 4 + 1] = z; pdata[j * 4 + 2] = r * Math.sin(a);
-    pdata[j * 4 + 3] = Math.random();
+    pdata[j * 4 + 3] = prnd();
   }
   var self = this;
   var streamLayers = [
@@ -270,7 +282,7 @@ Planet.prototype.build = function (level) {
 Planet.prototype.destroyGrid = function () {
   var gl = this.gl;
   var partTexs = this.part.reduce(function (a, s) { return a.concat(s.tex); }, []);
-  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texNbrA, this.texNbrB, this.texLookup]);
+  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
@@ -283,7 +295,9 @@ Planet.prototype.destroyGrid = function () {
 Planet.prototype.gridUniforms = function (p) {
   p.iv2('uDim', this.grid.W, this.grid.H).i('uCount', this.grid.V)
     .tex('uCellA', this.texCellA).tex('uCellB', this.texCellB)
-    .tex('uNbrA', this.texNbrA).tex('uNbrB', this.texNbrB);
+    .tex('uCellC', this.texCellC)
+    .tex('uNbrA', this.texNbrA).tex('uNbrB', this.texNbrB)
+    .f('uHmin', this.params.hMin === undefined ? 40 : this.params.hMin);
 };
 Planet.prototype.fullscreen = function (fboName, w, h) {
   var gl = this.gl;
@@ -295,16 +309,28 @@ Planet.prototype.fullscreen = function (fboName, w, h) {
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 };
 
+/* Deterministic seed stream. reset() previously drew uSeed from Math.random(),
+   so two runs of the same preset produced different oceans and no result could
+   be reproduced or regression-tested. Derived from params.seed instead. */
+Planet.prototype.seedRand = function () {
+  if (!this._rng) {
+    var s0 = this.params.seed === undefined ? 12345 : this.params.seed;
+    this._rng = Grid.mulberry32(s0 >>> 0);
+  }
+  return this._rng();
+};
 Planet.prototype.reset = function () {
   var W = this.grid.W, H = this.grid.H;
   this.simTime = 0;
+  /* Restart the stream so reset() is idempotent for a given seed. */
+  this._rng = null;
   var p = this.prog.init.use();
   this.gridUniforms(p);
-  p.f('uSeed', Math.random() * 1000)
+  p.f('uSeed', this.seedRand() * 1000)
     .f('uHtop', this.params.hTop).f('uHtotal', this.params.hTotal);
   this.fullscreen('init', W, H);
   var p2 = this.prog.init2.use();
-  this.gridUniforms(p2); p2.f('uSeed', Math.random() * 1000);
+  this.gridUniforms(p2); p2.f('uSeed', this.seedRand() * 1000);
   this.fullscreen('init2', W, H);
 };
 
@@ -397,7 +423,7 @@ Planet.prototype.stepParticles = function (dt) {
       .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH)
       .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', PLANET_R)
-      .f('uSeed', Math.random() * 1000)
+      .f('uSeed', this.seedRand() * 1000)
       .i('uVelMode', s.velMode).f('uVelScale', s.velScale);
     this.fullscreen(dstFbo, this.PW, this.PH);
     s.idx = 1 - s.idx;

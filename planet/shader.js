@@ -66,11 +66,35 @@ uniform ivec2 uDim;          // W, H of the cell texture
 uniform int   uCount;        // number of real cells (V)
 uniform sampler2D uCellA;    // pos.xyz , area
 uniform sampler2D uCellB;    // east.xyz, land
+uniform sampler2D uCellC;    // D (total depth), hRef, bedElev, coastDist
 uniform sampler2D uNbrA;     // idx , edgeLen , dist , valid
 uniform sampler2D uNbrB;     // nx , ny , rotA , rotB
 
 ivec2 cTex(int i){ int y = i / uDim.x; return ivec2(i - y*uDim.x, y); }
 ivec2 nTex(int i,int k){ int y = i / uDim.x; return ivec2(i - y*uDim.x, y + k*uDim.y); }
+
+/* ---- per-cell ocean geometry -------------------------------------------
+   Bathymetry is STATIC, so it lives in a texture built once on the CPU
+   rather than being recomputed per step. */
+uniform float uHmin;         // nominal minimum layer thickness (legacy 40.0)
+
+vec4  cellC(int i)   { return texelFetch(uCellC, cTex(i), 0); }
+float cellD(int i)   { return texelFetch(uCellC, cTex(i), 0).x; }   // total depth
+float cellHref(int i){ return texelFetch(uCellC, cTex(i), 0).y; }   // reference h_top
+
+/* Safe clamp range for the top layer given a column of depth D.
+   The old code clamped to [40, D-40] with a hard-coded 40. On a 30 m shelf
+   that range is INVERTED (40 > -10) and clamp() then returns the upper bound,
+   silently producing a negative or nonsensical thickness. Scaling the floor
+   with the column depth keeps lo < hi for every D. */
+void hLimits(float D, out float lo, out float hi){
+  lo = min(uHmin, 0.25 * D);
+  hi = max(D - lo, lo + 1.0);
+}
+float clampH(float h, float D){
+  float lo, hi; hLimits(D, lo, hi);
+  return clamp(h, lo, hi);
+}
 
 vec2 xfer(vec2 v, float ra, float rb){ return vec2(ra*v.x - rb*v.y, rb*v.x + ra*v.y); }
 

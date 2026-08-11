@@ -60,6 +60,45 @@ var PARAMS = {
   /* Vertical salt exchange coefficient (kg/m^2/s per ppt), symmetric. */
   verticalSalt:   { label: 'Vertical salt k',       default: 5e-7, min: 0, max: 5e-5, step: 5e-7, fmt: function (v) { return v.toExponential(1); } },
   nuVelOcean:{ label: 'Ocean viscosity',      default: 6e3,   min: 0,   max: 4e4,  step: 1e3,  fmt: function (v) { return v.toExponential(1); } },
+
+  /* ---- OCEAN GEOMETRY (per-cell depth / reference thickness) --------------
+     The ocean used to be a slab of uniform total depth hTotal with a uniform
+     reference top-layer thickness hTop. Both are now per-cell fields carried
+     in the static uCellC texture; these knobs shape them. */
+  /* Pressure-gradient gain on the TOP layer. The 1.5-layer shallow-water
+     result would be g' (~0.02), but this model has a rigid lid and no free
+     surface, so the full g here acts as a barotropic-pressure proxy that is
+     what actually produces realistic surface currents. Exposed rather than
+     hard-coded so it can be rebalanced without editing GLSL. */
+  pgfTop:     { label: 'PGF gain (top)',      default: 9.81,  min: 0, max: 20, step: 0.05,
+                fmt: function (v) { return v.toFixed(2); } },
+  /* Multiplier on the deep layer's +g'*grad(eta) return-limb forcing. */
+  pgfDeepGain:{ label: 'PGF gain (deep)',     default: 1.0,   min: 0, max: 4,  step: 0.05,
+                fmt: function (v) { return v.toFixed(2) + '×'; } },
+  /* Maximum (abyssal) ocean depth. Reached far from any coastline. */
+  depthMax:   { label: 'Max ocean depth',     default: 4000,  min: 500, max: 8000, step: 100,
+                fmt: function (v) { return (v / 1000).toFixed(1) + ' km'; } },
+  /* Width of the continental shelf/slope, i.e. the distance over which depth
+     ramps from dShelf up to depthMax. */
+  shelfWidth: { label: 'Shelf width',         default: 250e3, min: 0, max: 800e3, step: 25e3,
+                fmt: function (v) { return (v / 1000).toFixed(0) + ' km'; } },
+  /* How much of the fbm terrain field modulates the depth profile (ridges,
+     trenches, seamounts). 0 = perfectly smooth shelf->abyss ramp. */
+  bathyRough: { label: 'Bathymetry roughness', default: 0.35, min: 0, max: 1, step: 0.05,
+                fmt: function (v) { return v.toFixed(2); } },
+  /* Quadratic bottom-drag coefficient: the effective linear rate is
+     Cd*|u|/h, so the SAME Cd damps a 30 m shelf column ~100x harder than a
+     4 km abyssal one -- which is the physical point of the depth dependence. */
+  cdBottom:   { label: 'Bottom drag Cd',      default: 2.5e-3, min: 0, max: 1e-2, step: 1e-4,
+                fmt: function (v) { return v.toExponential(1); } },
+  /* Critical gradient Richardson number: above this the interface is
+     considered stratified enough to suppress shear-driven exchange. */
+  riCrit:     { label: 'Richardson crit',     default: 0.25,  min: 0.05, max: 2, step: 0.05,
+                fmt: function (v) { return v.toFixed(2); } },
+  /* Mixing multiplier applied when the column is statically UNSTABLE
+     (dense water over light water) -- i.e. convective overturning. */
+  mixConv:    { label: 'Convective mixing',   default: 50,    min: 1, max: 500, step: 5,
+                fmt: function (v) { return v.toFixed(0) + '×'; } },
   cloudK:    { label: 'Cloud sensitivity',    default: 1.7,   min: 0,   max: 4,    step: 0.05 },
   noise:     { label: 'Symmetry-break noise', default: 0.02,  min: 0,   max: 0.2,  step: 0.005 },
   // non-tunable (default only; UI handled by checkboxes / mode / equirect buttons)
@@ -70,6 +109,23 @@ var PARAMS = {
      derived from it (cp*rho*h_top) so heat exchange stays conservative. */
   hTop:           { default: 60 },
   hTotal:         { default: 1000 },
+  /* Bathymetry source: 0 = flat legacy slab (D == hTotal everywhere, exactly
+     reproduces the pre-refactor ocean), 1 = procedural shelf/slope/abyss. */
+  bathyMode:      { default: 1 },
+  /* Nominal minimum thickness of either layer (m). Was the literal 40.0
+     repeated in 8 places in shader.js; on a shallow shelf it is scaled down
+     per-cell by hLimits() so the clamp range can never invert. */
+  hMin:           { default: 40 },
+  /* Depth (m) below which a column is treated as a well-mixed shelf sea
+     rather than a two-layer stratified ocean. */
+  dShelf:         { default: 200 },
+  /* Reference depth for the linear (background) friction taper: the legacy
+     depth-blind rate is scaled by fricDepthRef/max(D, fricDepthRef), so the
+     abyss is no longer damped as hard as a 60 m surface layer. */
+  fricDepthRef:   { default: 1000 },
+  /* Deterministic seed for grid generation AND state initialisation. Was
+     Math.random() in reset(), which made runs unreproducible. */
+  seed:           { default: 12345 },
   nuTOcean:       { default: 4e3 },
   fricAirHigh:    { default: 2.5e-6 },
   fricOceanTop:   { default: 1.5e-6 },
