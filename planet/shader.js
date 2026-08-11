@@ -25,9 +25,11 @@ var MODE_FIELDS = [
   'length(wd.yz)/0.25',                      // 13 deep-ocean speed
   '(wd.w-33.0)/4.0',                         // 14 deep-ocean salinity
   '(ht-50.0)/20.0',                        // 15 top-layer thickness h_top (m)
+  'Dc/5000.0',                             // 16 ocean depth D (m)
+  '(ht-hRc)/8.0*0.5+0.5',                  // 17 interface displacement eta (m)
 ];
 // modes that use magnitude (dark-background) coloring; palette-color fields excluded
-var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1 };
+var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1, 16:1 };
 function modeValueSrc(m) {
   return 'float v = ' + (MODE_FIELDS[m] != null ? MODE_FIELDS[m] : MODE_FIELDS[9]) + ';';
 }
@@ -45,6 +47,9 @@ var OCEAN_UNPACK = `
   vec4 wt = vec4(_tS.y, _tV.xy, _tS.z);
   vec4 wd = vec4(_dS.x, _dV.xy, _dS.y);
   float ht = _tS.x;
+  vec4 _cC = texelFetch(uCellC, cTex(cell),0);
+  float Dc  = _cC.x;   // total ocean depth at this cell (m)
+  float hRc = _cC.y;   // reference top-layer thickness (m)
 `;
 function modeSampleFnSrc(m) {
   return 'float sampleVal(int cell){\n' +

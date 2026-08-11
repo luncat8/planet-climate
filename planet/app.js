@@ -15,11 +15,13 @@ var LAYER_VIEW = {
     { id: 'salinity', label: 'Sal', title: 'Salinity' },
     { id: 'rain', label: 'Rain', title: 'Rain' },
     { id: 'thick', label: 'h', title: 'Top-layer thickness (m)' },
+    { id: 'depth', label: 'D', title: 'Ocean depth / bathymetry (m)' },
+    { id: 'eta', label: 'η', title: 'Interface displacement h_top - h_ref (m)' },
   ],
   map: {
     highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
     lowAir: { T: 0, P: 2, humidity: 3, speed: 4 },
-    ocean: { T: 1, speed: 5, salinity: 7, thick: 15 },
+    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17 },
     deepOcean: { T: 8, speed: 13, salinity: 14 },
   },
 };
@@ -108,8 +110,25 @@ function el(tag, cls, txt) {
   return e;
 }
 
+/* Params that are baked into the static uCellC bathymetry texture at build
+   time. Changing one of these has no effect until the grid is regenerated,
+   so trigger a rebuild instead of silently doing nothing. */
+var GRID_PARAMS = ['bathyMode', 'depthMax', 'shelfWidth', 'bathyRough', 'dShelf', 'hTop', 'hTotal', 'seed'];
+
+var _gridRebuildTimer = null;
 function setParam(k, v) {
   if (ui.planet) ui.planet.params[k] = v;
+  if (GRID_PARAMS.indexOf(k) >= 0) {
+    /* Regenerating the grid is far too heavy to run on every tick of a slider
+       drag, so coalesce the changes and rebuild once the user settles. */
+    if (_gridRebuildTimer) clearTimeout(_gridRebuildTimer);
+    _gridRebuildTimer = setTimeout(function () {
+      _gridRebuildTimer = null;
+      rebuild(ui.level);
+    }, 160);
+    refreshDynamic();
+    return;
+  }
   refreshDynamic();
 }
 function rebuild(l) {
