@@ -649,16 +649,164 @@ step 1. Schema is now **60** sliders. `0` restores the legacy explicit scheme.
 
 ---
 
-### Phase 9 — Optional / stretch
+### Phase 9 — Atmosphere solver defects — **9.1 DONE** (`b4a49ff`)
 
-- **9.1 `AIR_FS` explicit-scheme defects.** *Promoted — now two known issues.*
-  `AIR_FS` still uses explicit Coriolis (`coriFric()` is reusable), **and** it
-  almost certainly has the same forward-Euler gravity-wave defect fixed above.
-  No symptom is reported yet because the atmosphere has stronger damping, but
-  the analysis carries over directly.
-- **9.2 Barotropic divergence correction.** Addresses §1.1c. A Jacobi/multigrid projection so `div(h_t·u_t + h_d·u_d) = 0`. Real work (iterative solve on an unstructured hex grid); only worth it if the deep flow visibly ignores bathymetry after Phase 2b.
-- **9.3 PGF rebalance toward true `g'`.** Split `accT` into an explicit barotropic proxy + a genuine `-g'∇eta` baroclinic term. Physically correct but *will* require retuning every preset — defer until Phase 6.1 diagnostics can quantify what changed.
-- **9.4 Grid-cached bathymetry.** Bathymetry generation adds cost to `build()`, which runs on every resolution change (`app.js:rebuild`). Cache by `(level, seed)`.
+- **9.1 `AIR_FS` implicit Coriolis — DONE.** `stepAir()` used the same explicit
+  rotation the ocean had before Phase 7. The low layer is rescued by drag
+  (`uFricLo=1.6e-5` gives a net per-step gain of 0.998), but `uFricHi=2.5e-6` is
+  ~6x weaker, so the **upper layer is net amplifying** and the error compounds
+  with `dt`. Measured `aMaxHi` over 10 sim-days at L5: dt=120 -> 16.6 m/s,
+  dt=600 -> 15.7, **dt=1800 -> 117.3 (clamp-saturated)**. With the fix, dt=1800
+  gives 14.9 m/s and `aMeanHi` 7.37, matching dt=120 (7.36) and dt=600 (7.36) —
+  the atmosphere is now independent of timestep, which is the real test. Reuses
+  `coriFric()` verbatim (a forward prototype was needed: it is defined after
+  `stepAir` in `AIR_FS`). At the default dt=120 the change is ~-0.2%.
+  *Gate note:* the ocean hash moves even though this is an air-only change,
+  because evaporation depends on wind speed (`0.6 + 0.08*spd`). Isolated at
+  `windStress:0`: ocean `topS`/`deepS` bitwise identical, `topV`/`deepV` differ
+  by <=5.1e-06 relative.
+- **9.2 Air gravity waves — NOT APPLICABLE (prediction withdrawn).** I expected
+  Phase 8's defect to carry over. It does not: air pressure is **diagnostic**,
+  `Pl = 101325 - 60*(Tl-288) + 25*(Th-250)` computed in `COUPLE_FS` and passed
+  through `stepAir` unchanged. There is no `p_t = -rho*c^2*div(u)` feedback, so
+  there is no fast acoustic/gravity mode. The air is a forced-dissipative
+  system, not an oscillator.
+
+---
+
+### Phase 10 — The free surface is the wrong model  *(INVESTIGATE)*
+
+*Opened by the user's Phase 8 verdict: "issues partially fixed... L6/L7 dumped
+it with Gravity-wave stab. This means the root of the problem not solved." Plus
+a second symptom: a triangular/spoke pattern in deep-ocean speed at L6/L7.*
+
+**The user is right, and this is the important entry in this document.**
+Phase 8 is a damping term. It buys unconditional-looking stability by removing
+energy from the fastest mode, and the calibration table shows the cost honestly:
+at L7 it takes `meanSpd` from 0.02964 to 0.01910. That is not a fix, it is a
+tourniquet. Three things are wrong at the design level:
+
+1. **We are paying full price for a mode we do not want.** The external gravity
+   wave `c = sqrt(g*h_top) ~ 24 m/s` sets the entire timestep budget. Nothing in
+   this project's output depends on resolving it. The user's own framing:
+   *"actually i dont need gravity waves - it is byproduct of our need of
+   heightmap."* Correct — the heightmap exists to give the PGF something to
+   differentiate, not because the surface wave field is interesting.
+2. **`fbStab` is resolution-coupled by construction.** It is gated on
+   `(c*k*dt)^2`, so the more the grid is refined, the more it must engage. Every
+   future resolution increase makes it damp harder. It cannot be the endpoint.
+3. **It does not remove the instability, it slows it.** L7/dt=120 still grows
+   0.25 -> 0.622 over 5 days with `fbStab=30`; it is just no longer accelerating.
+
+**The alternatives, cheapest first.** All of them eliminate the fast wave
+instead of damping it, so `fbStab` would go back to 0 and `dt` would be limited
+by advection (`u ~ 0.15 m/s`) rather than by `sqrt(g*h)` — a CFL budget roughly
+**150x** looser.
+
+| Option | Idea | Cost | Keeps waves? |
+|---|---|---|---|
+| **A. Semi-implicit free surface** | Treat only the `eta`/`div(u)` pair implicitly (Helmholtz solve `eta - dt^2*g*H*lap(eta) = rhs`), everything else explicit. Standard in ocean GCMs. | Jacobi/CG on the hex grid, ~10-30 iters/step; needs a new pass. | Yes, but stable at any dt |
+| **B. Rigid lid / streamfunction** | Drop the free surface. Diagnose pressure from `div(u)=0`. | Elliptic solve every step; awkward with per-cell depth and islands. | No |
+| **C. Filtered / slow-wave** | Keep the free surface but replace `g` with an artificial `g' << g` in the PGF only (reduced-gravity). Wave speed drops as `sqrt(g')`; geostrophic balance is preserved if the Rossby radius is still resolved. | ~10 lines. One new param. | Slowed, not removed |
+| **D. Split-explicit** | Sub-cycle the barotropic mode at small `dt` inside each baroclinic step. | Moderate; standard (ROMS/POM). | Yes, exactly |
+
+**PROTOTYPE RESULT — Option C already works, and needs no new code.**
+`uPgfTop` *is* the reduced-gravity knob (`accT = -uPgfTop*gradH`, default 9.81),
+so C is testable today by turning `fbStab` off and lowering `pgfTop`.
+
+L6, dt=600, 10 sim-days, **`fbStab:0`** throughout:
+
+| `pgfTop` | gMaxEta | gRmsEta | gMaxSpd | meanSpd |
+|---|---|---|---|---|
+| 9.81 (control) | 14.07 | 3.476 | 4.242 (clamped) | 1.321 (garbage) |
+| **2.0** | **0.853** | 0.4184 | 0.0693 | 0.01873 |
+| 0.5 | 1.141 | 0.4332 | 0.0533 | 0.01552 |
+| 0.1 | 2.031 | 0.4663 | 0.0370 | 0.01343 |
+
+Reducing `g` alone stabilises the case that motivated Phase 8 — **with the
+Phase 8 damping switched off entirely.** (Growth is non-monotonic below ~2.0
+because a slower wave means a longer Rossby radius and a different adjustment
+regime, not renewed instability.)
+
+The decisive comparison, **L7 at dt=600, 5 sim-days** — the Phase 10 acceptance
+case, which Phase 8 fails:
+
+| config | gMaxEta | gMaxSpd | meanSpd |
+|---|---|---|---|
+| control (`g=9.81`, `fbStab=0`) | 19.51 | 4.243 (clamped) | 2.274 (garbage) |
+| Phase 8 (`g=9.81`, `fbStab=30`) | 0.4575 | 0.0652 | **0.01374** |
+| **Option C (`g=2.0`, `fbStab=0`)** | 1.278 | 0.1996 | **0.03535** |
+
+Both are stable, but Phase 8 gets there by removing the circulation
+(`meanSpd` 0.0137, less than half the L7/dt=120 reference of 0.02964) while
+Option C **keeps 2.6x more flow** and actually exceeds the reference. This is
+the empirical confirmation of the user's intuition: the gravity-wave field was
+never carrying the signal, and paying for it with damping was the wrong trade.
+
+**Recommendation: adopt C as the default, keep A as the principled endpoint.** Option C is nearly free and
+directly tests the user's hypothesis that the waves are expendable — if the
+circulation is unchanged with `g'` at, say, `g/100`, that is decisive evidence
+the wave field was never carrying the signal, and it may simply be the answer.
+Option A is the principled fix and the one to keep if C distorts the dynamics.
+**Do not start with B** — the elliptic solve interacts badly with the per-cell
+depth work that is the actual point of this project.
+
+*Acceptance test for Phase 10:* L7 at dt=600 with `fbStab=0`, run 10 sim-days,
+`gMaxEta` bounded and `meanSpd` within 5% of the L7/dt=120 reference. That is
+the bar Phase 8 fails.
+
+#### 10.1 The triangular pattern in deep-ocean speed
+
+**Status: partially diagnosed, cause identified as grid imprinting, magnitude
+of the visual artifact explained. Not yet fixed.**
+
+Findings so far (`harness/tri.js`, new — locates the 12 pentagons and the 30
+icosahedral edge arcs, then bins the field by distance to them):
+
+- The dual-hex mesh is **not uniform**: cell area varies **1.79x** max/min at
+  L6, and per-cell edge-length anisotropy averages 1.12 (worst 1.20).
+- Mean deep speed **on** an icosahedral edge arc vs **off** it:
+  ratio **0.937** — a 6-7% deficit locked to the base mesh.
+  Reproducible across unrelated physics changes: 0.937 (`bathyMode:1`),
+  0.930 (`omegaSpin:0`), 0.932 (`bathyMode:0`). **That invariance under changed
+  rotation and bathymetry is the signature of a grid artifact, not a flow.**
+- Pearson correlation of deep speed with cell area and with edge anisotropy is
+  ~0, so it is *not* a simple "big cells are slower" effect. The imprint comes
+  from the truncation error of the Laplacian/divergence stencils, which inherits
+  icosahedral symmetry, not from cell size directly.
+
+**Why it looks so dramatic on screen.** Mode 13 is `length(wd.yz)/0.25`, but the
+measured deep speed is **~4.8e-05 m/s** — about **0.1% of full scale**. The
+magnitude palette then applies `pow(vVal, 0.7)`, which is a strong contrast
+stretch near zero. A 6% modulation of a field displayed at 0.1% of its nominal
+range is exactly the regime where gamma turns invisible structure into bold
+geometry. **The deep ocean is nearly at rest and you are looking at its
+numerical texture, hugely amplified.**
+
+Two separate follow-ups, and they should not be confused:
+
+- **10.1a Display.** Autoscale the magnitude modes (or give mode 13 a realistic
+  divisor ~1e-4, or expose the range). Cheap, and it stops the artifact from
+  dominating a view of an essentially quiescent field. Note this is *cosmetic* —
+  it makes the picture honest, it does not make the numbers better.
+- **10.1b Numerics.** Reduce the imprint itself. Candidates: a proper
+  least-squares / Perot-style gradient reconstruction instead of the current
+  face-normal sum (which is only first-order accurate on an irregular mesh);
+  spring/Lloyd relaxation of the dual mesh at build time to cut the 1.79x area
+  spread; or a tensor-corrected Laplacian. Mesh relaxation is the best
+  effort-to-benefit ratio and is a one-time `build()` cost.
+- **Also worth checking:** why the deep layer is at 5e-05 m/s at all. That may
+  itself be a bug (over-damping from Phase 4's depth taper, or the deep layer
+  simply never being forced), and it would make the whole question moot. The
+  earlier §1.1c barotropic-divergence issue is a candidate.
+
+---
+
+### Phase 11 — Optional / stretch
+
+- **11.2 Barotropic divergence correction.** Addresses §1.1c. A Jacobi/multigrid projection so `div(h_t·u_t + h_d·u_d) = 0`. Real work (iterative solve on an unstructured hex grid); only worth it if the deep flow visibly ignores bathymetry after Phase 2b.
+- **11.3 PGF rebalance toward true `g'`.** Split `accT` into an explicit barotropic proxy + a genuine `-g'∇eta` baroclinic term. Physically correct but *will* require retuning every preset — defer until Phase 6.1 diagnostics can quantify what changed.
+- **11.4 Grid-cached bathymetry.** Bathymetry generation adds cost to `build()`, which runs on every resolution change (`app.js:rebuild`). Cache by `(level, seed)`.
 
 ---
 
