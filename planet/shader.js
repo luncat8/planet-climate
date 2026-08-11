@@ -96,6 +96,30 @@ float clampH(float h, float D){
   return clamp(h, lo, hi);
 }
 
+/* ---- stratification ----------------------------------------------------
+   Bulk Richardson number of the interface: the ratio of the buoyancy that
+   resists overturning to the kinetic energy available in the shear.
+     Ri = g' h / |du|^2
+   Ri >> 1 : strongly stratified, shear cannot overturn the interface
+   Ri -> 0 : shear dominates, layers exchange freely
+   Ri <  0 : dense water over light water -> convectively unstable */
+uniform float uRiCrit;   // Ri above which exchange is considered suppressed
+uniform float uMixConv;  // mixing multiplier under convective instability
+
+float bulkRi(float gp, float h, vec2 dv){
+  return gp*max(h, 1.0)/max(dot(dv, dv), 1e-8);
+}
+/* Pacanowski-Philander style suppression, normalised so that Ri == uRiCrit
+   maps to 1.0. That keeps the DEFAULT strength of every exchange it scales
+   at the value the model was originally tuned for, so this introduces a
+   stratification DEPENDENCE without silently rescaling the climate. */
+float stratMix(float Ri){
+  if(Ri < 0.0) return uMixConv;
+  float r = 1.0 + 5.0*Ri/max(uRiCrit, 1e-4);
+  float n = 1.0 + 5.0;
+  return min(uMixConv, (n*n)/(r*r));
+}
+
 vec2 xfer(vec2 v, float ra, float rb){ return vec2(ra*v.x - rb*v.y, rb*v.x + ra*v.y); }
 
 float hash11(float p){ p = fract(p*0.1031); p *= p+33.33; p *= p+p; return fract(p); }
@@ -389,9 +413,17 @@ void main(){
 
   // inter-layer stress, EQUAL AND OPPOSITE, inverse-column-mass weighted:
   //   d(rho*h_top*u_top + rho*h_deep*u_deep)/dt = -tau + tau = 0
+  /* Interfacial stress. A strongly stratified interface resists shear-driven
+     momentum exchange, so the coupling between the layers is scaled by the
+     same Richardson suppression used for the tracer exchange.
+
+     The 0.1 floor is deliberate: uDrag carries oceanDrag + mechanicalFric,
+     and mechanicalFric is by definition the stratification-INDEPENDENT part,
+     so it must survive even a perfectly stratified interface. */
   vec2  dv  = vt0 - vd0;
   float hLo, hHi; hLimits(Dep, hLo, hHi);
-  vec2  tau = uDrag*length(dv)*dv;                  // N/m^2
+  float dragStrat = 0.1 + 0.9*min(1.0, stratMix(bulkRi(gp, h1, dv)));
+  vec2  tau = uDrag*dragStrat*length(dv)*dv;        // N/m^2
   accT -= tau/(1027.0*max(h1 , hLo));
   accD += tau/(1027.0*max(hd1, hLo));
 
@@ -702,13 +734,28 @@ void main(){
   rain  = mix(rain, clamp((cond+condl)*uRainK, 0.0, 4.0), 0.10);
 
   // ---- VERTICAL EXCHANGE (top <-> deep), all strictly symmetric -----------
-  // The mixing efficiency still responds to the stratification: instability of
-  // EITHER sign stirs the column (surface cooling/salting sinks; a locally
-  // denser deep layer upwells), but the exchanges themselves are written in
-  // content form so nothing is created or destroyed.
+  // The exchanges are written in content form, so nothing is created or
+  // destroyed; only the RATE responds to stratification.
+  //
+  // The old rate was 1 + 900*abs(rt-rd), and the abs() inverted the physics:
+  // a strongly STABLE column (light water over dense, rt-rd < 0) got a large
+  // multiplier and therefore mixed HARDER, when stable stratification is
+  // precisely what suppresses vertical exchange. Only the unstable sign
+  // should enhance mixing. Sign convention here: r is a density anomaly, so
+  // rt > rd means dense-over-light, i.e. convectively unstable.
   float rt = -0.00017*(Ts-283.0) + 0.00078*(St-35.0);
   float rd = -0.00017*(Td-283.0) + 0.00078*(Sd-35.0);
-  float stab = 1.0 + 900.0*abs(rt-rd);
+  float dRho = rt - rd;                        // >0 unstable, <0 stable
+  vec2  dvOc = vt - vd;
+  float gpOc = max(-dRho, 0.0)*9.81/1.0;       // reduced gravity of the pair
+  float stab;
+  if(dRho > 0.0){
+    // convectively unstable: overturning, capped so dt*rate stays sane
+    stab = min(uMixConv, 1.0 + 900.0*dRho);
+  } else {
+    // stable: shear must work against buoyancy -> Richardson suppression
+    stab = stratMix(bulkRi(gpOc, hT, dvOc));
+  }
 
   // heat: Q [W/m^2]; heat lost by one layer == heat gained by the other
   float Q = uVertHeat*stab*(Td - Ts);

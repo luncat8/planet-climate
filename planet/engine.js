@@ -297,7 +297,9 @@ Planet.prototype.gridUniforms = function (p) {
     .tex('uCellA', this.texCellA).tex('uCellB', this.texCellB)
     .tex('uCellC', this.texCellC)
     .tex('uNbrA', this.texNbrA).tex('uNbrB', this.texNbrB)
-    .f('uHmin', this.params.hMin === undefined ? 40 : this.params.hMin);
+    .f('uHmin', this.params.hMin === undefined ? 40 : this.params.hMin)
+    .f('uRiCrit', this.params.riCrit === undefined ? 0.25 : this.params.riCrit)
+    .f('uMixConv', this.params.mixConv === undefined ? 50 : this.params.mixConv);
 };
 Planet.prototype.fullscreen = function (fboName, w, h) {
   var gl = this.gl;
