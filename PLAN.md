@@ -55,7 +55,7 @@ accD = +uPgfDeep * grad(eta)
 
 With `h_ref ≡ 60 m` (Phase 1's default) `eta ≡ h_top - 60`, so `grad(eta) ≡ grad(h_top)` **exactly** — Phase 1 is a provable no-op on current behaviour while making Phases 2–3 safe. That is the whole reason it goes first.
 
-> **Deliberate non-goal.** The textbook 1.5-layer result is `accT = -g'·∇h` with `g' ≈ 0.02`, not `-g·∇h`. Switching to it would weaken surface currents ~490× and destroy every tuned preset. The `-9.81` is a *barotropic-pressure-gradient proxy* standing in for the rigid lid's missing free surface. This plan **keeps it** (as the tunable `uPgfTop`, default `9.81`) and only removes the spurious static part. Rebalancing toward true `g'` is filed as optional Phase 7.3.
+> **Deliberate non-goal.** The textbook 1.5-layer result is `accT = -g'·∇h` with `g' ≈ 0.02`, not `-g·∇h`. Switching to it would weaken surface currents ~490× and destroy every tuned preset. The `-9.81` is a *barotropic-pressure-gradient proxy* standing in for the rigid lid's missing free surface. This plan **keeps it** (as the tunable `uPgfTop`, default `9.81`) and only removes the spurious static part. Rebalancing toward true `g'` is filed as optional Phase 8.3.
 
 ### 0.3 Phase order (each phase ships green)
 
@@ -68,7 +68,8 @@ Phase 3  Per-cell reference h_top (shelf-aware)                    [DONE]
 Phase 4  Depth-dependent water friction                            [DONE 7eaba55]
 Phase 5  Stratification-dependent drag (+ sign-bug fix)            [DONE ac5f12a]
 Phase 6  Diagnostics, render modes, UI                             [DONE 37cc8e7, b4fcd0b]
-Phase 7  Optional / stretch                                        [NOT STARTED]
+Phase 7  Grid-noise fix: Rhie-Chow + implicit Coriolis             [DONE 54ae063]
+Phase 8  Optional / stretch (was 7.2/7.3/7.4)                      [NOT STARTED]
 ```
 
 **All four requested features are implemented, verified and committed.**
@@ -111,9 +112,9 @@ omegaSpin = 7.292e-5 (default), dt=1800  ->  f*dt = 0.26  ->  +3.4 %/step
 omegaSpin = 3.6e-4   (slider max), dt=1800 -> f*dt = 1.30  -> +63.7 %/step
 ```
 
-The velocity clamps mask it. Fix is a 6-line Crank–Nicolson rotation (Phase 7.1) — cheap, and it makes the "Slow rotation"/fast-spin presets trustworthy.
+The velocity clamps mask it. Fix is a 6-line Crank–Nicolson rotation (Phase 7.B, done) — cheap, and it makes the "Slow rotation"/fast-spin presets trustworthy.
 
-**(c) Deep-layer continuity is never enforced.** `h_deep = uHtot - h_top` is derived (`shader.js:229`), so the model is rigid-lid. A rigid lid requires the **barotropic transport to be divergence-free**, `div(h_t·u_t + h_d·u_d) = 0`. Nothing enforces this; `u_deep` evolves from its own momentum equation with no projection step. Harmless-ish today with flat depth; with real bathymetry the deep layer will try to flow *through* seamounts. Documented as a known limitation, with optional Phase 7.2 offering a barotropic correction.
+**(c) Deep-layer continuity is never enforced.** `h_deep = uHtot - h_top` is derived (`shader.js:229`), so the model is rigid-lid. A rigid lid requires the **barotropic transport to be divergence-free**, `div(h_t·u_t + h_d·u_d) = 0`. Nothing enforces this; `u_deep` evolves from its own momentum equation with no projection step. Harmless-ish today with flat depth; with real bathymetry the deep layer will try to flow *through* seamounts. Documented as a known limitation, with optional Phase 8.2 offering a barotropic correction.
 
 ### 1.2 Refactor debt directly in the way
 
@@ -288,7 +289,7 @@ Sites converting scalar `uHtot` → `cellD(cell)`:
 
 **Conservation audit — does the core invariant survive?** Yes. `h_deep = D(cell) - h_top` is still *derived per cell*, and `D` is static, so `h_top + h_deep = D(cell)` holds exactly and per-cell water volume is still fixed by construction. The invariant is now *local* rather than global-uniform, which is strictly stronger. Every conservation comment in `COUPLE_FS:454-462` remains true verbatim.
 
-The **one** thing that genuinely changes is the deep-layer continuity gap (§1.1c) — previously masked by uniform depth, now able to push flow into a slope. Not fixed here; see Phase 7.2.
+The **one** thing that genuinely changes is the deep-layer continuity gap (§1.1c) — previously masked by uniform depth, now able to push flow into a slope. Not fixed here; see Phase 8.2.
 
 **Gate:** bitwise-identical again.
 
@@ -474,16 +475,95 @@ Plus a `depth`/`eta` column in `LAYER_VIEW.views` and `LAYER_VIEW.map.ocean`.
 
 ---
 
-### Phase 7 — Optional / stretch
+### Phase 7 — Grid-scale noise fix  [DONE `54ae063`]
 
-- **7.1 Semi-implicit Coriolis.** Crank–Nicolson rotation, ~6 lines, fixes §1.1b exactly:
-  ```glsl
-  float a = f*uDt*0.5, den = 1.0/(1.0+a*a);
-  v1 = vec2(v.x + a*v.y, v.y - a*v.x)*den;   // energy-neutral for all f*dt
-  ```
-- **7.2 Barotropic divergence correction.** Addresses §1.1c. A Jacobi/multigrid projection so `div(h_t·u_t + h_d·u_d) = 0`. Real work (iterative solve on an unstructured hex grid); only worth it if the deep flow visibly ignores bathymetry after Phase 2b.
-- **7.3 PGF rebalance toward true `g'`.** Split `accT` into an explicit barotropic proxy + a genuine `-g'∇eta` baroclinic term. Physically correct but *will* require retuning every preset — defer until Phase 6.1 diagnostics can quantify what changed.
-- **7.4 Grid-cached bathymetry.** Bathymetry generation adds cost to `build()`, which runs on every resolution change (`app.js:rebuild`). Cache by `(level, seed)`.
+Triggered by a user report of "polar instability". Diagnosis with `harness/noise.js`
+(high-pass residual `r(c) = x(c) - mean_neighbours(x)`, binned into six 15° |lat| bands)
+found **two independent mechanisms**, and the visually obvious one was the lesser.
+
+**7.A PRIMARY — collocated A-grid odd–even decoupling.** The continuity face velocity
+
+```glsl
+unT = 0.5*dot(vt0 + vtj, nrm);     // checkerboard v0=+a, vj=-a  ->  unT == 0
+```
+
+is identically zero for a grid-scale checkerboard, so that mode is **invisible to the
+mass equation** and nothing damps it. `hFace = 0.5*(h0 + tsj.x)` is blind the same way.
+This is a *spatial null space*, not a CFL problem — confirmed by holding sim time fixed
+at 1 day (L5): dt=30/120/600 gave rmsH 0.1016/0.1026/0.1118. **Reducing dt does not help**,
+and it gets worse at finer dx, which is why L6 was the worst case.
+
+Fix — Rhie–Chow face correction, reintroducing the compact pressure stencil at faces:
+
+```glsl
+unT -= uRhieChow * uDt * uPgfTop * (gComp - gAvg) * wet;
+```
+
+`gComp = dEtaF/d` is the compact face gradient; `gAvg` is the averaged **lagged**
+cell-centred grad(η), carried in the previously-unused `uTopV.zw`.
+
+**7.B SECONDARY — explicit Coriolis.** Per-step gain `sqrt(1+(f·dt)²)`, `f = 2Ω·sin(lat)`:
+amplitude-neutral at the equator, maximal at the poles. This did not create the noise —
+it *selectively amplified* it with latitude, which is what made a global problem look
+polar. Fixed by `coriFric()`, applying Coriolis and friction Crank–Nicolson-implicitly.
+
+**Efficacy** (L5/1600, `bathyMode:1`; `rmsH`/`rmsSpd` are high-pass residuals, `meanEta`/
+`meanSpd` the resolved signal):
+
+| rhieChow | rmsH | meanEta | noiseSpd | meanSpd | N/S | pol/eq |
+|---|---|---|---|---|---|---|
+| 0 (legacy) | 0.09114 | 0.13199 | 0.03839 | 0.03476 | 1.104 | 1.44 |
+| 0.5 | 0.06531 | 0.12586 | 0.03138 | 0.02977 | 1.054 | 1.10 |
+| **1.0 (default)** | **0.05123** | **0.12347** | 0.02736 | 0.02723 | 1.005 | 0.88 |
+| 2.0 | 0.03650 | 0.12173 | 0.02182 | 0.02369 | 0.921 | 0.68 |
+| 4.0 | 0.02362 | 0.12075 | 0.01560 | 0.01963 | 0.795 | 0.63 |
+
+Noise drops **3.9×** while the resolved signal moves **8%** — removal of grid noise, not
+damping of the circulation. Note legacy `N/S ≈ 1.1`: the surface current field was roughly
+half grid noise. L6/800 agrees (rmsH 0.09545 → 0.02645 at rc=2) and the polar/equator ratio
+flattens to ~1.0, closing the latitude selectivity.
+
+**Caveat.** The correction scales with `dt`, so its strength fades as `dt → 0`
+(at dt=30 it removes only ~8% over 1 day). That is the standard Rhie–Chow small-timestep
+property. The UI floor is dt=120, so normal operation stays in the effective range.
+
+**Stability at new defaults** (L5, `bathyMode:1`): 5000 steps `maxTopSpd` 0.0919 (was
+0.1316), `hTop` [59.36, 60.69]; 8000 steps 0.1490 (was 0.1695), `hTop` [59.14, 60.86];
+both 0 clampHits / 0 NaN / no shader logs. Conservation 5000→8000: volume **+0.000e+00%**,
+salt +2.984e-04%, heat -2.817e-03%.
+
+**Neutralisation proof.** `{rhieChow:0, coriCN:false}` reproduces the pre-fix head bitwise
+at both resolutions (L5 `3a86de87`, L6 `94122d57`). Three float32 traps had to be cleared,
+each worth remembering:
+
+1. *Algebraic rearrangement is not bitwise-neutral.* The legacy Coriolis `cross`-projection
+   had to be restored **verbatim**, not in an equivalent `f*(-v.y, v.x)` form.
+2. *Nor inside a helper.* `D*P/(D²+c²)` with `c=0` ≠ `P/D` in float32 — needed an explicit
+   `if (c == 0.0)` early return in `coriFric`.
+3. *Unused channels are still hashed.* Storing grad(η) in the previously-zero `uTopV.zw`
+   changed the state hash although no physics reads it when the feature is off. The
+   writeback is therefore gated: `(uRhieChow > 0.0) ? gradH : vec2(0.0)`.
+
+**Latent bug caught en route.** `COUPLE_FS` rewrote `oTopV` every frame as
+`vec4(vt, 0.0, 0.0)`, wiping the new `.zw` payload after every ocean step — the correction
+would have silently done nothing, with no error. *When adding a field to an existing
+texture, grep every **writer**, not just every reader.*
+
+**Params.** `rhieChow` (default **1.0**, range 0–4, step 0.05) and hidden `coriCN`
+(default **true**). Render: 12 programs / 36 paths / 0 failures / 0 console errors.
+
+**Known follow-up: `AIR_FS` still uses explicit Coriolis** — untouched by this phase.
+The atmosphere has its own damping and no reported symptom, but the same
+`sqrt(1+(f·dt)²)` growth applies and `coriFric()` is reusable there.
+
+---
+
+### Phase 8 — Optional / stretch
+
+- **8.1 `AIR_FS` implicit Coriolis.** Apply the now-proven `coriFric()` to the air solver.
+- **8.2 Barotropic divergence correction.** Addresses §1.1c. A Jacobi/multigrid projection so `div(h_t·u_t + h_d·u_d) = 0`. Real work (iterative solve on an unstructured hex grid); only worth it if the deep flow visibly ignores bathymetry after Phase 2b.
+- **8.3 PGF rebalance toward true `g'`.** Split `accT` into an explicit barotropic proxy + a genuine `-g'∇eta` baroclinic term. Physically correct but *will* require retuning every preset — defer until Phase 6.1 diagnostics can quantify what changed.
+- **8.4 Grid-cached bathymetry.** Bathymetry generation adds cost to `build()`, which runs on every resolution change (`app.js:rebuild`). Cache by `(level, seed)`.
 
 ---
 
@@ -495,9 +575,9 @@ Plus a `depth`/`eta` column in `LAYER_VIEW.views` and `LAYER_VIEW.map.ocean`.
 | `clamp(h, 40, D-40)` inverts on shelves | 2 | **High** | `hLimits()` in Phase 0; assert `hHi > hLo` |
 | Shallow cells → `hd → 0` → div-by-zero in `tau/(ρ·h)` | 2b | **High** | `max(·, uHmin)` everywhere + `twoLayerFrac` ramp |
 | Phase 5 changes climate, forces retune | 5 | Medium | Phase 6.1 diagnostics first; `mixConv` as the escape valve |
-| Deep flow crosses bathymetry (no barotropic projection) | 2b | Medium | Document; Phase 7.2 if visible |
+| Deep flow crosses bathymetry (no barotropic projection) | 2b | Medium | Document; Phase 8.2 if visible |
 | Preset/save incompat | 0 | Low | `hTotal` retained; `bathyMode: 0` reproduces legacy exactly |
-| Build-time regression at level 7 | 2b | Low | BFS is O(V); cache per Phase 7.4 |
+| Build-time regression at level 7 | 2b | Low | BFS is O(V); cache per Phase 8.4 |
 
 **Rollback:** every phase is gated behind `bathyMode` or a default-neutral parameter. Setting `bathyMode = 0` and `pgfTop = 9.81` restores pre-refactor behaviour at runtime, with no code revert.
 
