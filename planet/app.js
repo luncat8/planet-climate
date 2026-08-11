@@ -120,10 +120,13 @@ function rebuild(l) {
   Object.keys(p.params).forEach(function (key) { keep[key] = p.params[key]; });
   var keepBounds = p.bounds;
   var t = p.simTime; // keep the daylight/orbit phase continuous across resolution changes
-  p.build(l);
-  p.simTime = t;
+  /* Params must be restored BEFORE build(): bathymetry is baked into the
+     static uCellC texture at build time, so building first would generate the
+     grid from stale settings. */
   Object.keys(keep).forEach(function (key) { p.params[key] = keep[key]; });
   p.bounds = keepBounds;
+  p.build(l);
+  p.simTime = t;
   refreshDynamic();
 }
 

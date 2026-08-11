@@ -395,7 +395,8 @@ Planet.prototype.step = function () {
     .f('uDrag', P.oceanDrag + P.mechanicalFric)
     .f('uSteric', P.steric).f('uStericRate', P.stericRate)
     .f('uMassSpring', P.massSpring)
-    .f('uHtot', P.hTotal).f('uHref', P.hTop);
+    .f('uHtot', P.hTotal).f('uHref', P.hTop)
+    .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain);
   this.fullscreen('dynO', W, H);
 
   var pa = this.prog.air.use();
