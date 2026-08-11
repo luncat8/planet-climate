@@ -410,7 +410,7 @@ Planet.prototype.step = function () {
     .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelAir).f('uNuT', P.nuTAir)
     .f('uFricLo', P.fricAirLow).f('uFricHi', P.fricAirHigh)
-    .f('uRhoLo', 1.1).f('uRhoHi', 0.55);
+    .f('uRhoLo', 1.1).f('uRhoHi', 0.55).f('uCoriCN', P.coriCN ? 1 : 0);
   this.fullscreen('dynA', W, H);
 
   this.couple();

@@ -638,6 +638,10 @@ layout(location=3) out vec4 oHiB;
 
 uniform sampler2D uLoA, uLoB, uHiA, uHiB;
 uniform float uDt, uOmega, uNuVel, uNuT, uFricLo, uFricHi, uRhoLo, uRhoHi;
+uniform float uCoriCN;       // 1 = Crank-Nicolson Coriolis, 0 = legacy explicit
+
+/* Defined below, after stepAir; GLSL needs the prototype first. */
+vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c);
 
 void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
              sampler2D tA, sampler2D tB, float fric, float rho,
@@ -680,12 +684,27 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   gradP *= ia; lapV *= ia; lapT *= ia; advV *= ia; advT *= ia; div *= ia;
 
   vec2 acc = -gradP/rho + uNuVel*lapV - advV + v0*div;
-  vec3 v3 = v0.x*e1 + v0.y*e2;
-  vec3 c3 = -2.0*cross(vec3(0.0,uOmega,0.0), v3);
-  acc += vec2(dot(c3,e1), dot(c3,e2));
+
+  /* ---- CORIOLIS -------------------------------------------------------
+     Same defect, and the same fix, as the ocean solver: rotating v by an
+     explicit  v += dt*(-f k x v)  multiplies the speed by sqrt(1+(f*dt)^2)
+     every step instead of preserving it. The upper layer is where this
+     actually bites -- uFricHi is ~6x smaller than uFricLo, so the implicit
+     drag no longer masks the gain, and the jet inflates without bound:
+     measured aMaxHi at dt=1800 reaches 118.9 m/s (clamp-saturated) against
+     ~16 m/s at dt=120. Crank-Nicolson is norm-preserving for any f*dt.
+
+     Legacy explicit path kept verbatim so uCoriCN = 0 is bit-for-bit. */
+  float fCor = 2.0*uOmega*n.y;
+  if(uCoriCN < 0.5){
+    vec3 v3 = v0.x*e1 + v0.y*e2;
+    vec3 c3 = -2.0*cross(vec3(0.0,uOmega,0.0), v3);
+    acc += vec2(dot(c3,e1), dot(c3,e2));
+  }
 
   float f = fric*(1.0 + 2.0*land);
-  vec2 v1 = (v0 + uDt*acc)/(1.0 + uDt*f);
+  float cCor = (uCoriCN >= 0.5) ? 0.5*uDt*fCor : 0.0;
+  vec2 v1 = coriFric(v0, acc, uDt, f, cCor);
   v1 = clamp(v1, vec2(-90.0), vec2(90.0));
 
   vec3 tr1 = tr0 + uDt*(uNuT*lapT - advT + tr0*div);
