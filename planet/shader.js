@@ -276,6 +276,7 @@ uniform float uHtot, uHref;  // legacy global depth / reference thickness (m)
 uniform float uPgfTop;       // pressure-gradient gain, top layer  [m/s^2 per m]
 uniform float uPgfDeepGain;  // multiplier on the deep layer's g'  [-]
 uniform float uRhieChow;     // Rhie-Chow face-velocity smoothing  [-] 0 = legacy
+uniform float uFbStab;       // forward-backward gravity-wave stabiliser [-] 0 = legacy
 uniform float uCoriCN;       // 1 = Crank-Nicolson Coriolis, 0 = legacy explicit
 
 // Buoyancy anomaly of a layer: positive = warm/fresh = light.
@@ -339,6 +340,8 @@ void main(){
   float divF = 0.0;             // div(h_top*u_top): the mass flux
   float divT = 0.0, divD = 0.0; // div(u) per layer (advective-form correction)
   vec2  gradH = vec2(0.0);      // grad(eta), eta = h_top - hRef
+  float lapEta = 0.0;           // lap(eta), for the forward-backward stabiliser
+  float mDif   = 0.0;           // sum(L/d): discrete Laplacian metric ~ k_max^2*area
   vec2  lapVt = vec2(0.0), lapVd = vec2(0.0);
   vec2  advVt = vec2(0.0), advVd = vec2(0.0);
   vec2  lapTt = vec2(0.0), lapTd = vec2(0.0);
@@ -416,6 +419,10 @@ void main(){
        hRef is uniform, so a flat slab reproduces the original bit for bit
        instead of drifting by rounding. */
     gradH += L*0.5*dEtaF*nrm*wet;
+    /* lap(eta) via the same Gauss/FV stencil, and the metric sum(L/d)/area
+       that converts it into the local (c*k*dt)^2 stability number below. */
+    lapEta += (L/d)*dEtaF*wet;
+    mDif   += (L/d)*wet;
 
     lapVt += (L/d)*(vtj-vt0)*wet;
     lapVd += (L/d)*(vdj-vd0)*wet;
@@ -433,7 +440,7 @@ void main(){
   }
 
   float ia = 1.0/area;
-  divF *= ia; divT *= ia; divD *= ia; gradH *= ia;
+  divF *= ia; divT *= ia; divD *= ia; gradH *= ia; lapEta *= ia; mDif *= ia;
   lapVt *= ia; lapVd *= ia; advVt *= ia; advVd *= ia;
   lapTt *= ia; lapTd *= ia; advTt *= ia; advTd *= ia;
 
@@ -451,7 +458,45 @@ void main(){
   //     shelf column must relax toward its own shallow rest state, not toward
   //     a basin-wide constant that may exceed the local water depth.
   float hEq = hRef0 + uSteric*buoy(ts0.y, ts0.z);
+  /* ---- FORWARD-BACKWARD GRAVITY-WAVE STABILISATION ---------------------
+     (h_top, u_top) form an oscillator: linearised about a rest thickness H,
+         eta_t = -H*div(u),   u_t = -g*grad(eta),   c = sqrt(g*H).
+     Both halves are stepped explicitly (h1 below uses the old u, accT further
+     down uses the old eta), and forward Euler on an oscillator amplifies by
+     |g| = sqrt(1 + (c*k*dt)^2) > 1 at EVERY dt: there is no stable timestep,
+     only a slow one. To a fixed physical time the log-amplitude grows like
+     T*c^2*k^2*dt/2, i.e. linearly in dt and as 1/dx^2. That is precisely the
+     reported behaviour - quiet at L5/small dt, divergent at L6-L7, and ~4x
+     faster when hTop is quadrupled (c^2 = g*H), while being nearly
+     independent of the sea-floor depth D.
+
+     Forward-BACKWARD ordering fixes it: advance u with the old eta, then
+     advance eta with the NEW u. Substituting u1 into the mass equation,
+         eta1 = eta0 - dt*H*div(u0) + dt^2*g*H*lap(eta0),
+     so the entire scheme costs one extra term built from lap(eta) - a SCALAR
+     Laplacian available from the neighbour values already fetched above, with
+     no second pass and no wider stencil.
+
+     Note this deliberately acts on eta and never on u, so the rotational
+     (geostrophic/gyre) flow is untouched; only the divergent gravity-wave
+     mode, which is the one going unstable, is affected. An equivalent
+     momentum-side form (dt^2*g*H*lap(u)) was tried first and rejected: lap(u)
+     equals grad(div u) only for curl-free flow, so it also damped the gyres
+     and cost 30-44% of mean surface speed.
+
+     uFbStab = 0 restores the plain explicit scheme bit for bit. */
+  /* Scale the correction by the LOCAL stability number rather than applying
+     it uniformly. mDif = sum(L/d)/area is the diagonal of the discrete
+     Laplacian, so nu2 = dt^2*g*H*mDif is (c*k_grid*dt)^2 at the grid scale:
+     it is ~0.02 at L5/dt=120 (already stable, so almost nothing is applied)
+     and ~1 where the scheme actually diverges. Saturating it at 1 keeps the
+     correction from exceeding the term it is stabilising - without this the
+     coefficient over-damps the fine grids hardest, which is backwards: a
+     fixed fbStab=0.5 cost 10% of mean surface speed at L5 but 55% at L7. */
+  float nu2 = uFbStab*uDt*uDt*uPgfTop*h0*mDif;
+  float fbGain = nu2/(1.0 + nu2);        // -> 0 when stable, -> 1 when stiff
   float h1 = h0 - uDt*divF
+                + fbGain*uDt*uDt*uPgfTop*h0*lapEta
                 - uDt*uStericRate*(h0 - hEq)
                 - uDt*uMassSpring*(h0 - hRef0);
   /* Depth-aware clamp: the old fixed [40, uHtot-40] window inverts once the
@@ -471,6 +516,7 @@ void main(){
   // uniform rather than a literal so it can be retuned without editing GLSL.
   vec2 accT = -uPgfTop*gradH + uNuVel*lapVt - advVt + vt0*divT;
   vec2 accD = +uPgfDeepGain*gp*gradH + uNuVel*lapVd - advVd + vd0*divD;
+
 
   // inter-layer stress, EQUAL AND OPPOSITE, inverse-column-mass weighted:
   //   d(rho*h_top*u_top + rho*h_deep*u_deep)/dt = -tau + tau = 0

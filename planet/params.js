@@ -75,6 +75,8 @@ var PARAMS = {
      therefore undamped at ANY timestep. ~0.25 is enough; 0 = legacy stencil. */
   rhieChow:   { label: 'Rhie-Chow damping',   default: 1.0,   min: 0, max: 4, step: 0.05,
     tip: 'Suppresses grid-scale checkerboard noise. 0 reproduces the old A-grid stencil.' },
+  fbStab:     { label: 'Gravity-wave stab.',  default: 30,    min: 0, max: 100, step: 1,
+    tip: 'Forward-backward correction for the explicit gravity-wave pair, needed at level 6-7 or large dt. Self-limiting: it targets cells where the timestep is actually stiff, so raising it does not damp coarse grids. 0 = legacy explicit scheme.' },
   pgfTop:     { label: 'PGF gain (top)',      default: 9.81,  min: 0, max: 20, step: 0.05,
                 fmt: function (v) { return v.toFixed(2); } },
   /* Multiplier on the deep layer's +g'*grad(eta) return-limb forcing. */

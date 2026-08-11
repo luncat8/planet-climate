@@ -400,7 +400,8 @@ Planet.prototype.step = function () {
     .f('uMassSpring', P.massSpring)
     .f('uHtot', P.hTotal).f('uHref', P.hTop)
     .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
-    .f('uRhieChow', P.rhieChow).f('uCoriCN', P.coriCN ? 1 : 0);
+    .f('uRhieChow', P.rhieChow).f('uCoriCN', P.coriCN ? 1 : 0)
+    .f('uFbStab', P.fbStab);
   this.fullscreen('dynO', W, H);
 
   var pa = this.prog.air.use();
