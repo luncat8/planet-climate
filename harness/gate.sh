@@ -3,6 +3,11 @@
 # baseline. Exits non-zero on hash drift (phases 0-2) or on NaN/shader errors.
 #
 #   ./gate.sh <tag> [--allow-drift]
+#   LEVELS="L5 L6" ./gate.sh <tag>     # skip L7 (slow in SwiftShader)
+#
+# Air dt-independence is a separate check:
+#   node dti_check.js --quick          # 1 day, dts=10,60,300
+#   node dti_check.js                  # 3 days, dts=10,30,60,120,300
 #
 # Baselines live in baselines/<tag>.json and are created on first run.
 set -uo pipefail
@@ -25,6 +30,10 @@ declare -A CASES=(
   [L7]="--steps=100 --level=7"
 )
 
+# LEVELS selects which grid resolutions to run. L7 is slow in SwiftShader
+# (sandbox does not need it):  LEVELS="L5 L6" ./gate.sh <tag>
+LEVELS="${LEVELS:-L5 L6 L7}"
+
 # SCHEMES (default "0") selects which ocean engine to gate/sweep. Pass e.g.
 #   SCHEMES="0 1 2" ./gate.sh <tag>
 # Scheme 0 is regression-gated against its baseline; schemes 1/2 are run and
@@ -35,7 +44,7 @@ fail=0
 for s in $SCHEMES; do
   spre=""
   if [ "$s" != "0" ]; then spre="_s${s}"; fi
-  for name in L5 L6 L7; do
+  for name in $LEVELS; do
     args="${CASES[$name]} --scheme=$s"
     out="runs/${TAG}${spre}_${name}.json"
     # capture stdout too: harness.js reports shaderLogs/fatal on stdout as JSON,

@@ -4,20 +4,6 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 `;
-/* Combined Crank-Nicolson Coriolis + implicit linear friction update. Shared
-   by every dynamics program (ocean top/deep, air, init, couple) so the body
-   lives in exactly one place. c = dt*f/2; c = 0 reduces to the plain
-   implicit-friction form. NOTE: c == 0 must return EXACTLY the legacy
-   expression (v0 + dt*acc)/D so the explicit-friction path is preserved. */
-var CORI_FRIC_GLSL = `vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
-  float D = 1.0 + dt*fric;
-  if(c == 0.0) return (v0 + dt*acc)/D;
-  float P = v0.x + dt*acc.x - c*v0.y;
-  float Q = v0.y + dt*acc.y + c*v0.x;
-  float den = D*D + c*c;
-  return vec2(D*P - c*Q, D*Q + c*P)/den;
-}`;
-
 
 // index = uMode; value = GLSL expression for `float v`, referencing the per-cell
 // textures wt/la/lb/ha/hb/wd already in scope. Drives PER-MODE source compilation,
@@ -163,6 +149,22 @@ float qsat(float T, float P){
 }
 `;
 
+/* Combined Crank-Nicolson Coriolis + implicit linear friction. Concatenated
+   only into programs that call it (not SHADER_COMMON — render shaders should
+   not carry it). c = dt*f/2; c = 0 is the plain implicit-friction form and
+   must return EXACTLY (v0+dt*acc)/D: D*P/(D*D) and P/D agree in exact
+   arithmetic but round differently in float32. */
+var SHADER_CORI_FRIC = `
+vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
+  float D = 1.0 + dt*fric;
+  if(c == 0.0) return (v0 + dt*acc)/D;
+  float P = v0.x + dt*acc.x - c*v0.y;
+  float Q = v0.y + dt*acc.y + c*v0.x;
+  float den = D*D + c*c;
+  return vec2(D*P - c*Q, D*Q + c*P)/den;
+}
+`;
+
 var QUAD_VS = SHADER_HEAD + `
 void main(){
   vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2));
@@ -272,7 +274,7 @@ void main(){
      with g' the reduced gravity from the density contrast, which closes the
      overturning loop into a genuine return limb.
 --------------------------------------------------------------------------- */
-var OCEAN_FS = SHADER_HEAD + SHADER_COMMON + `
+var OCEAN_FS = SHADER_HEAD + SHADER_COMMON + SHADER_CORI_FRIC + `
 layout(location=0) out vec4 oTopS;
 layout(location=1) out vec4 oTopV;
 layout(location=2) out vec4 oDeepS;
@@ -304,8 +306,6 @@ float gPrime(float Tt, float St, float Td, float Sd){
   float rhoD = 1027.0*(1.0 - uAlphaT*(Td-283.0) + uBetaS*(Sd-35.0));
   return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
 }
-
-${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -660,7 +660,7 @@ void main(){
    layers), minus div(h*u) in the continuity, minus tracer transport and minus
    entrainment. Writes the predicted state (u*, eta_pred thickness, deep u*) to
    a scratch buffer the correct pass reads. */
-var OCEAN_PREDICT_FS = SHADER_HEAD + SHADER_COMMON + `
+var OCEAN_PREDICT_FS = SHADER_HEAD + SHADER_COMMON + SHADER_CORI_FRIC + `
 layout(location=0) out vec4 oTopS;
 layout(location=1) out vec4 oTopV;
 layout(location=2) out vec4 oDeepS;
@@ -683,7 +683,6 @@ float gPrime(float Tt, float St, float Td, float Sd){
   float rhoD = 1027.0*(1.0 - uAlphaT*(Td-283.0) + uBetaS*(Sd-35.0));
   return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
 }
-${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -1064,16 +1063,16 @@ void main(){
   o = vec4(m, 0.0, 0.0, 1.0);
 }`;
 
-var AIR_FS = SHADER_HEAD + SHADER_COMMON + `
+var AIR_FS = SHADER_HEAD + SHADER_COMMON + SHADER_CORI_FRIC + `
 layout(location=0) out vec4 oLoA;
 layout(location=1) out vec4 oLoB;
 layout(location=2) out vec4 oHiA;
 layout(location=3) out vec4 oHiB;
 
 uniform sampler2D uLoA, uLoB, uHiA, uHiB;
-uniform float uDt, uOmega, uNuVel, uNuT, uFricLo, uFricHi, uRhoLo, uRhoHi, uCoriCN, uCourantMax, uAirAdvect;
-
-${CORI_FRIC_GLSL}
+uniform float uDt, uOmega, uNuVel, uNuT, uFricLo, uFricHi, uRhoLo, uRhoHi, uCoriCN;
+uniform float uCourantMax;   // max |un|*dt/d ; 0 = unlimited
+uniform int   uAirAdvect;    // 0 = capped FV (default), 1 = Semi-Lagrangian (A/B)
 
 void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
              sampler2D tA, sampler2D tB, float fric, float rho,
@@ -1089,6 +1088,14 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   vec3 lapT  = vec3(0.0), advT = vec3(0.0);
   float div = 0.0;
 
+  /* 1-ring cache: the SL path reuses the same fetches the FV stencil already
+     made. nCount is 6 on hexes and 5 on the 12 pentagons. */
+  vec2 vN[6];
+  vec3 trN[6];
+  vec2 nrmN[6];
+  float dN[6];
+  int nCount = 0;
+
   for(int k=0;k<6;k++){
     vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
     if(na.w < 0.5) continue;
@@ -1102,20 +1109,25 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
     vec2 vj = xfer(aj.xy, nb.z, nb.w);
     vec3 trj = vec3(aj.z, bj.x, bj.y);
 
+    if(nCount < 6){
+      vN[nCount] = vj;
+      trN[nCount] = trj;
+      nrmN[nCount] = nrm;
+      dN[nCount] = d;
+      nCount += 1;
+    }
+
     gradP += L*0.5*(aj.w-p0)*nrm;
     lapV  += (L/d)*(vj-v0);
     lapT  += (L/d)*(trj-tr0);
-    /* Explicit upwind face flux. Cap the per-face Courant number so large-dt
-       runs cannot over-diffuse the way the raw upwind scheme does (the source
-       of the dt-dependent wind bias). The cap rescales the normal velocity
-       un -> unEff, used for BOTH momentum and tracer advection and for the
-       divergence term, so the whole transport stays consistent. d is the
-       precomputed center-to-center distance from uNbrA; guard it for
-       degenerate cells. */
     float un = 0.5*dot(v0+vj, nrm);
+    /* Face Courant cap. Operational L5/L6 Courant is ~0.02, so the default
+       0.5 is a runaway/fine-grid safety net, not the residual-dt fix. */
     float unEff = un;
-    float cour = abs(un) * uDt / max(d, 1.0e-3);
-    if (cour > uCourantMax) unEff = un * (uCourantMax / cour);
+    if(uCourantMax > 0.0){
+      float cour = abs(un)*uDt/max(d, 1.0e-3);
+      if(cour > uCourantMax) unEff = un*(uCourantMax/cour);
+    }
     div += L*unEff;
     float w = unEff > 0.0 ? 0.0 : 1.0;
     advT += L*unEff*mix(tr0, trj, w);
@@ -1125,48 +1137,49 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   float ia = 1.0/area;
   gradP *= ia; lapV *= ia; lapT *= ia; advV *= ia; advT *= ia; div *= ia;
 
-  /* Optional Semi-Lagrangian air advection (uAirAdvect == 1). Back-trajectory
-     of the cell center along -v0*dt, sample the departure value from the
-     6-ring neighbours (+ the cell itself) by inverse-distance weighting, and
-     fold it into the SAME acc terms the FV path uses (advV/advT with div=0),
-     so pressure-gradient / Coriolis / friction are untouched. This is a
-     comparison scaffold, not the default; FV (capped) remains the default. */
-  if (uAirAdvect > 0.5) {
-    vec2 disp = -v0 * uDt;            // back-trajectory displacement (m)
-    vec2 vDep = vec2(0.0);
-    vec3 trDep = vec3(0.0);
-    float wsum = 0.0;
+  vec2 vStart = v0;
+  vec3 trStart = tr0;
+  /* Semi-Lagrangian A/B path: back-trajectory of the cell centre along -v*dt
+     and barycentric sample of the 1-ring triangle that contains the departure
+     point. Trajectories longer than one cell are clamped to the triangle
+     (a CFL~1 limiter). Off by default — interpolation on the dual-hex is
+     noisy. PGF / diffusion / Coriolis / friction stay at the arrival cell. */
+  if(uAirAdvect == 1 && nCount >= 2){
+    vec2 xi = -v0*uDt;
+    float bestOut = 1.0e30;
+    vec2 slV = v0;
+    vec3 slT = tr0;
     for(int k=0;k<6;k++){
-      vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
-      if(na.w < 0.5) continue;
-      int j = int(na.x);
-      float d2 = na.z;
-      vec4 nb = texelFetch(uNbrB, nTex(cell,k), 0);
-      vec2 nrm2 = nb.xy;
-      vec4 aj = texelFetch(tA, cTex(j), 0);
-      vec4 bj = texelFetch(tB, cTex(j), 0);
-      vec2 vj = xfer(aj.xy, nb.z, nb.w);
-      vec3 trj = vec3(aj.z, bj.x, bj.y);
-      vec2 pk = d2 * nrm2;            // neighbour centre position (m)
-      float wgt = 1.0 / (dot(pk - disp, pk - disp) + 1.0e6);
-      vDep += wgt * vj;
-      trDep += wgt * trj;
-      wsum += wgt;
+      if(k >= nCount) break;
+      int k2 = k + 1;
+      if(k2 >= nCount) k2 = 0;
+      vec2 B = dN[k]*nrmN[k];
+      vec2 C = dN[k2]*nrmN[k2];
+      float den = B.x*C.y - B.y*C.x;
+      if(abs(den) < 1.0e-8) continue;
+      float wB = (xi.x*C.y - xi.y*C.x)/den;
+      float wC = (B.x*xi.y - B.y*xi.x)/den;
+      float wA = 1.0 - wB - wC;
+      float outPen = max(0.0, -wA) + max(0.0, -wB) + max(0.0, -wC);
+      if(outPen <= bestOut){
+        bestOut = outPen;
+        wA = max(wA, 0.0); wB = max(wB, 0.0); wC = max(wC, 0.0);
+        float s = wA + wB + wC;
+        if(s > 1.0e-8){ wA /= s; wB /= s; wC /= s; }
+        slV = wA*v0 + wB*vN[k] + wC*vN[k2];
+        slT = wA*tr0 + wB*trN[k] + wC*trN[k2];
+      }
     }
-    /* include the cell centre itself so a near-zero displacement is stable */
-    float wgt0 = 1.0 / (dot(disp, disp) + 1.0e6);
-    vDep += wgt0 * v0;
-    trDep += wgt0 * tr0;
-    wsum += wgt0;
-    vDep /= wsum;
-    trDep /= wsum;
-    float idt = 1.0 / max(uDt, 1.0e-6);
-    advV = (v0 - vDep) * idt;
-    advT = (tr0 - trDep) * idt;
-    div = 0.0;
+    if(!any(isnan(slV)) && !any(isnan(slT))){
+      vStart = slV;
+      trStart = slT;
+      advV = vec2(0.0);
+      advT = vec3(0.0);
+      div = 0.0;
+    }
   }
 
-  vec2 acc = -gradP/rho + uNuVel*lapV - advV + v0*div;
+  vec2 acc = -gradP/rho + uNuVel*lapV - advV + vStart*div;
 
   float f = fric*(1.0 + 2.0*land);
   float fCor = 2.0*uOmega;
@@ -1178,17 +1191,17 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
      below; the air must do the same so wind speed no longer depends on dt. */
   vec2 v1;
   if(uCoriCN < 0.5){
-    vec3 v3 = v0.x*e1 + v0.y*e2;
+    vec3 v3 = vStart.x*e1 + vStart.y*e2;
     vec3 c3 = -2.0*cross(vec3(0.0,uOmega,0.0), v3);
     acc += vec2(dot(c3,e1), dot(c3,e2));
-    v1 = (v0 + uDt*acc)/(1.0 + uDt*f);
+    v1 = (vStart + uDt*acc)/(1.0 + uDt*f);
   } else {
     float cCor = 0.5*uDt*fCor;
-    v1 = coriFric(v0, acc, uDt, f, cCor);
+    v1 = coriFric(vStart, acc, uDt, f, cCor);
   }
   v1 = clamp(v1, vec2(-60.0), vec2(60.0));
 
-  vec3 tr1 = tr0 + uDt*(uNuT*lapT - advT + tr0*div);
+  vec3 tr1 = trStart + uDt*(uNuT*lapT - advT + trStart*div);
   tr1.x = clamp(tr1.x, 150.0, 360.0);
   tr1.y = clamp(tr1.y, 0.0, 0.08);
   tr1.z = clamp(tr1.z, 0.0, 4.0);
@@ -1255,8 +1268,6 @@ float meanInsol(float lat, float decl){
   float h0 = acos(clamp(x,-1.0,1.0));
   return max(0.0,(h0*sin(lat)*sin(decl) + cos(lat)*cos(decl)*sin(h0))/3.14159265);
 }
-
-${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -1417,7 +1428,13 @@ void main(){
   // ocean momentum is untouched by this pass except through the wind stress.
 
   float nz = hash21(vec2(float(cell), floor(uTime*0.37)))-0.5;
-  Tl += uNoise*nz;
+  /* Symmetry-break noise used to be added once per step, so the injection
+     rate scaled as 1/dt: dt=10 s was ~6× noisier than dt=60 s and the extra
+     T variance leaked into pressure-gradient wind (the residual dt-
+     dependence after CN Coriolis). Scale as sqrt(dt/dtRef) so the discrete
+     process is a dt-independent Wiener increment. dtRef = 60 s matches
+     PARAMS.dt.default and keeps that setting a multiply-by-exactly-1. */
+  Tl += uNoise*nz*sqrt(max(uDt, 0.0)/60.0);
 
   float Pl = 101325.0 - 60.0*(Tl - 288.0) + 25.0*(Th - 250.0);
   float Ph = 45000.0  + 75.0*(0.5*(Tl + Th) - 268.0);
@@ -1449,7 +1466,6 @@ layout(location=1) out vec4 oTopV;    // (u_top, v_top, _, _)
 layout(location=2) out vec4 oDeepS;   // (T_deep, S_deep, _, _)
 layout(location=3) out vec4 oDeepV;   // (u_deep, v_deep, _, _)
 uniform float uSeed, uHtop, uHtotal;
-${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -1476,7 +1492,6 @@ layout(location=1) out vec4 oLoB;
 layout(location=2) out vec4 oHiA;
 layout(location=3) out vec4 oHiB;
 uniform float uSeed;
-${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;

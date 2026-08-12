@@ -1,1 +1,0 @@
-i see current simulation form some vortex and cells and them remain for infinity without moving. this is behave on any dt and any Coriolis, calculation engine, some other options tested and got always same 'static' picture without moving cyclones and changed winds

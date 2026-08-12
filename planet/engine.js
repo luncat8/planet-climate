@@ -448,8 +448,8 @@ Planet.prototype.step = function () {
     .f('uFricLo', P.fricAirLow).f('uFricHi', P.fricAirHigh)
     .f('uRhoLo', 1.1).f('uRhoHi', 0.55)
     .f('uCoriCN', P.coriCN ? 1 : 0)
-    .f('uCourantMax', P.airCourantMax)
-    .f('uAirAdvect', P.airAdvect);
+    .f('uCourantMax', P.airCourantMax === undefined ? 0.5 : P.airCourantMax)
+    .i('uAirAdvect', P.airAdvect === undefined ? 0 : (P.airAdvect | 0));
   this.fullscreen('dynA', W, H);
 
   this.couple();

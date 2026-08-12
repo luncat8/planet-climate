@@ -182,6 +182,7 @@ function refreshDynamic() {
     ui.knobVals[key].textContent = def && def.fmt ? def.fmt(v) : String(v);
   });
   if (ui.oceanSchemeSel) ui.oceanSchemeSel.value = String(P.oceanScheme);
+  if (ui.airAdvectSel) ui.airAdvectSel.value = String(P.airAdvect);
   if (ui.implicitItersWrap) {
     var greyed = (P.oceanScheme !== 2);
     ui.implicitItersWrap.style.opacity = greyed ? '0.4' : '1';
@@ -465,6 +466,7 @@ function buildUI() {
     if (spec.step === undefined) return;
     if (key === 'streamTrail') return;
     if (key === 'oceanScheme') return;   // rendered as a <select> above
+    if (key === 'airAdvect') return;     // rendered as a <select> above
     var wrap = el('div');
     wrap.style.marginBottom = '10px';
     var kv = el('div', 'kv');

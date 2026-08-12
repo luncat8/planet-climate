@@ -21,23 +21,7 @@ var PARAMS = {
   greenhouse:{ label: 'Greenhouse',           default: 0.55,  min: 0,   max: 1,    step: 0.01 },
   nuVelAir:  { label: 'Air viscosity ν',      default: 1.6e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
   nuTAir:    { label: 'Air heat diffusion',   default: 1.1e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
-  fricAirLow:{ label: 'Surface friction',     default: 1.6e-5, min: 0,   max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
-  /* Face Courant cap for the explicit air advection. The air momentum/tracer
-     advection in stepAir is explicit upwind, so its effective Courant |u|*dt/d
-     grows with dt; at large dt the upwind scheme over-diffuses (spuriously
-     damps winds), at small dt it is "clean" (higher winds) -> a dt-dependent
-     bias. Capping the per-face Courant here forces large-dt air to behave like
-     small-dt air, removing the bias. 0.5 is a conservative starting point. */
-  airCourantMax:{ label: 'Air Courant cap',     default: 0.5, min: 0.05, max: 2, step: 0.05,
-                  fmt: function (v) { return v.toFixed(2); } },
-  /* Selectable air advection algorithm (comparison scaffold; FV is default):
-       0 = Capped finite-volume upwind (Phases 2-3, dt-independent).
-       1 = Semi-Lagrangian back-trajectory sampling (A/B only, not default). */
-  airAdvect:    { label: 'Air advection',       default: 0, min: 0, max: 1, step: 1,
-                  opts: [
-                    { v: 0, label: 'Capped FV (default)' },
-                    { v: 1, label: 'Semi-Lagrangian' },
-                  ] },
+  fricAirLow:{ label: 'Surface friction',     default: 1.6e-5, min: 0, max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
   conv:      { label: 'Convection gain',      default: 6e-6,  min: 0,   max: 3e-5, step: 5e-7, fmt: function (v) { return v.toExponential(1); } },
   kRad:      { label: 'Radiative exchange',   default: 2.5,   min: 0,   max: 8,    step: 0.1 },
   lapse:     { label: 'Reference lapse ΔT',   default: 45,    min: 20,  max: 70,   step: 1,    fmt: function (v) { return v + ' K'; } },
@@ -111,6 +95,21 @@ var PARAMS = {
       { v: 1, label: 'Decoupled (Stable/Fast)' },
       { v: 2, label: 'Implicit (Physical/Slow)' },
     ] },
+  /* Max face Courant |un|*dt/d for air FV advection. Operational L5/L6
+     Courant is ~0.02, so the default 0.5 is a runaway/fine-grid safety net
+     (the residual dt-independence fix is the couple-pass noise scaling).
+     0 = unlimited. */
+  airCourantMax:{ label: 'Air Courant cap', default: 0.5, min: 0, max: 2, step: 0.05,
+    fmt: function (v) { return v <= 0 ? 'off' : v.toFixed(2); },
+    tip: 'Max |u|·dt/d on air faces. 0 disables the cap. Does not fire at L5/L6.' },
+  /* Air advection algorithm. 0 = capped 1st-order FV (default, validated).
+     1 = Semi-Lagrangian 1-ring sample — A/B comparison only. */
+  airAdvect:{ label: 'Air advection', default: 0, min: 0, max: 1, step: 1,
+    opts: [
+      { v: 0, label: 'Capped FV (default)' },
+      { v: 1, label: 'Semi-Lagrangian (A/B)' },
+    ],
+    tip: 'SL is a comparison scaffold, not the validated default.' },
   /* Jacobi iterations for scheme B (implicit free surface). Hard ceiling; the
      engine early-exits once the residual drops below 1e-6, so cheap levels do
      not pay for all of them. Only meaningful when oceanScheme == 2. */

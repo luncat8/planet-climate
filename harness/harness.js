@@ -14,7 +14,12 @@ function arg(name, dflt) {
   return hit ? hit.slice(name.length + 3) : dflt;
 }
 
-const DIR    = path.resolve(arg('dir', path.join(__dirname, '..', 'project')));
+function defaultDir() {
+  const planet = path.join(__dirname, '..', 'planet');
+  const project = path.join(__dirname, '..', 'project');
+  return fs.existsSync(planet) ? planet : project;
+}
+const DIR    = path.resolve(arg('dir', defaultDir()));
 const STEPS  = parseInt(arg('steps', '500'), 10);
 const LEVEL  = parseInt(arg('level', '5'), 10);
 const OUT    = arg('out', '');
@@ -31,11 +36,13 @@ const SEED   = 12345;
 (async () => {
   const browser = await puppeteer.launch({
     headless: 'new',
+    protocolTimeout: 0,
     args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
            '--use-angle=swiftshader', '--disable-gpu-sandbox', '--enable-webgl',
            '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
   });
   const page = await browser.newPage();
+  page.setDefaultTimeout(0);
   const logs = [];
   page.on('console', m => logs.push(m.text()));
   page.on('pageerror', e => logs.push('PAGEERROR ' + e.message));
