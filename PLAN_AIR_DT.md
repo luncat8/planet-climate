@@ -1,13 +1,14 @@
 # Plan: dt-independent air simulation (Carry-over for next session)
 
 **Working dir:** `/media/sf_1/planet242/planet`
-**Repo is NOT a git repo.** Do not commit unless asked.
+Ddo not test L7 - it is slow.
 
 ## Goal
-Make the air simulation timestep-independent for large `dt`:
+Make the air simulation timestep-independent for small `dt` (currently values <20 cause wind grow. 
+in test wind at dt=0.5 (5.56 m/s) is 4.8× stronger than at dt=8 (1.17 m/s) — real dt-dependence
+Some told the situation is revert: high dt cause slow wind, but visually it looks better with dt 80...200 then with dt=5, so i think bug with lod dt). What some models suggest to try:
 - Cap the per-face Courant number in `AIR_FS` so raw upwind advection can't
-  over-diffuse and spuriously calm the wind at large `dt` (the original bug:
-  large-dt air ~1.9× residual wind bias = too calm).
+  over-diffuse and spuriously calm the wind.
 - Keep FV (capped) as the DEFAULT air path.
 - Add an opt-in Semi-Lagrangian air advection (`airAdvect==1`) as a comparison
   scaffold only.
@@ -80,5 +81,43 @@ Make the air simulation timestep-independent for large `dt`:
 
 ## Verification commands
 - `node -c shader.js && node -c engine.js && node -c params.js` (syntax).
-- `node /tmp/air_dt_sweep.js --dir=/media/sf_1/planet242/planet`
+- Harness lives in the repo now: `node harness/air_dt_sweep.js --dir=/media/sf_1/planet242/planet`
+  (defaults: level 4, time 172800 s, dts 0.5,1,2,4,8, advects 0,1, tol 0.10).
+  Extra flags: `--time=`, `--dts=`, `--advects=`, `--tol=`, `--level=`,
+  `--patch='{"noise":0}'` (param overrides), `--out=file.json`.
 - Check console for: shader compile OK, dt-sweep bias table, PASS/FAIL.
+
+## RESULTS (this session)
+- Harness recreated at `harness/air_dt_sweep.js` (was lost from /tmp). Runs the
+  FULL integrated step for a fixed simulated time T at each dt, measures air RMS
+  |v| over wet cells, and asserts the FV path is flat across dt.
+- **GL error check (#3):** added `gl.getError()` flushes; the only error seen was
+  a stale one from the constructor's one-shot `render()` (rAF is stubbed) — flush
+  it post-construct. No errors from the air draw / readback. Shader compiles OK.
+- **KEY FINDING — the Courant cap is NOT the real fix.** With `d ≈ 1e6 m`
+  (great-circle spacing) and realistic winds, the per-face Courant
+  `|u|·dt/d` is ~1e-5·dt — i.e. << `uCourantMax=0.5` for any dt the app uses, so
+  the cap is inert and cannot remove the dt-bias.
+- **Root cause of the dt-dependence:** `COUPLE_FS` injected the symmetry-break
+  noise as a *fixed per-step* amount: `Tl += uNoise*nz`. Over a fixed simulated
+  time the accumulated forcing scales as N = T/dt → ~1/dt, so smaller dt spun
+  the wind up far harder (and, via `Tl→Pl`, built a larger pressure gradient).
+  At 1 day: rmsWind 5.56 m/s @ dt=0.5 vs 1.17 m/s @ dt=8 (130% spread); PlRange
+  3047 vs 1439 Pa. With `--patch={"noise":0}` the spread collapsed to 6.5%,
+  confirming noise as the dominant driver.
+- **Fix applied (shader.js ~L1419):** `Tl += uNoise * nz * (uDt/60.0)` — scale
+  the per-step increment by dt so the total forcing over any fixed time is dt-
+  independent. Reference dt=60 preserves the original tuned amplitude at the
+  default timestep (no change to default app behavior).
+- **Verification after fix:**
+  - 2 h sweep dt∈{0.5,1,2,4,8}: FV relSpread **0.2%** (was 6.7%), SL **1.4%**,
+    stable (no NaN/explosion). PlRange/TlRange now match across dt.
+  - 1 day, dt=0.5 vs 8: FV relSpread **6.6%** (was 130%). PASS.
+- **SL sanity (#4):** opt-in `airAdvect=1` is dt-flat (1.4% @ 2 h) and stable;
+  does not regress default (airAdvect=0) behavior.
+- NOTE: a small ~6% residual remains even with noise off (genuine base numerics of
+  the capped-FV advection / convection); it is within the 10% tolerance. If tighter
+  dt-flatness is wanted later, also audit the fixed-fraction relaxations
+  (`cloud = mix(...,0.06)`, `rain = mix(...,0.10)`) and the convection cap
+  `clamp(uConv*buoy*uDt,0,0.45)` for dt-consistency.
+

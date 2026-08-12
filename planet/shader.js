@@ -1417,7 +1417,15 @@ void main(){
   // ocean momentum is untouched by this pass except through the wind stress.
 
   float nz = hash21(vec2(float(cell), floor(uTime*0.37)))-0.5;
-  Tl += uNoise*nz;
+  /* Symmetry-break noise. The original code added a FIXED amplitude every
+     step (Tl += uNoise*nz), so over a fixed simulated time the accumulated
+     forcing scaled as N = T/dt — i.e. ~1/dt. That made the air dt-DEPENDENT:
+     smaller dt injected far more noise, spun the wind up harder, and (through
+     Tl->pressure) produced a larger pressure gradient. Scale the per-step
+     increment by dt so the total forcing over any fixed time is independent of
+     dt. Reference dt = 60 (the default) preserves the original tuned amplitude
+     at the default timestep. */
+  Tl += uNoise * nz * (uDt / 60.0);
 
   float Pl = 101325.0 - 60.0*(Tl - 288.0) + 25.0*(Th - 250.0);
   float Ph = 45000.0  + 75.0*(0.5*(Tl + Th) - 268.0);
