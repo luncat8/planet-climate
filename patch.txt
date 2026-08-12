@@ -1,0 +1,138 @@
+вот патч AG1 правильно ли сделано?
+
+386c386,390
+<       .f('uHtot', P.hTotal);
+---
+>       .f('uHtot', P.hTotal)
+>       .f('uAirCs', P.airCs === undefined ? 40 : P.airCs)
+>       .f('uAirPRelax', P.airPRelax === undefined ? 8e-6 : P.airPRelax)
+>       .f('uAirDpdT', P.airDpdT === undefined ? 180 : P.airDpdT)
+>       .f('uAirDpdTHi', P.airDpdTHi === undefined ? 200 : P.airDpdTHi);
+452c456,458
+<     .i('uAirAdvect', P.airAdvect === undefined ? 0 : (P.airAdvect | 0));
+---
+>     .i('uAirAdvect', P.airAdvect === undefined ? 0 : (P.airAdvect | 0))
+>     .f('uAirCs', P.airCs === undefined ? 40 : P.airCs)
+>     .f('uAirFbStab', P.airFbStab === undefined ? 20 : P.airFbStab);
+24c24,27
+<   fricAirLow:{ label: 'Surface friction',     default: 1.6e-5, min: 0, max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
+---
+>   /* 1.6e-5 s^-1 is a 17-hour e-folding — any free vortex dies before it can
+>      propagate. 4e-6 (~3 days) is still stronger than a bulk Ekman layer on a
+>      5 km column, but it lets synoptic eddies live long enough to move. */
+>   fricAirLow:{ label: 'Surface friction',     default: 4e-6, min: 0, max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
+112a116,139
+>   /* Equivalent gravity-wave speed for the prognostic air pressure
+>      (baroclinic shallow-water analog, c = sqrt(g He)). 0 = legacy
+>      diagnostic P(T) only — vortices then sit still, slaved to T.
+>      ~40 m/s → He ≈ 160 m, mid-lat deformation radius ~400 km. */
+>   airCs:     { label: 'Air wave speed c',     default: 40,   min: 0, max: 120, step: 2,
+>     fmt: function (v) { return v <= 0 ? 'diagnostic P' : v.toFixed(0) + ' m/s'; },
+>     tip: 'Prognostic air pressure wave speed. 0 restores the old T-only diagnostic P (static cells).' },
+>   /* Rate (1/s) at which prognostic P is nudged toward the thermal
+>      diagnostic. ~8e-6 ≈ 1.5 day: Hadley/Walker stay thermally driven,
+>      synoptic anomalies are not instantly overwritten. */
+>   airPRelax: { label: 'Air P thermal relax',  default: 8e-6, min: 0, max: 5e-5, step: 1e-6,
+>     fmt: function (v) { return v <= 0 ? 'off' : (1 / v / 86400).toFixed(1) + ' d'; },
+>     tip: 'How fast prognostic P is pulled toward the thermal P(T). Slower = freer weather.' },
+>   airFbStab: { label: 'Air gravity-wave stab.', default: 20, min: 0, max: 100, step: 1,
+>     tip: 'Forward-backward damper for the explicit air (P, u) gravity wave. Same idea as the ocean fbStab. 0 = plain explicit.' },
+>   /* Hydrostatic column: ρ g H / T ≈ 1.1*9.81*5000/288 ≈ 187 Pa/K.
+>      The old 60 Pa/K produced a ~1.6 m/s thermal wind — too weak for
+>      baroclinic instability to beat friction, so cells sat still. */
+>   airDpdT:   { label: 'Air dP/dT (low)',      default: 180,  min: 0, max: 400, step: 5,
+>     fmt: function (v) { return v.toFixed(0) + ' Pa/K'; },
+>     tip: 'How strongly low-air temperature sets the thermal pressure target. Larger = stronger jet, more mobile eddies.' },
+>   airDpdTHi: { label: 'Air dP/dT (high)',     default: 200,  min: 0, max: 500, step: 5,
+>     fmt: function (v) { return v.toFixed(0) + ' Pa/K'; },
+>     tip: 'High-air thermal pressure coefficient. Larger = stronger upper jet.' },
+229c256
+<     /* Увеличиваем поверхностное трение воздуха для более реалистичного приземного слоя (default 1.6e-5) */
+---
+>     /* Увеличиваем поверхностное трение воздуха для более реалистичного приземного слоя (default 4e-6) */
+234a262,265
+>   },
+>   'Mobile weather': {
+>     airCs: { v: 45 }, airPRelax: { v: 5e-6 }, fricAirLow: { v: 3e-6 },
+>     nuVelAir: { v: 8e4 }, noise: { v: 0.04 },
+1075a1076,1077
+> uniform float uAirCs;        // baroclinic gravity-wave speed; 0 = keep P diagnostic
+> uniform float uAirFbStab;    // forward-backward damper for the (P, u) wave
+1089c1091
+<   float div = 0.0;
+---
+>   float div = 0.0, lapP = 0.0, mDif = 0.0;
+1122a1125,1126
+>     lapP  += (L/d)*(aj.w-p0);
+>     mDif  += (L/d);
+1138a1143
+>   lapP *= ia; mDif *= ia;
+1185c1190,1195
+<   float fCor = 2.0*uOmega;
+---
+>   /* Traditional Coriolis f = 2Ω sinφ (n.y = sin latitude). The air used to
+>      run CN on an f-plane f=2Ω, which kills the β effect: no Rossby-wave
+>      drift, and the same rotation rate at the equator as at the pole. The
+>      explicit path already used the 3-D cross product (≡ 2Ω n.y in-plane);
+>      CN must match. */
+>   float fCor = 2.0*uOmega*n.y;
+1211c1221,1240
+<   outA = vec4(v1, tr1.x, p0);
+---
+>   /* Prognostic air pressure. Linearised baroclinic shallow water:
+>        ∂P/∂t = -c² ρ ∇·u
+>      plus the same forward-backward Laplacian damper the ocean uses on eta.
+>      uAirCs = 0 keeps P as a diagnostic the couple pass overwrites from T
+>      (legacy: vortices sit still, slaved to the standing thermal field). */
+>   float p1 = p0;
+>   if(uAirCs > 0.5){
+>     float cs2 = uAirCs*uAirCs;
+>     float nu2 = uAirFbStab*uDt*uDt*cs2*mDif;
+>     float fbGain = nu2/(1.0 + nu2);
+>     /* Linearised continuity only. Advecting p' (flux form) drained column
+>        mass and drove high-air P into the 15 kPa floor inside a day. Vorticity
+>        still travels with the wind; P adjusts geostrophically. */
+>     p1 = p0 - uDt*cs2*rho*div + fbGain*uDt*uDt*cs2*lapP;
+>     p1 = clamp(p1, p0 - 8000.0, p0 + 8000.0);
+>     p1 = clamp(p1, 15000.0, 130000.0);
+>     if(isnan(p1)) p1 = p0;
+>   }
+> 
+>   outA = vec4(v1, tr1.x, p1);
+1253a1283,1286
+> uniform float uAirCs;      // 0 = overwrite P from T (legacy); else relax toward it
+> uniform float uAirPRelax;  // 1/s nudge of prognostic P toward thermal P(T)
+> uniform float uAirDpdT;    // Pa/K low-air thermal P
+> uniform float uAirDpdTHi;  // Pa/K high-air thermal P
+1439,1440c1472,1487
+<   float Pl = 101325.0 - 60.0*(Tl - 288.0) + 25.0*(Th - 250.0);
+<   float Ph = 45000.0  + 75.0*(0.5*(Tl + Th) - 268.0);
+---
+>   /* Thermal diagnostic P(T). Used as the sole air pressure when uAirCs==0
+>      (legacy: wind is slaved to a standing T field, so cells never travel).
+>      Otherwise this is only a relaxation TARGET: the air step integrates
+>      ∂P/∂t = -c²ρ∇·u, and we nudge toward P_therm on a ~day timescale so
+>      Hadley/Walker stay thermally driven without instantly wiping eddies. */
+>   float PlTh = 101325.0 - uAirDpdT*(Tl - 288.0) + 0.4*uAirDpdT*(Th - 250.0);
+>   float PhTh = 45000.0  + uAirDpdTHi*(0.5*(Tl + Th) - 268.0);
+>   float Pl, Ph;
+>   if(uAirCs < 0.5){
+>     Pl = PlTh;
+>     Ph = PhTh;
+>   } else {
+>     float a = 1.0 - exp(-uAirPRelax*uDt);
+>     Pl = mix(la.w, PlTh, a);
+>     Ph = mix(ha.w, PhTh, a);
+>   }
+1503c1550,1554
+<   oLoA = vec4(rn*0.5, rn*0.5, 268.0 + 30.0*c2 + rn*1.2, 101325.0);
+---
+>   float Tl0 = 268.0 + 30.0*c2 + rn*1.2;
+>   float Th0 = 232.0 + 12.0*c2 + rn*0.6;
+>   float Pl0 = 101325.0 - 180.0*(Tl0 - 288.0) + 72.0*(Th0 - 250.0);
+>   float Ph0 = 45000.0  + 200.0*(0.5*(Tl0 + Th0) - 268.0);
+>   oLoA = vec4(rn*0.5, rn*0.5, Tl0, Pl0);
+1505c1556
+<   oHiA = vec4(rn*0.5, rn*0.5, 232.0 + 12.0*c2 + rn*0.6, 45000.0);
+---
+>   oHiA = vec4(rn*0.5, rn*0.5, Th0, Ph0);

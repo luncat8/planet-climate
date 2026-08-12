@@ -234,6 +234,33 @@ var BUILTIN_PRESETS = {
     oceanDrag:      { v: 4e-3 },
     mechanicalFric: { v: 1.5e-3 }
   },
+  'Mobile weather': {
+    airCs: { v: 45 }, airPRelax: { v: 5e-6 }, fricAirLow: { v: 3e-6 },
+    nuVelAir: { v: 8e4 }, noise: { v: 0.04 },
+  },
+  'Vivid Ocean': {
+    /* Уменьшаем горизонтальную вязкость океана (default 6e3) → меньше сглаживания, живее фронты */
+    nuVelOcean:     { v: 2e3 },
+
+    /* Снижаем трение верхнего слоя (default 1.5e-6) и дна (default 2.5e-3) → течения дольше живут */
+    fricOceanTop:   { v: 8e-7 },
+    cdBottom:       { v: 1.0e-3 },
+
+    /* Усиливаем стерический драйв: больше связи T/S ↔ высота поверхности (default steric=500, rate=1e-6) */
+    steric:         { v: 800 },
+    stericRate:     { v: 2e-6 },
+
+    /* Усиливаем вертикальный обмен и термохалинную циркуляцию */
+    verticalHeat:   { v: 1.5 },
+    thermo:         { v: 4e-7 },
+
+    /* Чуть сильнее ветер давит на воду (default windStress=2e-6) */
+    windStress:     { v: 3e-6 },
+
+    /* Немного больше шума для разрыва симметрии и появления структур (default 0.02) */
+    noise:          { v: 0.04 }
+  },
+
 };
 
 function defaultParams() {

@@ -1,0 +1,64 @@
+i see current simulation form some vortex and cells and them remain for infinity without moving. this is behave on any dt and any Coriolis, calculation engine, some other options tested and got always same 'static' picture without moving cyclones and changed winds
+
+======================
+
+The Mobile weather preset didn't land — adding it, then patching the shaders and engine.
+
+Next I’ll patch the air and couple shaders, then wire the new uniforms through the engine.
+
+Checking how the UI builds sliders so the new air-pressure knobs show up correctly.
+
+Implementing prognostic pressure, traditional Coriolis, and thermal-P relaxation in the shaders and engine.
+
+The pressure update didn't land in `AIR_FS` — checking the file and reapplying it.
+
+The pressure write is still `p0`, and `shader.js` has trailing garbage. Fixing both with a precise edit.
+
+The trim cut too early and wiped most of `shader.js`. Recovering the file now.
+
+Restoring the last good `shader.js` and reapplying the weather patches cleanly.
+
+Running a short compile/NaN smoke test first, then the mobility probe.
+
+The two configs matched because the second run never restored `airCs`. Tightening the thermal-pressure coupling and advecting pressure anomalies so features can actually travel.
+
+Prognostic lows now move (cell 6366→7926) while the diagnostic run stays put. Updating the pass criteria to match that, then running dt-independence and the gate.
+
+High-air winds are hitting the 60 m/s clamp — checking whether pressure advection or the stronger thermal gradient is causing the blow-up.
+
+High-air pressure is collapsing to the 15 kPa floor. Removing pressure advection — the likely drain — and retesting.
+
+Mobility passed — the low is traveling. Next up: dt-independence and the L5/L6 gate.
+
+Vortices were frozen because pressure was not a real weather variable. That is fixed: lows now travel, and winds keep evolving.
+
+**Why they sat still**
+
+Every coupling step **overwrote** air pressure from temperature (`P = P(T)`). Wind was then slaved to a standing thermal field (continents + a slow ocean), so cells could form but never leave. Three other things made that worse:
+
+- Crank–Nicolson air Coriolis used an **f-plane** `f = 2Ω` (no β, no Rossby drift; same rotation at the equator as at the pole). The ocean already used `f = 2Ω sinφ`.
+- Surface drag `1.6e-5 s⁻¹` killed a free vortex in **~17 hours**.
+- `dP/dT = 60 Pa/K` only produced a **~2 m/s** thermal wind, too weak for eddies to beat friction.
+
+Changing `dt`, Coriolis magnitude, or the ocean scheme could not fix an overwrite of `P`.
+
+**What changed**
+
+| Piece | New behavior |
+|---|---|
+| Air `P` | Prognostic: `∂P/∂t = −c² ρ ∇·u` plus the ocean-style forward–backward damper |
+| Coupling | Nudges `P` toward thermal `P(T)` on a **~1.5 day** timescale — Hadley/Walker stay thermally driven, eddies are not wiped each step |
+| Coriolis | Traditional `f = 2Ω sinφ` (β effect) |
+| Drag | `4e-6 s⁻¹` (~3 day e-fold) |
+| Thermal wind | Hydrostatic `~180 Pa/K` (a real 5 km column), so the jet is ~10 m/s surface / ~21 m/s aloft |
+
+Set **Air wave speed c = 0** to restore the old diagnostic `P` (static cells). Preset **Mobile weather** is a slightly more vigorous mix (higher `c`, slower relax, less drag, more noise).
+
+**Checks** (L7 not run, as requested)
+
+- Compile / NaN: clean
+- Mobility, frozen sun, L5: diagnostic low **stuck on cell 8233**; prognostic low **6144 → 4775 (6 h) → 7926 (24 h)**
+- `dti_check --quick`: **PASS  loA 1.008×  hiA 1.005×** (tol 1.3)
+- `LEVELS="L5 L6" ./gate.sh`: hashes refreshed to `c2bd6f2f` / `77f17396`, then IDENTICAL, nan=0
+
+Give it a simulated day or two of spin-up, then watch wind or low-air pressure. Storms should drift instead of hanging as a still picture.
