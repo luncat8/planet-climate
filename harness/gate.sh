@@ -8,6 +8,8 @@
 # Air dt-independence is a separate check:
 #   node dti_check.js --quick          # 1 day, dts=10,60,300
 #   node dti_check.js                  # 3 days, dts=10,30,60,120,300
+# Weather mobility (prognostic P vs frozen diagnostic):
+#   node mobility_check.js             # L5, frozen sun, 1 d + 6 h + 24 h
 #
 # Baselines live in baselines/<tag>.json and are created on first run.
 set -uo pipefail

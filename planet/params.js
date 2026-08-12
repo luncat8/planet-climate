@@ -21,7 +21,10 @@ var PARAMS = {
   greenhouse:{ label: 'Greenhouse',           default: 0.55,  min: 0,   max: 1,    step: 0.01 },
   nuVelAir:  { label: 'Air viscosity ν',      default: 1.6e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
   nuTAir:    { label: 'Air heat diffusion',   default: 1.1e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
-  fricAirLow:{ label: 'Surface friction',     default: 1.6e-5, min: 0, max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
+  /* 1.6e-5 s^-1 is a 17-hour e-folding — any free vortex dies before it can
+     propagate. 4e-6 (~3 days) is still stronger than a bulk Ekman layer on a
+     5 km column, but it lets synoptic eddies live long enough to move. */
+  fricAirLow:{ label: 'Surface friction',     default: 4e-6, min: 0, max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
   conv:      { label: 'Convection gain',      default: 6e-6,  min: 0,   max: 3e-5, step: 5e-7, fmt: function (v) { return v.toExponential(1); } },
   kRad:      { label: 'Radiative exchange',   default: 2.5,   min: 0,   max: 8,    step: 0.1 },
   lapse:     { label: 'Reference lapse ΔT',   default: 45,    min: 20,  max: 70,   step: 1,    fmt: function (v) { return v + ' K'; } },
@@ -110,6 +113,30 @@ var PARAMS = {
       { v: 1, label: 'Semi-Lagrangian (A/B)' },
     ],
     tip: 'SL is a comparison scaffold, not the validated default.' },
+  /* Equivalent gravity-wave speed for the prognostic air pressure
+     (baroclinic shallow-water analog, c = sqrt(g He)). 0 = legacy
+     diagnostic P(T) only — vortices then sit still, slaved to T.
+     ~40 m/s → He ≈ 160 m, mid-lat deformation radius ~400 km. */
+  airCs:     { label: 'Air wave speed c',     default: 40,   min: 0, max: 120, step: 2,
+    fmt: function (v) { return v <= 0 ? 'diagnostic P' : v.toFixed(0) + ' m/s'; },
+    tip: 'Prognostic air pressure wave speed. 0 restores the old T-only diagnostic P (static cells).' },
+  /* Rate (1/s) at which prognostic P is nudged toward the thermal
+     diagnostic. ~8e-6 ≈ 1.5 day: Hadley/Walker stay thermally driven,
+     synoptic anomalies are not instantly overwritten. */
+  airPRelax: { label: 'Air P thermal relax',  default: 8e-6, min: 0, max: 5e-5, step: 1e-6,
+    fmt: function (v) { return v <= 0 ? 'off' : (1 / v / 86400).toFixed(1) + ' d'; },
+    tip: 'How fast prognostic P is pulled toward the thermal P(T). Slower = freer weather.' },
+  airFbStab: { label: 'Air gravity-wave stab.', default: 20, min: 0, max: 100, step: 1,
+    tip: 'Forward-backward damper for the explicit air (P, u) gravity wave. Same idea as the ocean fbStab. 0 = plain explicit.' },
+  /* Hydrostatic column: ρ g H / T ≈ 1.1*9.81*5000/288 ≈ 187 Pa/K.
+     The old 60 Pa/K produced a ~1.6 m/s thermal wind — too weak for
+     baroclinic instability to beat friction, so cells sat still. */
+  airDpdT:   { label: 'Air dP/dT (low)',      default: 180,  min: 0, max: 400, step: 5,
+    fmt: function (v) { return v.toFixed(0) + ' Pa/K'; },
+    tip: 'How strongly low-air temperature sets the thermal pressure target. Larger = stronger jet, more mobile eddies.' },
+  airDpdTHi: { label: 'Air dP/dT (high)',     default: 200,  min: 0, max: 500, step: 5,
+    fmt: function (v) { return v.toFixed(0) + ' Pa/K'; },
+    tip: 'High-air thermal pressure coefficient. Larger = stronger upper jet.' },
   /* Jacobi iterations for scheme B (implicit free surface). Hard ceiling; the
      engine early-exits once the residual drops below 1e-6, so cheap levels do
      not pay for all of them. Only meaningful when oceanScheme == 2. */
@@ -226,13 +253,40 @@ var BUILTIN_PRESETS = {
     /* Уменьшаем трение о дно в абиссали, чтобы глубинные течения не гасли мгновенно (default 2.5e-3) */
     cdBottom:       { v: 1.5e-3 },
     
-    /* Увеличиваем поверхностное трение воздуха для более реалистичного приземного слоя (default 1.6e-5) */
+    /* Увеличиваем поверхностное трение воздуха для более реалистичного приземного слоя (default 4e-6) */
     fricAirLow:     { v: 3e-5 },
     
     /* Усиливаем связь между верхним и глубинным слоем океана (default sum ~3.5e-3 -> new ~5.5e-3) */
     oceanDrag:      { v: 4e-3 },
     mechanicalFric: { v: 1.5e-3 }
   },
+  'Mobile weather': {
+    airCs: { v: 45 }, airPRelax: { v: 5e-6 }, fricAirLow: { v: 3e-6 },
+    nuVelAir: { v: 8e4 }, noise: { v: 0.04 },
+  },
+  'Vivid Ocean': {
+    /* Уменьшаем горизонтальную вязкость океана (default 6e3) → меньше сглаживания, живее фронты */
+    nuVelOcean:     { v: 2e3 },
+
+    /* Снижаем трение верхнего слоя (default 1.5e-6) и дна (default 2.5e-3) → течения дольше живут */
+    fricOceanTop:   { v: 8e-7 },
+    cdBottom:       { v: 1.0e-3 },
+
+    /* Усиливаем стерический драйв: больше связи T/S ↔ высота поверхности (default steric=500, rate=1e-6) */
+    steric:         { v: 800 },
+    stericRate:     { v: 2e-6 },
+
+    /* Усиливаем вертикальный обмен и термохалинную циркуляцию */
+    verticalHeat:   { v: 1.5 },
+    thermo:         { v: 4e-7 },
+
+    /* Чуть сильнее ветер давит на воду (default windStress=2e-6) */
+    windStress:     { v: 3e-6 },
+
+    /* Немного больше шума для разрыва симметрии и появления структур (default 0.02) */
+    noise:          { v: 0.04 }
+  },
+
 };
 
 function defaultParams() {
