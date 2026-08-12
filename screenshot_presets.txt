@@ -1,0 +1,29 @@
+make function that make projection map screenshot at the step 1000 and make link to save it. place function in separate js file
+
+add dropdown to select screenshot config. default - no change settings (but same as current view).
+
+possible to have present with
+step
+equirect
+nightShading
+mode
+etc
+
+think how to good store such preset
+
+refactor captureProjectionMap to easy change and restore any
+
+
+
+dedicated "Captures" section in the control panel that holds the single latest link . move buttons near to this panel so buttons and links same panel
+
+Add seed-imestamp suffix
+
+progress indicator ("stepping 320/1000")
+
+add button  "current view as preset to clipboard"
+
+make another dropdown to use same presets to change current view. so same presets works for screenshots and for view
+
+
+

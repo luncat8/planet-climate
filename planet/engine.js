@@ -104,6 +104,7 @@ function Planet(canvas, level) {
   this.bounds = {}; // per-instance slider-bound overrides (from presets); see boundsOf/setBound
   this.grid = null;
   this.simTime = 0;
+  this.stepCount = 0;
   this.onStats = null;
 
   this.A = []; this.B = [];
@@ -454,6 +455,7 @@ Planet.prototype.step = function () {
 
   this.couple();
   this.simTime += P.dt;
+  this.stepCount++;
 };
 
 /* Scheme B: implicit free surface via Jacobi iteration over eta.
