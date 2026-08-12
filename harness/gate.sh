@@ -22,33 +22,50 @@ else EXTRA_ARR=(--legacy-seed '--params={"bathyMode":0}'); fi
 declare -A CASES=(
   [L5]="--steps=500 --level=5"
   [L6]="--steps=200 --level=6"
+  [L7]="--steps=100 --level=7"
 )
 
+# SCHEMES (default "0") selects which ocean engine to gate/sweep. Pass e.g.
+#   SCHEMES="0 1 2" ./gate.sh <tag>
+# Scheme 0 is regression-gated against its baseline; schemes 1/2 are run and
+# their hashes reported (no drift is asserted, since they are new code paths).
+SCHEMES="${SCHEMES:-0}"
+
 fail=0
-for name in L5 L6; do
-  args="${CASES[$name]}"
-  out="runs/${TAG}_${name}.json"
-  # capture stdout too: harness.js reports shaderLogs/fatal on stdout as JSON,
-  # and redirecting only stderr made failures show up as a bare "HARNESS ERROR"
-  # with an empty .err file.
-  if ! node harness.js $args "${EXTRA_ARR[@]}" --out="$out" >runs/${TAG}_${name}.err 2>&1; then
-    echo "  [$name] HARNESS ERROR"; sed 's/^/      /' runs/${TAG}_${name}.err | head -30; fail=1; continue
-  fi
-  h=$(python3 -c "import json;print(json.load(open('$out'))['hash'])")
-  n=$(python3 -c "import json;print(json.load(open('$out'))['nanCount'])")
-  base="baselines/${name}.json"
-  if [ ! -f "$base" ]; then
-    cp "$out" "$base"; echo "  [$name] baseline created  hash=$h nan=$n"
-  else
-    bh=$(python3 -c "import json;print(json.load(open('$base'))['hash'])")
-    if [ "$h" == "$bh" ]; then
-      echo "  [$name] IDENTICAL      hash=$h nan=$n"
-    elif [ "$ALLOW" == "--allow-drift" ]; then
-      echo "  [$name] drift (allowed) $bh -> $h  nan=$n"
-    else
-      echo "  [$name] HASH DRIFT !!  $bh -> $h  nan=$n"; fail=1
+for s in $SCHEMES; do
+  spre=""
+  if [ "$s" != "0" ]; then spre="_s${s}"; fi
+  for name in L5 L6 L7; do
+    args="${CASES[$name]} --scheme=$s"
+    out="runs/${TAG}${spre}_${name}.json"
+    # capture stdout too: harness.js reports shaderLogs/fatal on stdout as JSON,
+    # and redirecting only stderr made failures show up as a bare "HARNESS ERROR"
+    # with an empty .err file.
+    if ! node harness.js $args "${EXTRA_ARR[@]}" --out="$out" >runs/${TAG}${spre}_${name}.err 2>&1; then
+      echo "  [s$s $name] HARNESS ERROR"; sed 's/^/      /' runs/${TAG}${spre}_${name}.err | head -30; fail=1; continue
     fi
-  fi
-  if [ "$n" != "0" ]; then echo "  [$name] NaN DETECTED: $n"; fail=1; fi
+    h=$(python3 -c "import json;print(json.load(open('$out'))['hash'])")
+    n=$(python3 -c "import json;print(json.load(open('$out'))['nanCount'])")
+    # only scheme 0 has a committed baseline to gate against
+    if [ "$s" != "0" ]; then
+      echo "  [s$s $name] hash=$h nan=$n  (new scheme, no baseline gate)"
+      if [ "$n" != "0" ]; then echo "  [s$s $name] NaN DETECTED: $n"; fail=1; fi
+      continue
+    fi
+    base="baselines/${name}.json"
+    if [ ! -f "$base" ]; then
+      cp "$out" "$base"; echo "  [s$s $name] baseline created  hash=$h nan=$n"
+    else
+      bh=$(python3 -c "import json;print(json.load(open('$base'))['hash'])")
+      if [ "$h" == "$bh" ]; then
+        echo "  [s$s $name] IDENTICAL      hash=$h nan=$n"
+      elif [ "$ALLOW" == "--allow-drift" ]; then
+        echo "  [s$s $name] drift (allowed) $bh -> $h  nan=$n"
+      else
+        echo "  [s$s $name] HASH DRIFT !!  $bh -> $h  nan=$n"; fail=1
+      fi
+    fi
+    if [ "$n" != "0" ]; then echo "  [s$s $name] NaN DETECTED: $n"; fail=1; fi
+  done
 done
 exit $fail

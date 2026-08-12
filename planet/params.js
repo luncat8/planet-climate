@@ -7,7 +7,7 @@
 var PARAMS = {
   // tunable (have min/max/step) -> become sliders
   dt:        { label: 'Timestep dt',          default: 60,   min: 1, max: 900, step: 1,   fmt: function (v) { return v + ' s'; } },
-  substeps:  { label: 'Substeps / frame',     default: 16,     min: 1,   max: 8,    step: 1 },
+  substeps:  { label: 'Substeps / frame',     default: 8,     min: 1,   max: 128,    step: 1 },
   /* Physical spin rate (rad/s) — drives the real 3-D Coriolis force. A tidally
      locked planet still rotates once per orbit in the inertial frame, so this
      should generally stay non-zero even when omegaOrbit = 0. */
@@ -21,7 +21,23 @@ var PARAMS = {
   greenhouse:{ label: 'Greenhouse',           default: 0.55,  min: 0,   max: 1,    step: 0.01 },
   nuVelAir:  { label: 'Air viscosity ν',      default: 1.6e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
   nuTAir:    { label: 'Air heat diffusion',   default: 1.1e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
-  fricAirLow:{ label: 'Surface friction',     default: 1.6e-5, min: 0, max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
+  fricAirLow:{ label: 'Surface friction',     default: 1.6e-5, min: 0,   max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
+  /* Face Courant cap for the explicit air advection. The air momentum/tracer
+     advection in stepAir is explicit upwind, so its effective Courant |u|*dt/d
+     grows with dt; at large dt the upwind scheme over-diffuses (spuriously
+     damps winds), at small dt it is "clean" (higher winds) -> a dt-dependent
+     bias. Capping the per-face Courant here forces large-dt air to behave like
+     small-dt air, removing the bias. 0.5 is a conservative starting point. */
+  airCourantMax:{ label: 'Air Courant cap',     default: 0.5, min: 0.05, max: 2, step: 0.05,
+                  fmt: function (v) { return v.toFixed(2); } },
+  /* Selectable air advection algorithm (comparison scaffold; FV is default):
+       0 = Capped finite-volume upwind (Phases 2-3, dt-independent).
+       1 = Semi-Lagrangian back-trajectory sampling (A/B only, not default). */
+  airAdvect:    { label: 'Air advection',       default: 0, min: 0, max: 1, step: 1,
+                  opts: [
+                    { v: 0, label: 'Capped FV (default)' },
+                    { v: 1, label: 'Semi-Lagrangian' },
+                  ] },
   conv:      { label: 'Convection gain',      default: 6e-6,  min: 0,   max: 3e-5, step: 5e-7, fmt: function (v) { return v.toExponential(1); } },
   kRad:      { label: 'Radiative exchange',   default: 2.5,   min: 0,   max: 8,    step: 0.1 },
   lapse:     { label: 'Reference lapse ΔT',   default: 45,    min: 20,  max: 70,   step: 1,    fmt: function (v) { return v + ' K'; } },
@@ -80,8 +96,26 @@ var PARAMS = {
   pgfTop:     { label: 'PGF gain (top)',      default: 9.81,  min: 0, max: 20, step: 0.05,
                 fmt: function (v) { return v.toFixed(2); } },
   /* Multiplier on the deep layer's +g'*grad(eta) return-limb forcing. */
-  pgfDeepGain:{ label: 'PGF gain (deep)',     default: 1.0,   min: 0, max: 4,  step: 0.05,
+  pgfDeepGain:{ label: 'PGF gain (deep)',     default: 1.0,  min: 0, max: 4,  step: 0.05,
                 fmt: function (v) { return v.toFixed(2) + '×'; } },
+  /* Switchable ocean calc engine (PLAN.md Phase 10):
+        0 = Explicit (Current)  — planet2a2 OCEAN_FS, fbStab + Rhie-Chow
+        1 = Decoupled (A)        — drop div(h*u) from continuity; unconditionally
+                                   stable, no tuning slider, zero extra passes
+        2 = Implicit (B)         — proper implicit free surface solved by Jacobi
+                                   iteration each step (implicitIters passes)
+      Rendered as a dropdown in the UI; changing it needs no rebuild (uniform-only). */
+  oceanScheme:{ label: 'Ocean scheme', default: 0, min: 0, max: 2, step: 1,
+    opts: [
+      { v: 0, label: 'Explicit (Current)' },
+      { v: 1, label: 'Decoupled (Stable/Fast)' },
+      { v: 2, label: 'Implicit (Physical/Slow)' },
+    ] },
+  /* Jacobi iterations for scheme B (implicit free surface). Hard ceiling; the
+     engine early-exits once the residual drops below 1e-6, so cheap levels do
+     not pay for all of them. Only meaningful when oceanScheme == 2. */
+  implicitIters:{ label: 'Implicit iters (B)', default: 12, min: 1, max: 40, step: 1,
+    tip: 'Jacobi iterations for the implicit free surface (scheme B). Greyed out for schemes 0/1.' },
   /* Maximum (abyssal) ocean depth. Reached far from any coastline. */
   depthMax:   { label: 'Max ocean depth',     default: 4000,  min: 500, max: 8000, step: 100,
                 fmt: function (v) { return (v / 1000).toFixed(1) + ' km'; } },
@@ -182,6 +216,23 @@ var BUILTIN_PRESETS = {
   'Hothouse': {
     solar: { v: 1700 }, greenhouse: { v: 0.85 }, evap: { v: 0.012, min: 0, max: 0.03, step: 0.0005 },
     kRad: { v: 1.2 }, cloudK: { v: 2.6 },
+  },
+  'Test Ocean Coupling': {
+    /* Усиливаем передачу импульса от ветра к воде (default 2e-6) */
+    windStress:     { v: 6e-6 },
+    
+    /* Глубинный слой сильнее реагирует на градиенты высоты поверхности (default 1.0) */
+    pgfDeepGain:    { v: 1.8 },
+    
+    /* Уменьшаем трение о дно в абиссали, чтобы глубинные течения не гасли мгновенно (default 2.5e-3) */
+    cdBottom:       { v: 1.5e-3 },
+    
+    /* Увеличиваем поверхностное трение воздуха для более реалистичного приземного слоя (default 1.6e-5) */
+    fricAirLow:     { v: 3e-5 },
+    
+    /* Усиливаем связь между верхним и глубинным слоем океана (default sum ~3.5e-3 -> new ~5.5e-3) */
+    oceanDrag:      { v: 4e-3 },
+    mechanicalFric: { v: 1.5e-3 }
   },
 };
 

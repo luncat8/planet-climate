@@ -181,6 +181,12 @@ function refreshDynamic() {
     var v = P[key];
     ui.knobVals[key].textContent = def && def.fmt ? def.fmt(v) : String(v);
   });
+  if (ui.oceanSchemeSel) ui.oceanSchemeSel.value = String(P.oceanScheme);
+  if (ui.implicitItersWrap) {
+    var greyed = (P.oceanScheme !== 2);
+    ui.implicitItersWrap.style.opacity = greyed ? '0.4' : '1';
+    if (ui.knobInputs['implicitIters']) ui.knobInputs['implicitIters'].disabled = greyed;
+  }
   updateViewportInfo();
 }
 
@@ -280,8 +286,9 @@ function buildUI() {
   ui.runBtn = runBtn;
   panel.appendChild(row);
 
-  // layer view
-  panel.appendChild(el('div', 'lab', 'Layer view'));
+  // layer view (kept outside the scrolling panel so it is always visible)
+  var lviewBox = el('div', 'lview');
+  lviewBox.appendChild(el('div', 'lab', 'Layer view'));
   var wrap = el('div', 'ltable-wrap');
   var table = el('table', 'ltable');
   var thead = document.createElement('thead');
@@ -340,15 +347,11 @@ function buildUI() {
   });
   table.appendChild(tbody);
   wrap.appendChild(table);
-  panel.appendChild(wrap);
+  lviewBox.appendChild(wrap);
+  app.appendChild(lviewBox);
   // streamlines control: 0 = dots, >0 = streak length (kept visible, not in collapsed tuning)
-  panel.appendChild(el('div', 'lab', 'Streamline length (0 = dots)'));
-  var stWrap = el('div');
-  var stKv = el('div', 'kv');
-  stKv.appendChild(el('span', null, 'Streak'));
-  var stVal = el('span', 'v', '');
-  stKv.appendChild(stVal);
-  stWrap.appendChild(stKv);
+  var stWrap = el('div', 'stline');
+  stWrap.appendChild(el('span', 'slab', 'streamline streak'));
   var stInp = document.createElement('input');
   stInp.type = 'range';
   var stb = boundsOf(ui.planet, 'streamTrail');
@@ -356,6 +359,8 @@ function buildUI() {
   stInp.value = ui.planet ? ui.planet.params.streamTrail : 6000;
   stInp.oninput = function () { setParam('streamTrail', parseFloat(stInp.value)); };
   stWrap.appendChild(stInp);
+  var stVal = el('span', 'v', '');
+  stWrap.appendChild(stVal);
   panel.appendChild(stWrap);
   ui.knobVals['streamTrail'] = stVal;
   ui.knobInputs['streamTrail'] = stInp;
@@ -426,6 +431,22 @@ function buildUI() {
   });
   panel.appendChild(lvlRow);
 
+  // Ocean calc engine selector (PLAN.md Phase 10): 0=Explicit, 1=Decoupled, 2=Implicit.
+  // Changing it is uniform-only, so no rebuild is triggered.
+  panel.appendChild(el('div', 'lab', 'Ocean calc engine'));
+  var schWrap = el('div');
+  var schSel = document.createElement('select');
+  schSel.className = 'btn';
+  (PARAMS.oceanScheme.opts || []).forEach(function (o) {
+    var op = document.createElement('option');
+    op.value = String(o.v); op.textContent = o.label;
+    schSel.appendChild(op);
+  });
+  schSel.onchange = function () { setParam('oceanScheme', parseInt(schSel.value, 10)); };
+  schWrap.appendChild(schSel);
+  panel.appendChild(schWrap);
+  ui.oceanSchemeSel = schSel;
+
   // tuning
   var tuningToggle = el('button', 'togbtn', '▸ physics tuning knobs');
   ui.tuningToggleBtn = tuningToggle;
@@ -443,6 +464,7 @@ function buildUI() {
     var spec = PARAMS[key];
     if (spec.step === undefined) return;
     if (key === 'streamTrail') return;
+    if (key === 'oceanScheme') return;   // rendered as a <select> above
     var wrap = el('div');
     wrap.style.marginBottom = '10px';
     var kv = el('div', 'kv');
@@ -460,6 +482,7 @@ function buildUI() {
     ui.knobInputs[key] = inp;
     wrap.appendChild(inp);
     tuningSection.appendChild(wrap);
+    if (key === 'implicitIters') ui.implicitItersWrap = wrap;  // greyed unless scheme==2
   });
   var restore = el('button', 'togbtn', 'restore defaults');
   restore.onclick = function () {

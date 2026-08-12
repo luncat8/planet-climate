@@ -21,6 +21,8 @@ const DIR = path.resolve(arg('dir', '/home/user/project'));
 const LEVEL = parseInt(arg('level', '5'), 10);
 const STEPS = parseInt(arg('steps', '500'), 10);
 const PATCH = JSON.parse(arg('params', '{}'));
+const SCHEME_ARG = process.argv.find(a => a.startsWith('--scheme='));
+if (SCHEME_ARG) PATCH.oceanScheme = parseInt(SCHEME_ARG.slice('--scheme='.length), 10);
 const SERIES = process.argv.includes('--series');
 // --marks=0,100,200,...  custom sampling points for the series
 const MARKS_ARG = (process.argv.find(a => a.startsWith('--marks=')) || '').split('=')[1];
@@ -81,10 +83,6 @@ const OUT = arg('out', '');
     function measure() {
       const topS = read(planet.A[0]);
       const topV = read(planet.A[1]);
-      // Air state: LoA/HiA .xy = wind, .z = T, .w = pressure. Index 4/6 in the
-      // same attachment order the harness dumps (loA, loB, hiA, hiB).
-      const loA  = read(planet.A[4]);
-      const hiA  = read(planet.A[6]);
       // bins of 15 deg in |lat|
       const NB = 6;
       const acc = [];
@@ -92,15 +90,6 @@ const OUT = arg('out', '');
       let gh = 0, gs = 0, ge = 0, n = 0;
       let worst = { r: 0, lat: 0 };
       let ge2 = 0, gemax = 0, gsmax = 0, gspd2 = 0, nAll = 0;
-      // Air amplitude over EVERY cell (the atmosphere is not masked by land).
-      let alo2 = 0, ahi2 = 0, alomax = 0, ahimax = 0, aloSum = 0, ahiSum = 0;
-      for (let c = 0; c < V; c++) {
-        const sl = Math.hypot(loA[c*4], loA[c*4+1]);
-        const sh2 = Math.hypot(hiA[c*4], hiA[c*4+1]);
-        alo2 += sl*sl; ahi2 += sh2*sh2; aloSum += sl; ahiSum += sh2;
-        if (sl  > alomax) alomax = sl;
-        if (sh2 > ahimax) ahimax = sh2;
-      }
       for (let c = 0; c < V; c++) {
         if (cellB[c*4+3] > 0.5) continue;           // skip land
         const D = cellC ? cellC[c*4] : planet.params.hTotal;
@@ -155,14 +144,6 @@ const OUT = arg('out', '');
         gMaxEta: +gemax.toPrecision(4),
         gRmsSpd: nAll ? +Math.sqrt(gspd2/nAll).toPrecision(4) : 0,
         gMaxSpd: +gsmax.toPrecision(4),
-        // Air wind magnitude, all cells. aMaxHi is the diagnostic for the
-        // explicit-Coriolis growth: the upper layer has ~6x less friction.
-        aRmsLo: +Math.sqrt(alo2/V).toPrecision(4),
-        aMaxLo: +alomax.toPrecision(4),
-        aMeanLo: +(aloSum/V).toPrecision(4),
-        aRmsHi: +Math.sqrt(ahi2/V).toPrecision(4),
-        aMaxHi: +ahimax.toPrecision(4),
-        aMeanHi: +(ahiSum/V).toPrecision(4),
         worst, bins,
       };
     }
@@ -178,9 +159,7 @@ const OUT = arg('out', '');
         series.push({ step: m, rmsH: s.rmsH, rmsSpd: s.rmsSpd,
                       polar: s.bins[5].rmsH, equat: s.bins[0].rmsH,
                       gRmsEta: s.gRmsEta, gMaxEta: s.gMaxEta,
-                      gRmsSpd: s.gRmsSpd, gMaxSpd: s.gMaxSpd,
-                      aRmsLo: s.aRmsLo, aMaxLo: s.aMaxLo,
-                      aRmsHi: s.aRmsHi, aMaxHi: s.aMaxHi });
+                      gRmsSpd: s.gRmsSpd, gMaxSpd: s.gMaxSpd });
       }
       while (done < STEPS) { planet.step(); done++; }
     } else {

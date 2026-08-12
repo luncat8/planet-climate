@@ -121,6 +121,13 @@ function Planet(canvas, level) {
   this.cam = { theta: 0.6, phi: 0.25, dist: 3.0 };
   this.drag = false; this.lx = 0; this.ly = 0;
   this.disposed = false;
+  /* Per-iteration residual readback for scheme B. Off by default: the readback
+     forces a full GPU->CPU sync (pipeline stall) on every Jacobi iteration,
+     which dominates interactive cost. The harness sets this true to retain the
+     convergence early-exit + residual history without slowing the UI. */
+  this.trackResidual = false;
+  this.residualHistory = [];
+  this.lastJacobiIters = 0;
 
   var self = this;
   this._onDown = function (e) {
@@ -178,6 +185,11 @@ Planet.prototype.mkFbo = function (texs) {
 Planet.prototype.compile = function () {
   var gl = this.gl;
   this.prog.ocean = new Prog(gl, QUAD_VS, OCEAN_FS, 'ocean');
+  this.prog.oceanPredict = new Prog(gl, QUAD_VS, OCEAN_PREDICT_FS, 'oceanPredict');
+  this.prog.oceanRhs = new Prog(gl, QUAD_VS, OCEAN_RHS_FS, 'oceanRhs');
+  this.prog.oceanJacobi = new Prog(gl, QUAD_VS, OCEAN_JACOBI_FS, 'oceanJacobi');
+  this.prog.oceanCorrect = new Prog(gl, QUAD_VS, OCEAN_CORRECT_FS, 'oceanCorrect');
+  this.prog.maxRed = new Prog(gl, QUAD_VS, MAX_FS, 'maxRed');
   this.prog.air = new Prog(gl, QUAD_VS, AIR_FS, 'air');
   this.prog.cplO = new Prog(gl, QUAD_VS, COUPLE_FS('ocean'), 'coupleOcean');
   this.prog.cplA = new Prog(gl, QUAD_VS, COUPLE_FS('air'), 'coupleAir');
@@ -246,6 +258,18 @@ Planet.prototype.build = function (level) {
   this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);   // ocean
   this.fbo.init2 = this.mkFbo([this.A[4], this.A[5], this.A[6], this.A[7]]); // air
 
+  // Scheme-B scratch: predicted ocean state (4 attachments) + two eta ping-pong
+  // textures + a 1x1 max-residual reduction target. Allocated always (cheap).
+  this.P = [this.mkTex(W, H, null), this.mkTex(W, H, null),
+            this.mkTex(W, H, null), this.mkTex(W, H, null)];
+  this.fbo.P = this.mkFbo(this.P);
+  this.texEtaA = this.mkTex(W, H, null);
+  this.texEtaB = this.mkTex(W, H, null);
+  this.fbo.etaA = this.mkFbo([this.texEtaA]);
+  this.fbo.etaB = this.mkFbo([this.texEtaB]);
+  this.texMaxRes = this.mkTex(1, 1, null);
+  this.fbo.maxRes = this.mkFbo([this.texMaxRes]);
+
   var pdata = new Float32Array(this.PW * this.PH * 4);
   var prnd = Grid.mulberry32(((this.params.seed === undefined ? 12345 : this.params.seed) ^ 0x9e37) >>> 0);
   for (var j = 0; j < this.PW * this.PH; j++) {
@@ -283,6 +307,7 @@ Planet.prototype.destroyGrid = function () {
   var gl = this.gl;
   var partTexs = this.part.reduce(function (a, s) { return a.concat(s.tex); }, []);
   var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
+  if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
@@ -386,9 +411,62 @@ Planet.prototype.step = function () {
   // Ocean dynamics: flux-form continuity for h_top, pressure gradient
   // -g*grad(h) on top / +g'*grad(h) on deep, equal-and-opposite inter-layer
   // drag, then tracer advection + diffusion.  A -> B
-  var po = this.prog.ocean.use();
-  this.gridUniforms(po);
-  po.tex('uTopS', this.A[0]).tex('uTopV', this.A[1])
+  if (P.oceanScheme === 2) {
+    this.stepOceanB();                 // implicit free surface (Jacobi)
+  } else {
+    var po = this.prog.ocean.use();
+    this.gridUniforms(po);
+    /* Scheme A (1) decouples the heightmap: drop div(h*u) from continuity (the
+       uScheme gate inside OCEAN_FS) and force the forward-backward / Rhie-Chow
+       corrections inert so no wave-forming feedback can run. Scheme 0 is the
+       unchanged explicit scheme. */
+    var inert = (P.oceanScheme === 1);
+    po.tex('uTopS', this.A[0]).tex('uTopV', this.A[1])
+      .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
+      .f('uDt', P.dt).f('uOmega', P.omegaSpin)
+      .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
+      .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
+      .f('uCdBottom', P.cdBottom).f('uFricDepthRef', P.fricDepthRef)
+      .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
+      .f('uDrag', P.oceanDrag + P.mechanicalFric)
+      .f('uSteric', P.steric).f('uStericRate', P.stericRate)
+      .f('uMassSpring', P.massSpring)
+      .f('uHtot', P.hTotal).f('uHref', P.hTop)
+      .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
+      .f('uRhieChow', inert ? 0 : P.rhieChow)
+      .f('uCoriCN', P.coriCN ? 1 : 0)
+      .f('uFbStab', inert ? 0 : P.fbStab)
+      .i('uScheme', P.oceanScheme | 0);
+    this.fullscreen('dynO', W, H);
+  }
+
+  var pa = this.prog.air.use();
+  this.gridUniforms(pa);
+  pa.tex('uLoA', this.A[4]).tex('uLoB', this.A[5]).tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
+    .f('uDt', P.dt).f('uOmega', P.omegaSpin)
+    .f('uNuVel', P.nuVelAir).f('uNuT', P.nuTAir)
+    .f('uFricLo', P.fricAirLow).f('uFricHi', P.fricAirHigh)
+    .f('uRhoLo', 1.1).f('uRhoHi', 0.55)
+    .f('uCoriCN', P.coriCN ? 1 : 0)
+    .f('uCourantMax', P.airCourantMax)
+    .f('uAirAdvect', P.airAdvect);
+  this.fullscreen('dynA', W, H);
+
+  this.couple();
+  this.simTime += P.dt;
+};
+
+/* Scheme B: implicit free surface via Jacobi iteration over eta.
+   Passes: predictor (A->P) -> RHS probe (P->etaA) -> Jacobi loop (etaA<->etaB)
+   -> correct (P + eta_final -> B). See PLAN.md Phase 10. */
+Planet.prototype.stepOceanB = function () {
+  var W = this.grid.W, H = this.grid.H;
+  var P = this.params;
+
+  // 1. Predictor: advance everything except the pressure gradient. A -> P.
+  var pr = this.prog.oceanPredict.use();
+  this.gridUniforms(pr);
+  pr.tex('uTopS', this.A[0]).tex('uTopV', this.A[1])
     .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
@@ -400,21 +478,64 @@ Planet.prototype.step = function () {
     .f('uMassSpring', P.massSpring)
     .f('uHtot', P.hTotal).f('uHref', P.hTop)
     .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
-    .f('uRhieChow', P.rhieChow).f('uCoriCN', P.coriCN ? 1 : 0)
-    .f('uFbStab', P.fbStab);
+    .f('uRhieChow', 0).f('uCoriCN', P.coriCN ? 1 : 0);
+  this.fullscreen('P', W, H);
+
+  // 2. RHS probe: R = eta_pred - dt*div(h*u*) from the predicted state. P -> etaA.
+  var rr = this.prog.oceanRhs.use();
+  this.gridUniforms(rr);
+  rr.tex('uTopS', this.P[0]).tex('uTopV', this.P[1])
+    .tex('uDeepS', this.P[2]).tex('uDeepV', this.P[3])
+    .f('uDt', P.dt).f('uPgfTop', P.pgfTop);
+  this.fullscreen('etaA', W, H);
+
+  // 3. Jacobi loop with convergence tracking and early-exit.
+  var iters = P.implicitIters | 0;
+  var src = 'etaA', dst = 'etaB';
+  this.residualHistory = [];
+  this.lastJacobiIters = 0;
+  for (var it = 0; it < iters; it++) {
+    var ji = this.prog.oceanJacobi.use();
+    this.gridUniforms(ji);
+    ji.tex('uEtaIn', this[src])
+      .tex('uCellC', this.texCellC)
+      .f('uDt', P.dt).f('uPgfTop', P.pgfTop)
+      .f('uJacobiOmega', 0.8);
+    this.fullscreen(dst, W, H);
+    this.lastJacobiIters = it + 1;
+    if (this.trackResidual) {
+      // Only when validating: read back max |residual| for early-exit + history.
+      var mx = this._maxResidual(dst);
+      this.residualHistory.push(mx);
+      if (!(mx > 0) || mx < 1e-6) { src = dst; break; }   // converged
+    }
+    var t = src; src = dst; dst = t;                      // ping-pong
+  }
+
+  // 4. Correct: apply implicit eta to velocity, advect tracers, entrain. P -> B.
+  var cp = this.prog.oceanCorrect.use();
+  this.gridUniforms(cp);
+  cp.tex('uTopS', this.P[0]).tex('uTopV', this.P[1])
+    .tex('uDeepS', this.P[2]).tex('uDeepV', this.P[3])
+    .tex('uEta', this[src])
+    .f('uDt', P.dt).f('uNuT', P.nuTOcean)
+    .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
+    .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4);
   this.fullscreen('dynO', W, H);
+};
 
-  var pa = this.prog.air.use();
-  this.gridUniforms(pa);
-  pa.tex('uLoA', this.A[4]).tex('uLoB', this.A[5]).tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
-    .f('uDt', P.dt).f('uOmega', P.omegaSpin)
-    .f('uNuVel', P.nuVelAir).f('uNuT', P.nuTAir)
-    .f('uFricLo', P.fricAirLow).f('uFricHi', P.fricAirHigh)
-    .f('uRhoLo', 1.1).f('uRhoHi', 0.55).f('uCoriCN', P.coriCN ? 1 : 0);
-  this.fullscreen('dynA', W, H);
-
-  this.couple();
-  this.simTime += P.dt;
+/* 1-fragment max-reduction of the eta texture's |residual| channel (.w). */
+Planet.prototype._maxResidual = function (texName) {
+  var gl = this.gl;
+  var pr = this.prog.maxRed.use();
+  this.gridUniforms(pr);
+  pr.tex('uSrc', this[texName]).i('uCount', this.grid.V);
+  this.fullscreen('maxRes', 1, 1);
+  var buf = new Float32Array(4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.maxRes);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, buf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return buf[0];
 };
 
 Planet.prototype.stepParticles = function (dt) {
@@ -510,12 +631,13 @@ Planet.prototype.render = function () {
   for (var pi = 0; pi < this.part.length; pi++) {
     if (((P.streamline >> pi) & 1) === 0) continue;
     var ps = this.part[pi];
+    var trail = P.streamTrail * ((ps.velMode === 1 || ps.velMode === 3) ? 10 : 1);
     var pp = this.prog.points.use();
     this.gridUniforms(pp);
     pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
       .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp).f('uEquirect', 0.0)
-      .f('uTrail', P.streamTrail).f('uRadius', PLANET_R)
+      .f('uTrail', trail).f('uRadius', PLANET_R)
       .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
       .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
@@ -572,12 +694,13 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
   for (var pi = 0; pi < this.part.length; pi++) {
     if (((P.streamline >> pi) & 1) === 0) continue;
     var ps = this.part[pi];
+    var trail = P.streamTrail * ((ps.velMode === 1 || ps.velMode === 3) ? 10 : 1);
     var pp = this.prog.points.use();
     this.gridUniforms(pp);
     pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
       .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
-      .f('uTrail', P.streamTrail).f('uRadius', PLANET_R)
+      .f('uTrail', trail).f('uRadius', PLANET_R)
       .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
       .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);

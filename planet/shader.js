@@ -4,6 +4,20 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 `;
+/* Combined Crank-Nicolson Coriolis + implicit linear friction update. Shared
+   by every dynamics program (ocean top/deep, air, init, couple) so the body
+   lives in exactly one place. c = dt*f/2; c = 0 reduces to the plain
+   implicit-friction form. NOTE: c == 0 must return EXACTLY the legacy
+   expression (v0 + dt*acc)/D so the explicit-friction path is preserved. */
+var CORI_FRIC_GLSL = `vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
+  float D = 1.0 + dt*fric;
+  if(c == 0.0) return (v0 + dt*acc)/D;
+  float P = v0.x + dt*acc.x - c*v0.y;
+  float Q = v0.y + dt*acc.y + c*v0.x;
+  float den = D*D + c*c;
+  return vec2(D*P - c*Q, D*Q + c*P)/den;
+}`;
+
 
 // index = uMode; value = GLSL expression for `float v`, referencing the per-cell
 // textures wt/la/lb/ha/hb/wd already in scope. Drives PER-MODE source compilation,
@@ -278,6 +292,8 @@ uniform float uPgfDeepGain;  // multiplier on the deep layer's g'  [-]
 uniform float uRhieChow;     // Rhie-Chow face-velocity smoothing  [-] 0 = legacy
 uniform float uFbStab;       // forward-backward gravity-wave stabiliser [-] 0 = legacy
 uniform float uCoriCN;       // 1 = Crank-Nicolson Coriolis, 0 = legacy explicit
+uniform int   uScheme;       // 0 = current (explicit), 1 = A (decoupled heightmap).
+                             // Scheme 2 (B, implicit) does not use this program.
 
 // Buoyancy anomaly of a layer: positive = warm/fresh = light.
 float buoy(float T, float S){ return uAlphaT*(T-283.0) - uBetaS*(S-35.0); }
@@ -289,18 +305,7 @@ float gPrime(float Tt, float St, float Td, float Sd){
   return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
 }
 
-/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
-   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
-vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
-  float D = 1.0 + dt*fric;
-  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
-     in exact arithmetic but round differently in float32. */
-  if(c == 0.0) return (v0 + dt*acc)/D;
-  float P = v0.x + dt*acc.x - c*v0.y;
-  float Q = v0.y + dt*acc.y + c*v0.x;
-  float den = D*D + c*c;
-  return vec2(D*P - c*Q, D*Q + c*P)/den;
-}
+${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -495,10 +500,16 @@ void main(){
      fixed fbStab=0.5 cost 10% of mean surface speed at L5 but 55% at L7. */
   float nu2 = uFbStab*uDt*uDt*uPgfTop*h0*mDif;
   float fbGain = nu2/(1.0 + nu2);        // -> 0 when stable, -> 1 when stiff
-  float h1 = h0 - uDt*divF
-                + fbGain*uDt*uDt*uPgfTop*h0*lapEta
-                - uDt*uStericRate*(h0 - hEq)
-                - uDt*uMassSpring*(h0 - hRef0);
+  /* Scheme A (uScheme==1) drops the fast div(h*u) transport from the thickness
+     continuity entirely. With uScheme==0 this multiplies divF by exactly 1.0, so
+     the arithmetic path is byte-identical to the original (divF*1.0 == divF in
+     float32). Scheme A still accumulates divF (unused) and leaves the momentum
+     pressure-gradient pointing at the slow steric/E-P signal, so the two-way
+     h<->u wave-formation closure cannot close and no gravity wave can grow. */
+  float h1 = h0 - uDt*divF*(uScheme==1?0.0:1.0)
+                 + fbGain*uDt*uDt*uPgfTop*h0*lapEta
+                 - uDt*uStericRate*(h0 - hEq)
+                 - uDt*uMassSpring*(h0 - hRef0);
   /* Depth-aware clamp: the old fixed [40, uHtot-40] window inverts once the
      column is shallower than 80 m. hLimits() scales the floor with D. */
   h1 = clampH(h1, Dep);
@@ -630,6 +641,429 @@ void main(){
   oDeepV = vec4(vd1, 0.0, 0.0);
 }`;
 
+/* ===========================================================================
+   SCHEME B — implicit free surface, solved by Jacobi iteration (engine.step
+   orchestrates the multi-pass path). Physics in PLAN.md Phase 10.
+
+   The (eta, u) pair is first advanced WITHOUT the pressure gradient (predictor),
+   then the coupled Helmholtz system
+        eta - dt^2 * PGF * h * lap(eta) = R,
+        R = eta_pred - dt*div(h*u*)
+   is solved for eta by damped Jacobi. The velocity is then corrected with the
+   implicit eta in the correct pass and tracers advect on the corrected field.
+   This is unconditionally stable: the stiff gravity-wave mode is solved rather
+   than stepped explicitly. Cost = (1 predictor + 1 rhs + implicitIters jacobi
+   + 1 correct) passes per step.
+   =========================================================================== */
+
+/* Predictor: identical to OCEAN_FS minus the pressure-gradient term (both
+   layers), minus div(h*u) in the continuity, minus tracer transport and minus
+   entrainment. Writes the predicted state (u*, eta_pred thickness, deep u*) to
+   a scratch buffer the correct pass reads. */
+var OCEAN_PREDICT_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oTopS;
+layout(location=1) out vec4 oTopV;
+layout(location=2) out vec4 oDeepS;
+layout(location=3) out vec4 oDeepV;
+
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV;
+uniform float uDt, uOmega, uNuVel, uNuT, uFricTop, uFricDeep, uAlphaT, uBetaS;
+uniform float uCdBottom, uFricDepthRef;
+uniform float uDrag;
+uniform float uSteric, uStericRate;
+uniform float uMassSpring;
+uniform float uHtot, uHref;
+uniform float uPgfTop, uPgfDeepGain;
+uniform float uRhieChow;
+uniform float uCoriCN;
+
+float buoy(float T, float S){ return uAlphaT*(T-283.0) - uBetaS*(S-35.0); }
+float gPrime(float Tt, float St, float Td, float Sd){
+  float rhoT = 1027.0*(1.0 - uAlphaT*(Tt-283.0) + uBetaS*(St-35.0));
+  float rhoD = 1027.0*(1.0 - uAlphaT*(Td-283.0) + uBetaS*(Sd-35.0));
+  return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
+}
+${CORI_FRIC_GLSL}
+
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){
+    oTopS = vec4(0.0); oTopV = vec4(0.0); oDeepS = vec4(0.0); oDeepV = vec4(0.0);
+    return;
+  }
+  vec4 ca = texelFetch(uCellA, cTex(cell), 0);
+  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+  vec3 n = normalize(ca.xyz), e1 = cb.xyz, e2 = cross(e1, n);
+  float area = ca.w, land = cb.w;
+
+  vec4  ts0 = texelFetch(uTopS , cTex(cell), 0);
+  vec4  tv0 = texelFetch(uTopV , cTex(cell), 0);
+  vec2  vt0 = tv0.xy;
+  vec4  ds0 = texelFetch(uDeepS, cTex(cell), 0);
+  vec2  vd0 = texelFetch(uDeepV, cTex(cell), 0).xy;
+  float h0  = ts0.x;
+  float Dep  = cellD(cell);
+  float hRef0= cellHref(cell);
+  float hd0  = Dep - h0;
+  vec2  trT0 = ts0.yz;
+  vec2  trD0 = ds0.xy;
+
+  float gp = gPrime(ts0.y, ts0.z, ds0.x, ds0.y);
+
+  float divF = 0.0;
+  float divT = 0.0, divD = 0.0;
+  vec2  gradH = vec2(0.0);
+  float lapEta = 0.0;
+  float mDif   = 0.0;
+  vec2  lapVt = vec2(0.0), lapVd = vec2(0.0);
+  vec2  advVt = vec2(0.0), advVd = vec2(0.0);
+  vec2  lapTt = vec2(0.0), lapTd = vec2(0.0);
+  vec2  advTt = vec2(0.0), advTd = vec2(0.0);
+
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+    if(na.w < 0.5) continue;
+    int   j = int(na.x);
+    float L = na.y;
+    float d = na.z;
+    vec4  nb = texelFetch(uNbrB, nTex(cell,k), 0);
+    vec2  nrm = nb.xy;
+    vec4  tsj = texelFetch(uTopS , cTex(j), 0);
+    vec4  dsj = texelFetch(uDeepS, cTex(j), 0);
+    vec2  vtj = texelFetch(uTopV , cTex(j), 0).xy;
+    vec2  vdj = texelFetch(uDeepV, cTex(j), 0).xy;
+    float landj = texelFetch(uCellB, cTex(j), 0).w;
+    float wet = (1.0-landj)*(1.0-land);
+
+    vtj = xfer(vtj, nb.z, nb.w) * (1.0-landj);
+    vdj = xfer(vdj, nb.z, nb.w) * (1.0-landj);
+
+    float unT = 0.5*dot(vt0+vtj, nrm)*wet;
+    float unD = 0.5*dot(vd0+vdj, nrm)*wet;
+    float dEtaF  = (tsj.x - h0) - (cellHref(j) - hRef0);
+    // Rhie-Chow is off in the predictor (uRhieChow is supplied as 0).
+    unT -= uRhieChow*uDt*uPgfTop*(dEtaF/d - 0.0)*wet;
+
+    float hFace = 0.5*(h0 + tsj.x);
+    divF += L*hFace*unT;
+    divT += L*unT;
+    divD += L*unD;
+    gradH += L*0.5*dEtaF*nrm*wet;
+    lapEta += (L/d)*dEtaF*wet;
+    mDif   += (L/d)*wet;
+    lapVt += (L/d)*(vtj-vt0)*wet;
+    lapVd += (L/d)*(vdj-vd0)*wet;
+    vec2 trTj = tsj.yz, trDj = dsj.xy;
+    lapTt += (L/d)*(trTj-trT0);
+    lapTd += (L/d)*(trDj-trD0);
+    float wT = unT > 0.0 ? 0.0 : 1.0;
+    float wD = unD > 0.0 ? 0.0 : 1.0;
+    advTt += L*unT*mix(trT0, trTj, wT);
+    advTd += L*unD*mix(trD0, trDj, wD);
+    advVt += L*unT*mix(vt0,  vtj,  wT);
+    advVd += L*unD*mix(vd0,  vdj,  wD);
+  }
+
+  float ia = 1.0/area;
+  divF *= ia; divT *= ia; divD *= ia; gradH *= ia; lapEta *= ia; mDif *= ia;
+  lapVt *= ia; lapVd *= ia; advVt *= ia; advVd *= ia;
+  lapTt *= ia; lapTd *= ia; advTt *= ia; advTd *= ia;
+
+  // ---- CONTINUITY (no div(h*u) term: it is recovered implicitly) ----------
+  float hEq = hRef0 + uSteric*buoy(ts0.y, ts0.z);
+  float h1 = h0
+                 - uDt*uStericRate*(h0 - hEq)
+                 - uDt*uMassSpring*(h0 - hRef0);
+  h1 = clampH(h1, Dep);
+  if(isnan(h1)) h1 = h0;
+  float hd1 = Dep - h1;
+
+  // ---- MOMENTUM (pressure gradient omitted for both layers) ---------------
+  vec2 accT = uNuVel*lapVt - advVt + vt0*divT;
+  vec2 accD = uNuVel*lapVd - advVd + vd0*divD;
+
+  vec2  dv  = vt0 - vd0;
+  float hLo, hHi; hLimits(Dep, hLo, hHi);
+  float dragStrat = 0.1 + 0.9*min(1.0, stratMix(bulkRi(gp, h1, dv)));
+  vec2  tau = uDrag*dragStrat*length(dv)*dv;
+  accT -= tau/(1027.0*max(h1 , hLo));
+  accD += tau/(1027.0*max(hd1, hLo));
+
+  float fCor = 2.0*uOmega*n.y;
+  if(uCoriCN < 0.5){
+    vec3 c3t = -2.0*cross(vec3(0.0,uOmega,0.0), vt0.x*e1 + vt0.y*e2);
+    vec3 c3d = -2.0*cross(vec3(0.0,uOmega,0.0), vd0.x*e1 + vd0.y*e2);
+    accT += vec2(dot(c3t,e1), dot(c3t,e2));
+    accD += vec2(dot(c3d,e1), dot(c3d,e2));
+  }
+  float rBotT = uCdBottom*length(vt0)/max(h1 , hLo);
+  float rBotD = uCdBottom*length(vd0)/max(hd1, hLo);
+  float depthTaper = uFricDepthRef/max(Dep, uFricDepthRef);
+  float topTouchesBed = 1.0 - smoothstep(1.0, 3.0, Dep/max(h1, hLo));
+  float fricT = uFricTop *depthTaper + rBotT*topTouchesBed;
+  float fricD = uFricDeep*depthTaper + rBotD;
+  float cCor = (uCoriCN >= 0.5) ? 0.5*uDt*fCor : 0.0;
+  vec2 vt1 = coriFric(vt0, accT, uDt, fricT, cCor);
+  vec2 vd1 = coriFric(vd0, accD, uDt, fricD, cCor);
+  vt1 *= (1.0-land); vd1 *= (1.0-land);
+  vt1 = clamp(vt1, vec2(-3.0), vec2(3.0));
+  vd1 = clamp(vd1, vec2(-3.0), vec2(3.0));
+  if(any(isnan(vt1))) vt1 = vec2(0.0);
+  if(any(isnan(vd1))) vd1 = vec2(0.0);
+
+  // Tracers and entrainment are deferred to the correct pass (once eta is known).
+  vec2 trT1 = trT0;
+  vec2 trD1 = trD0;
+  if(any(isnan(trT1))) trT1 = trT0;
+  if(any(isnan(trD1))) trD1 = trD0;
+
+  oTopS  = vec4(h1, trT1.x, trT1.y, 0.0);
+  oTopV  = vec4(vt1, vec2(0.0));
+  oDeepS = vec4(trD1.x, trD1.y, 0.0, 0.0);
+  oDeepV = vec4(vd1, 0.0, 0.0);
+}`;
+
+/* RHS probe: evaluate R = eta_pred - dt*div(h*u*) from the predicted state,
+   reusing the same 1-ring FV face-flux stencil as OCEAN_FS. eta_pred is the
+   predictor thickness minus the cell reference. Output (x=eta_pred, y=R). */
+var OCEAN_RHS_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oEta;
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV;
+uniform float uDt, uPgfTop;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oEta = vec4(0.0); return; }
+  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+  float land = cb.w;
+  vec4  ts0 = texelFetch(uTopS, cTex(cell), 0);
+  vec4  tv0 = texelFetch(uTopV, cTex(cell), 0);
+  vec2  vt0 = tv0.xy;
+  float h0  = ts0.x;
+  float hRef0= cellHref(cell);
+  float etaPred = h0 - hRef0;
+
+  float divF = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+    if(na.w < 0.5) continue;
+    int   j = int(na.x);
+    float L = na.y;
+    float d = na.z;
+    vec4  nb = texelFetch(uNbrB, nTex(cell,k), 0);
+    vec2  nrm = nb.xy;
+    vec4  tsj = texelFetch(uTopS , cTex(j), 0);
+    vec2  vtj = texelFetch(uTopV , cTex(j), 0).xy;
+    float landj = texelFetch(uCellB, cTex(j), 0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    vtj = xfer(vtj, nb.z, nb.w) * (1.0-landj);
+    float unT = 0.5*dot(vt0+vtj, nrm)*wet;
+    float hFace = 0.5*(h0 + tsj.x);
+    divF += L*hFace*unT;
+  }
+  float area = texelFetch(uCellA, cTex(cell), 0).w;
+  divF /= area;
+
+  float R = etaPred - uDt*divF;
+  if(isnan(R)) R = etaPred;
+  oEta = vec4(etaPred, R, 0.0, 0.0);
+}`;
+
+/* Jacobi iteration for the implicit eta. Each pass reads the current iterate
+   (x=eta^k, y=R, the fixed RHS) and writes the next iterate, carrying R forward
+   and recording |residual| in .w so the engine can track convergence and
+   early-exit. The Laplacian uses the identical FV stencil as OCEAN_FS. */
+var OCEAN_JACOBI_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oEta;
+uniform sampler2D uEtaIn;
+uniform float uDt, uPgfTop, uJacobiOmega;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oEta = vec4(0.0); return; }
+  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+  float land = cb.w;
+  float hRef0 = cellHref(cell);
+  float etaK = texelFetch(uEtaIn, cTex(cell), 0).x;
+  float R    = texelFetch(uEtaIn, cTex(cell), 0).y;
+
+  float lapEta = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+    if(na.w < 0.5) continue;
+    int   j = int(na.x);
+    float L = na.y;
+    float d = na.z;
+    vec4  nb = texelFetch(uNbrB, nTex(cell,k), 0);
+    vec2  nrm = nb.xy;
+    float etaJ = texelFetch(uEtaIn, cTex(j), 0).x;
+    float landj = texelFetch(uCellB, cTex(j), 0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    float dEtaF = (etaJ - etaK);
+    lapEta += (L/d)*dEtaF*wet;
+  }
+  float area = texelFetch(uCellA, cTex(cell), 0).w;
+  lapEta /= area;
+
+  // h_k is the local top-layer thickness the divergence operator multiplies by.
+  float hK = etaK + hRef0;
+  float res = R - (etaK - uDt*uDt*uPgfTop*hK*lapEta);
+  float etaNew = etaK + uJacobiOmega*res;
+  if(isnan(etaNew)) etaNew = etaK;
+  oEta = vec4(etaNew, R, 0.0, abs(res));
+}`;
+
+/* Correct: apply the implicit eta to the velocity (both layers), advect tracers
+   on the corrected face velocities, and apply entrainment using the implicit
+   interface displacement. Writes the final ocean state (same layout as OCEAN_FS)
+   so the coupling pass, tracer advection, render modes 15/16/17 and particle
+   streaks are all untouched. If eta_final is NaN it falls back to eta_pred
+   (predictor), degrading gracefully to Scheme-A-like behaviour. */
+var OCEAN_CORRECT_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oTopS;
+layout(location=1) out vec4 oTopV;
+layout(location=2) out vec4 oDeepS;
+layout(location=3) out vec4 oDeepV;
+
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV;
+uniform sampler2D uEta;
+uniform float uDt, uNuT, uAlphaT, uBetaS;
+uniform float uPgfTop, uPgfDeepGain;
+
+float buoy(float T, float S){ return uAlphaT*(T-283.0) - uBetaS*(S-35.0); }
+float gPrime(float Tt, float St, float Td, float Sd){
+  float rhoT = 1027.0*(1.0 - uAlphaT*(Tt-283.0) + uBetaS*(St-35.0));
+  float rhoD = 1027.0*(1.0 - uAlphaT*(Td-283.0) + uBetaS*(Sd-35.0));
+  return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
+}
+
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){
+    oTopS = vec4(0.0); oTopV = vec4(0.0); oDeepS = vec4(0.0); oDeepV = vec4(0.0);
+    return;
+  }
+  vec4 ca = texelFetch(uCellA, cTex(cell), 0);
+  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+  float area = ca.w, land = cb.w;
+
+  vec4  ts0 = texelFetch(uTopS , cTex(cell), 0);
+  vec4  tv0 = texelFetch(uTopV , cTex(cell), 0);
+  vec2  vt0 = tv0.xy;
+  vec4  ds0 = texelFetch(uDeepS, cTex(cell), 0);
+  vec2  vd0 = texelFetch(uDeepV, cTex(cell), 0).xy;
+  float h0  = ts0.x;
+  float Dep  = cellD(cell);
+  float hRef0= cellHref(cell);
+  float etaPred = h0 - hRef0;
+  vec2  trT0 = ts0.yz;
+  vec2  trD0 = ds0.xy;
+
+  vec4 etaTex = texelFetch(uEta, cTex(cell), 0);
+  float etaFinal = etaTex.x;
+  if(isnan(etaFinal)) etaFinal = etaPred;          // graceful NaN fallback
+
+  float gp = gPrime(ts0.y, ts0.z, ds0.x, ds0.y);
+
+  float divT = 0.0, divD = 0.0;
+  vec2  gradH  = vec2(0.0);
+  vec2  lapTt = vec2(0.0), lapTd = vec2(0.0);
+  vec2  advTt = vec2(0.0), advTd = vec2(0.0);
+
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+    if(na.w < 0.5) continue;
+    int   j = int(na.x);
+    float L = na.y;
+    float d = na.z;
+    vec4  nb = texelFetch(uNbrB, nTex(cell,k), 0);
+    vec2  nrm = nb.xy;
+    vec4  tsj = texelFetch(uTopS , cTex(j), 0);
+    vec4  dsj = texelFetch(uDeepS, cTex(j), 0);
+    vec2  vtj = texelFetch(uTopV , cTex(j), 0).xy;
+    vec2  vdj = texelFetch(uDeepV, cTex(j), 0).xy;
+    float landj = texelFetch(uCellB, cTex(j), 0).w;
+    float wet = (1.0-landj)*(1.0-land);
+
+    vtj = xfer(vtj, nb.z, nb.w) * (1.0-landj);
+    vdj = xfer(vdj, nb.z, nb.w) * (1.0-landj);
+
+    float etaJ = texelFetch(uEta, cTex(j), 0).x;
+    float dEtaF = (etaJ - etaFinal);
+
+    float unT = 0.5*dot(vt0+vtj, nrm)*wet;
+    float unD = 0.5*dot(vd0+vdj, nrm)*wet;
+    // semi-implicit free-surface pressure correction to the face flux:
+    unT -= uDt*uPgfTop*(dEtaF/d)*wet;
+    unD += uDt*uPgfDeepGain*gp*(dEtaF/d)*wet;
+
+    divT += L*unT;
+    divD += L*unD;
+    gradH += L*0.5*dEtaF*nrm*wet;
+    vec2 trTj = tsj.yz, trDj = dsj.xy;
+    lapTt += (L/d)*(trTj-trT0);
+    lapTd += (L/d)*(trDj-trD0);
+    float wT = unT > 0.0 ? 0.0 : 1.0;
+    float wD = unD > 0.0 ? 0.0 : 1.0;
+    advTt += L*unT*mix(trT0, trTj, wT);
+    advTd += L*unD*mix(trD0, trDj, wD);
+  }
+
+  float ia = 1.0/area;
+  divT *= ia; divD *= ia; gradH *= ia; lapTt *= ia; lapTd *= ia; advTt *= ia; advTd *= ia;
+
+  // central velocity correction (the implicit pressure gradient)
+  vec2 vt1 = vt0 - uDt*uPgfTop*gradH;
+  vec2 vd1 = vd0 + uDt*uPgfDeepGain*gp*gradH;
+  vt1 *= (1.0-land); vd1 *= (1.0-land);
+  vt1 = clamp(vt1, vec2(-3.0), vec2(3.0));
+  vd1 = clamp(vd1, vec2(-3.0), vec2(3.0));
+  if(any(isnan(vt1))) vt1 = vec2(0.0);
+  if(any(isnan(vd1))) vd1 = vec2(0.0);
+
+  // tracers advected with the corrected field
+  vec2 trT1 = trT0 + uDt*(uNuT*lapTt - advTt + trT0*divT);
+  vec2 trD1 = trD0 + uDt*(uNuT*lapTd - advTd + trD0*divD);
+  trT1.x = clamp(trT1.x, 200.0, 360.0); trT1.y = clamp(trT1.y, 5.0, 60.0);
+  trD1.x = clamp(trD1.x, 200.0, 360.0); trD1.y = clamp(trD1.y, 5.0, 60.0);
+  if(any(isnan(trT1))) trT1 = trT0;
+  if(any(isnan(trD1))) trD1 = trD0;
+
+  // entrainment across the interface from the IMPLICIT displacement
+  float dEnt = etaFinal - etaPred;
+  float hLo, hHi; hLimits(Dep, hLo, hHi);
+  float h1Final = etaFinal + hRef0;
+  if(dEnt > 0.0){
+    float f = clamp(dEnt/max(h1Final, hLo), 0.0, 1.0);
+    trT1 += f*(trD1 - trT1);
+  } else if(dEnt < 0.0){
+    float f = clamp(-dEnt/max(Dep - h1Final, hLo), 0.0, 1.0);
+    trD1 += f*(trT1 - trD1);
+  }
+
+  oTopS  = vec4(h1Final, trT1.x, trT1.y, 0.0);
+  oTopV  = vec4(vt1, vec2(0.0));
+  oDeepS = vec4(trD1.x, trD1.y, 0.0, 0.0);
+  oDeepV = vec4(vd1, 0.0, 0.0);
+}`;
+
+/* 1-fragment max-reduction over the .w channel (|residual|). Used by the engine
+   to track Jacobi convergence per iteration and early-exit. Reads the whole grid
+   in one fragment; cheap enough given scheme B is the slow path by design. */
+var MAX_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 o;
+uniform sampler2D uSrc;
+void main(){
+  int W = uDim.x;
+  float m = 0.0;
+  for(int i=0;i<200000;i++){
+    if(i >= uCount) break;
+    int x = i - (i/W)*W;
+    int y = i / W;
+    float v = texelFetch(uSrc, ivec2(x,y), 0).w;
+    if(v > m) m = v;
+  }
+  o = vec4(m, 0.0, 0.0, 1.0);
+}`;
+
 var AIR_FS = SHADER_HEAD + SHADER_COMMON + `
 layout(location=0) out vec4 oLoA;
 layout(location=1) out vec4 oLoB;
@@ -637,11 +1071,9 @@ layout(location=2) out vec4 oHiA;
 layout(location=3) out vec4 oHiB;
 
 uniform sampler2D uLoA, uLoB, uHiA, uHiB;
-uniform float uDt, uOmega, uNuVel, uNuT, uFricLo, uFricHi, uRhoLo, uRhoHi;
-uniform float uCoriCN;       // 1 = Crank-Nicolson Coriolis, 0 = legacy explicit
+uniform float uDt, uOmega, uNuVel, uNuT, uFricLo, uFricHi, uRhoLo, uRhoHi, uCoriCN, uCourantMax, uAirAdvect;
 
-/* Defined below, after stepAir; GLSL needs the prototype first. */
-vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c);
+${CORI_FRIC_GLSL}
 
 void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
              sampler2D tA, sampler2D tB, float fric, float rho,
@@ -673,39 +1105,88 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
     gradP += L*0.5*(aj.w-p0)*nrm;
     lapV  += (L/d)*(vj-v0);
     lapT  += (L/d)*(trj-tr0);
+    /* Explicit upwind face flux. Cap the per-face Courant number so large-dt
+       runs cannot over-diffuse the way the raw upwind scheme does (the source
+       of the dt-dependent wind bias). The cap rescales the normal velocity
+       un -> unEff, used for BOTH momentum and tracer advection and for the
+       divergence term, so the whole transport stays consistent. d is the
+       precomputed center-to-center distance from uNbrA; guard it for
+       degenerate cells. */
     float un = 0.5*dot(v0+vj, nrm);
-    div += L*un;
-    float w = un > 0.0 ? 0.0 : 1.0;
-    advT += L*un*mix(tr0, trj, w);
-    advV += L*un*mix(v0,  vj,  w);
+    float unEff = un;
+    float cour = abs(un) * uDt / max(d, 1.0e-3);
+    if (cour > uCourantMax) unEff = un * (uCourantMax / cour);
+    div += L*unEff;
+    float w = unEff > 0.0 ? 0.0 : 1.0;
+    advT += L*unEff*mix(tr0, trj, w);
+    advV += L*unEff*mix(v0,  vj,  w);
   }
 
   float ia = 1.0/area;
   gradP *= ia; lapV *= ia; lapT *= ia; advV *= ia; advT *= ia; div *= ia;
 
+  /* Optional Semi-Lagrangian air advection (uAirAdvect == 1). Back-trajectory
+     of the cell center along -v0*dt, sample the departure value from the
+     6-ring neighbours (+ the cell itself) by inverse-distance weighting, and
+     fold it into the SAME acc terms the FV path uses (advV/advT with div=0),
+     so pressure-gradient / Coriolis / friction are untouched. This is a
+     comparison scaffold, not the default; FV (capped) remains the default. */
+  if (uAirAdvect > 0.5) {
+    vec2 disp = -v0 * uDt;            // back-trajectory displacement (m)
+    vec2 vDep = vec2(0.0);
+    vec3 trDep = vec3(0.0);
+    float wsum = 0.0;
+    for(int k=0;k<6;k++){
+      vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+      if(na.w < 0.5) continue;
+      int j = int(na.x);
+      float d2 = na.z;
+      vec4 nb = texelFetch(uNbrB, nTex(cell,k), 0);
+      vec2 nrm2 = nb.xy;
+      vec4 aj = texelFetch(tA, cTex(j), 0);
+      vec4 bj = texelFetch(tB, cTex(j), 0);
+      vec2 vj = xfer(aj.xy, nb.z, nb.w);
+      vec3 trj = vec3(aj.z, bj.x, bj.y);
+      vec2 pk = d2 * nrm2;            // neighbour centre position (m)
+      float wgt = 1.0 / (dot(pk - disp, pk - disp) + 1.0e6);
+      vDep += wgt * vj;
+      trDep += wgt * trj;
+      wsum += wgt;
+    }
+    /* include the cell centre itself so a near-zero displacement is stable */
+    float wgt0 = 1.0 / (dot(disp, disp) + 1.0e6);
+    vDep += wgt0 * v0;
+    trDep += wgt0 * tr0;
+    wsum += wgt0;
+    vDep /= wsum;
+    trDep /= wsum;
+    float idt = 1.0 / max(uDt, 1.0e-6);
+    advV = (v0 - vDep) * idt;
+    advT = (tr0 - trDep) * idt;
+    div = 0.0;
+  }
+
   vec2 acc = -gradP/rho + uNuVel*lapV - advV + v0*div;
 
-  /* ---- CORIOLIS -------------------------------------------------------
-     Same defect, and the same fix, as the ocean solver: rotating v by an
-     explicit  v += dt*(-f k x v)  multiplies the speed by sqrt(1+(f*dt)^2)
-     every step instead of preserving it. The upper layer is where this
-     actually bites -- uFricHi is ~6x smaller than uFricLo, so the implicit
-     drag no longer masks the gain, and the jet inflates without bound:
-     measured aMaxHi at dt=1800 reaches 118.9 m/s (clamp-saturated) against
-     ~16 m/s at dt=120. Crank-Nicolson is norm-preserving for any f*dt.
-
-     Legacy explicit path kept verbatim so uCoriCN = 0 is bit-for-bit. */
-  float fCor = 2.0*uOmega*n.y;
+  float f = fric*(1.0 + 2.0*land);
+  float fCor = 2.0*uOmega;
+  /* The air used to add the Coriolis force EXPLICITLY (forward Euler on a pure
+     rotation), which makes |v| grow by sqrt(1+(f*dt)^2) every step and, because
+     the friction is only an implicit denominator, leaves the balanced (geo-
+     strophic) wind dt-DEPENDENT: surface air blows ~3x harder at dt=10 s than at
+     dt=300 s. The ocean already uses the norm-preserving Crank-Nicolson form
+     below; the air must do the same so wind speed no longer depends on dt. */
+  vec2 v1;
   if(uCoriCN < 0.5){
     vec3 v3 = v0.x*e1 + v0.y*e2;
     vec3 c3 = -2.0*cross(vec3(0.0,uOmega,0.0), v3);
     acc += vec2(dot(c3,e1), dot(c3,e2));
+    v1 = (v0 + uDt*acc)/(1.0 + uDt*f);
+  } else {
+    float cCor = 0.5*uDt*fCor;
+    v1 = coriFric(v0, acc, uDt, f, cCor);
   }
-
-  float f = fric*(1.0 + 2.0*land);
-  float cCor = (uCoriCN >= 0.5) ? 0.5*uDt*fCor : 0.0;
-  vec2 v1 = coriFric(v0, acc, uDt, f, cCor);
-  v1 = clamp(v1, vec2(-90.0), vec2(90.0));
+  v1 = clamp(v1, vec2(-60.0), vec2(60.0));
 
   vec3 tr1 = tr0 + uDt*(uNuT*lapT - advT + tr0*div);
   tr1.x = clamp(tr1.x, 150.0, 360.0);
@@ -716,19 +1197,6 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
 
   outA = vec4(v1, tr1.x, p0);
   outB = vec4(tr1.y, tr1.z, b0.z, b0.w);
-}
-
-/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
-   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
-vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
-  float D = 1.0 + dt*fric;
-  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
-     in exact arithmetic but round differently in float32. */
-  if(c == 0.0) return (v0 + dt*acc)/D;
-  float P = v0.x + dt*acc.x - c*v0.y;
-  float Q = v0.y + dt*acc.y + c*v0.x;
-  float den = D*D + c*c;
-  return vec2(D*P - c*Q, D*Q + c*P)/den;
 }
 
 void main(){
@@ -788,18 +1256,7 @@ float meanInsol(float lat, float decl){
   return max(0.0,(h0*sin(lat)*sin(decl) + cos(lat)*cos(decl)*sin(h0))/3.14159265);
 }
 
-/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
-   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
-vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
-  float D = 1.0 + dt*fric;
-  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
-     in exact arithmetic but round differently in float32. */
-  if(c == 0.0) return (v0 + dt*acc)/D;
-  float P = v0.x + dt*acc.x - c*v0.y;
-  float Q = v0.y + dt*acc.y + c*v0.x;
-  float den = D*D + c*c;
-  return vec2(D*P - c*Q, D*Q + c*P)/den;
-}
+${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -992,18 +1449,7 @@ layout(location=1) out vec4 oTopV;    // (u_top, v_top, _, _)
 layout(location=2) out vec4 oDeepS;   // (T_deep, S_deep, _, _)
 layout(location=3) out vec4 oDeepV;   // (u_deep, v_deep, _, _)
 uniform float uSeed, uHtop, uHtotal;
-/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
-   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
-vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
-  float D = 1.0 + dt*fric;
-  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
-     in exact arithmetic but round differently in float32. */
-  if(c == 0.0) return (v0 + dt*acc)/D;
-  float P = v0.x + dt*acc.x - c*v0.y;
-  float Q = v0.y + dt*acc.y + c*v0.x;
-  float den = D*D + c*c;
-  return vec2(D*P - c*Q, D*Q + c*P)/den;
-}
+${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
@@ -1030,18 +1476,7 @@ layout(location=1) out vec4 oLoB;
 layout(location=2) out vec4 oHiA;
 layout(location=3) out vec4 oHiB;
 uniform float uSeed;
-/* Combined Crank-Nicolson Coriolis + implicit linear friction update.
-   c = dt*f/2; c = 0 reduces to the plain implicit-friction form. */
-vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, float c){
-  float D = 1.0 + dt*fric;
-  /* c == 0 must return EXACTLY the legacy expression: D*P/(D*D) and P/D agree
-     in exact arithmetic but round differently in float32. */
-  if(c == 0.0) return (v0 + dt*acc)/D;
-  float P = v0.x + dt*acc.x - c*v0.y;
-  float Q = v0.y + dt*acc.y + c*v0.x;
-  float den = D*D + c*c;
-  return vec2(D*P - c*Q, D*Q + c*P)/den;
-}
+${CORI_FRIC_GLSL}
 
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;

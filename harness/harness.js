@@ -19,6 +19,8 @@ const STEPS  = parseInt(arg('steps', '500'), 10);
 const LEVEL  = parseInt(arg('level', '5'), 10);
 const OUT    = arg('out', '');
 const PATCH  = JSON.parse(arg('params', '{}'));
+const SCHEME_ARG = process.argv.find(a => a.startsWith('--scheme='));
+if (SCHEME_ARG) PATCH.oceanScheme = parseInt(SCHEME_ARG.slice('--scheme='.length), 10);
 const LEGACY_SEED = process.argv.includes('--legacy-seed');
 /* Grid seed. Must be 12345 -- the default the original `new Grid(level)` used
    -- or the continents differ and no comparison against the pristine baseline
@@ -76,6 +78,10 @@ const SEED   = 12345;
        physics regression. */
     if (LEGACY_SEED && planet.seedRand) planet.seedRand = () => 0.5;
     planet.reset();
+    /* Enable per-iteration residual readback for scheme B so the early-exit and
+       residual history are exercised during validation (off in the interactive
+       UI, where the readback stall would dominate frame time). */
+    planet.trackResidual = true;
 
     // ---- run ---------------------------------------------------------------
     // step() only; particles are decoupled from the physical state and use
@@ -187,6 +193,8 @@ const SEED   = 12345;
       nanCount,
       simTime: planet.simTime,
       hasCellC: !!cellC,
+      lastJacobiIters: planet.lastJacobiIters,
+      residualHistory: planet.residualHistory,
       diag: {
         volume, heat, salt, area,
         maxTopSpd: +maxTopSpd.toPrecision(6),

@@ -22,8 +22,6 @@ const H = parseInt(arg('h', EQUI ? 512 : 700), 10);
 (async () => {
   const browser = await puppeteer.launch({
     headless: 'new',
-    protocolTimeout: 0,   // long runs exceed the 180s CDP default
-
     args: ['--no-sandbox', '--use-gl=swiftshader', '--enable-unsafe-swiftshader',
            '--disable-dev-shm-usage'],
   });
