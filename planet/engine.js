@@ -492,7 +492,11 @@ Planet.prototype.couple = function () {
       .f('uNoise', P.noise).f('uGreenhouse', P.greenhouse)
       .f('uSurfMass', P.surfMass)
       .f('uVertHeat', P.verticalHeat).f('uVertSalt', P.verticalSalt)
-      .f('uHtot', P.hTotal);
+      .f('uHtot', P.hTotal)
+      .f('uAirCs', P.airCs === undefined ? 40 : P.airCs)
+      .f('uAirPRelax', P.airPRelax === undefined ? 8e-6 : P.airPRelax)
+      .f('uAirDpdT', P.airDpdT === undefined ? 180 : P.airDpdT)
+      .f('uAirDpdTHi', P.airDpdTHi === undefined ? 200 : P.airDpdTHi);
     self.fullscreen(pair[0], W, H);
   });
 };
@@ -558,7 +562,9 @@ Planet.prototype.step = function () {
     .f('uRhoLo', 1.1).f('uRhoHi', 0.55)
     .f('uCoriCN', P.coriCN ? 1 : 0)
     .f('uCourantMax', P.airCourantMax)
-    .f('uAirAdvect', P.airAdvect);
+    .f('uAirAdvect', P.airAdvect === undefined ? 0 : (P.airAdvect | 0))
+    .f('uAirCs', P.airCs === undefined ? 40 : P.airCs)
+    .f('uAirFbStab', P.airFbStab === undefined ? 20 : P.airFbStab);
   this.fullscreen('dynA', W, H);
 
   this.couple();

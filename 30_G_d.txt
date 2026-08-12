@@ -1,0 +1,5 @@
+Add planet size, gravity, and atmospheric density parameters — what needs to be changed? So that presets for the Moon and Venus can be available.
+
+Create an English prompt for requesting such a refactoring. The model is smart — it will figure it out itself, but the functionality needs to be requested.
+
+I expect new presets for the Moon and Venus. Settings for size, gravity, and atmospheric density. If the greenhouse effect is implemented here — then some parameter for greenhouse gases.

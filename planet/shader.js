@@ -1072,6 +1072,8 @@ layout(location=3) out vec4 oHiB;
 
 uniform sampler2D uLoA, uLoB, uHiA, uHiB;
 uniform float uDt, uOmega, uNuVel, uNuT, uFricLo, uFricHi, uRhoLo, uRhoHi, uCoriCN, uCourantMax, uAirAdvect;
+uniform float uAirCs;        // baroclinic gravity-wave speed; 0 = keep P diagnostic
+uniform float uAirFbStab;    // forward-backward damper for the (P, u) wave
 
 ${CORI_FRIC_GLSL}
 
@@ -1087,7 +1089,7 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
 
   vec2 gradP = vec2(0.0), lapV = vec2(0.0), advV = vec2(0.0);
   vec3 lapT  = vec3(0.0), advT = vec3(0.0);
-  float div = 0.0;
+  float div = 0.0, lapP = 0.0, mDif = 0.0;
 
   for(int k=0;k<6;k++){
     vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
@@ -1120,10 +1122,13 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
     float w = unEff > 0.0 ? 0.0 : 1.0;
     advT += L*unEff*mix(tr0, trj, w);
     advV += L*unEff*mix(v0,  vj,  w);
+    lapP  += (L/d)*(aj.w-p0);
+    mDif  += (L/d);
   }
 
   float ia = 1.0/area;
   gradP *= ia; lapV *= ia; lapT *= ia; advV *= ia; advT *= ia; div *= ia;
+  lapP *= ia; mDif *= ia;
 
   /* Optional Semi-Lagrangian air advection (uAirAdvect == 1). Back-trajectory
      of the cell center along -v0*dt, sample the departure value from the
@@ -1169,7 +1174,12 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   vec2 acc = -gradP/rho + uNuVel*lapV - advV + v0*div;
 
   float f = fric*(1.0 + 2.0*land);
-  float fCor = 2.0*uOmega;
+  /* Traditional Coriolis f = 2Ω sinφ (n.y = sin latitude). The air used to
+     run CN on an f-plane f=2Ω, which kills the β effect: no Rossby-wave
+     drift, and the same rotation rate at the equator as at the pole. The
+     explicit path already used the 3-D cross product (≡ 2Ω n.y in-plane);
+     CN must match. */
+  float fCor = 2.0*uOmega*n.y;
   /* The air used to add the Coriolis force EXPLICITLY (forward Euler on a pure
      rotation), which makes |v| grow by sqrt(1+(f*dt)^2) every step and, because
      the friction is only an implicit denominator, leaves the balanced (geo-
@@ -1195,7 +1205,26 @@ void stepAir(int cell, vec3 n, vec3 e1, vec3 e2, float area, float land,
   if(any(isnan(v1))) v1 = vec2(0.0);
   if(any(isnan(tr1))) tr1 = tr0;
 
-  outA = vec4(v1, tr1.x, p0);
+  /* Prognostic air pressure. Linearised baroclinic shallow water:
+       ∂P/∂t = -c² ρ ∇·u
+     plus the same forward-backward Laplacian damper the ocean uses on eta.
+     uAirCs = 0 keeps P as a diagnostic the couple pass overwrites from T
+     (legacy: vortices sit still, slaved to the standing thermal field). */
+  float p1 = p0;
+  if(uAirCs > 0.5){
+    float cs2 = uAirCs*uAirCs;
+    float nu2 = uAirFbStab*uDt*uDt*cs2*mDif;
+    float fbGain = nu2/(1.0 + nu2);
+    /* Linearised continuity only. Advecting p' (flux form) drained column
+       mass and drove high-air P into the 15 kPa floor inside a day. Vorticity
+       still travels with the wind; P adjusts geostrophically. */
+    p1 = p0 - uDt*cs2*rho*div + fbGain*uDt*uDt*cs2*lapP;
+    p1 = clamp(p1, p0 - 8000.0, p0 + 8000.0);
+    p1 = clamp(p1, 15000.0, 130000.0);
+    if(isnan(p1)) p1 = p0;
+  }
+
+  outA = vec4(v1, tr1.x, p1);
   outB = vec4(tr1.y, tr1.z, b0.z, b0.w);
 }
 
@@ -1238,6 +1267,11 @@ uniform float uSurfMass;   // extra uniform surface mass forcing on h_top (m/s)
 uniform float uVertHeat;   // vertical heat exchange coeff [W/m^2/K]
 uniform float uVertSalt;   // vertical salt exchange coeff [kg/m^2/s per ppt]
 uniform float uHtot;       // total ocean depth [m]
+
+uniform float uAirCs;      // 0 = overwrite P from T (legacy); else relax toward it
+uniform float uAirPRelax;  // 1/s nudge of prognostic P toward thermal P(T)
+uniform float uAirDpdT;    // Pa/K low-air thermal P
+uniform float uAirDpdTHi;  // Pa/K high-air thermal P
 
 const float Le   = 2.5e6;
 const float cpA  = 1004.0;
@@ -1427,8 +1461,22 @@ void main(){
      at the default timestep. */
   Tl += uNoise * nz * (uDt / 60.0);
 
-  float Pl = 101325.0 - 60.0*(Tl - 288.0) + 25.0*(Th - 250.0);
-  float Ph = 45000.0  + 75.0*(0.5*(Tl + Th) - 268.0);
+  /* Thermal diagnostic P(T). Used as the sole air pressure when uAirCs==0
+     (legacy: wind is slaved to a standing T field, so cells never travel).
+     Otherwise this is only a relaxation TARGET: the air step integrates
+     ∂P/∂t = -c²ρ∇·u, and we nudge toward P_therm on a ~day timescale so
+     Hadley/Walker stay thermally driven without instantly wiping eddies. */
+  float PlTh = 101325.0 - uAirDpdT*(Tl - 288.0) + 0.4*uAirDpdT*(Th - 250.0);
+  float PhTh = 45000.0  + uAirDpdTHi*(0.5*(Tl + Th) - 268.0);
+  float Pl, Ph;
+  if(uAirCs < 0.5){
+    Pl = PlTh;
+    Ph = PhTh;
+  } else {
+    float a = 1.0 - exp(-uAirPRelax*uDt);
+    Pl = mix(la.w, PlTh, a);
+    Ph = mix(ha.w, PhTh, a);
+  }
 
   Ts = clamp(Ts, 200.0, 360.0);  Td = clamp(Td, 200.0, 360.0);
   Tl = clamp(Tl, 150.0, 360.0);  Th = clamp(Th, 150.0, 360.0);
@@ -1493,9 +1541,13 @@ void main(){
   float lat = asin(clamp(n.y,-1.0,1.0));
   float c2 = cos(lat)*cos(lat);
   float rn = hash21(vec2(float(cell), uSeed+7.0))-0.5;
-  oLoA = vec4(rn*0.5, rn*0.5, 268.0 + 30.0*c2 + rn*1.2, 101325.0);
+  float Tl0 = 268.0 + 30.0*c2 + rn*1.2;
+  float Th0 = 232.0 + 12.0*c2 + rn*0.6;
+  float Pl0 = 101325.0 - 180.0*(Tl0 - 288.0) + 72.0*(Th0 - 250.0);
+  float Ph0 = 45000.0  + 200.0*(0.5*(Tl0 + Th0) - 268.0);
+  oLoA = vec4(rn*0.5, rn*0.5, Tl0, Pl0);
   oLoB = vec4(0.004*c2, 0.0, 0.0, 0.0);
-  oHiA = vec4(rn*0.5, rn*0.5, 232.0 + 12.0*c2 + rn*0.6, 45000.0);
+  oHiA = vec4(rn*0.5, rn*0.5, Th0, Ph0);
   oHiB = vec4(0.0008*c2, 0.0, 0.0, 0.0);
 }`;
 

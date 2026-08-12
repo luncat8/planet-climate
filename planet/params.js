@@ -21,7 +21,34 @@ var PARAMS = {
   greenhouse:{ label: 'Greenhouse',           default: 0.55,  min: 0,   max: 1,    step: 0.01 },
   nuVelAir:  { label: 'Air viscosity ν',      default: 1.6e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
   nuTAir:    { label: 'Air heat diffusion',   default: 1.1e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
-  fricAirLow:{ label: 'Surface friction',     default: 1.6e-5, min: 0,   max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
+  /* 1.6e-5 s^-1 is a 17-hour e-folding — any free vortex dies before it can
+     propagate. 4e-6 (~3 days) is still stronger than a bulk Ekman layer on a
+     5 km column, but it lets synoptic eddies live long enough to move. */
+  fricAirLow:{ label: 'Surface friction',     default: 4e-6, min: 0,   max: 8e-5, step: 1e-6, fmt: function (v) { return v.toExponential(1); } },
+  /* Equivalent gravity-wave speed for the prognostic air pressure
+     (baroclinic shallow-water analog, c = sqrt(g He)). 0 = legacy
+     diagnostic P(T) only — vortices then sit still, slaved to T.
+     ~40 m/s → He ≈ 160 m, mid-lat deformation radius ~400 km. */
+  airCs:     { label: 'Air wave speed c',     default: 40,   min: 0, max: 120, step: 2,
+    fmt: function (v) { return v <= 0 ? 'diagnostic P' : v.toFixed(0) + ' m/s'; },
+    tip: 'Prognostic air pressure wave speed. 0 restores the old T-only diagnostic P (static cells).' },
+  /* Rate (1/s) at which prognostic P is nudged toward the thermal
+     diagnostic. ~8e-6 ≈ 1.5 day: Hadley/Walker stay thermally driven,
+     synoptic anomalies are not instantly overwritten. */
+  airPRelax: { label: 'Air P thermal relax',  default: 8e-6, min: 0, max: 5e-5, step: 1e-6,
+    fmt: function (v) { return v <= 0 ? 'off' : (1 / v / 86400).toFixed(1) + ' d'; },
+    tip: 'How fast prognostic P is pulled toward the thermal P(T). Slower = freer weather.' },
+  airFbStab: { label: 'Air gravity-wave stab.', default: 20, min: 0, max: 100, step: 1,
+    tip: 'Forward-backward damper for the explicit air (P, u) gravity wave. Same idea as the ocean fbStab. 0 = plain explicit.' },
+  /* Hydrostatic column: ρ g H / T ≈ 1.1*9.81*5000/288 ≈ 187 Pa/K.
+     The old 60 Pa/K produced a ~1.6 m/s thermal wind — too weak for
+     baroclinic instability to beat friction, so cells sat still. */
+  airDpdT:   { label: 'Air dP/dT (low)',      default: 180,  min: 0, max: 400, step: 5,
+    fmt: function (v) { return v.toFixed(0) + ' Pa/K'; },
+    tip: 'How strongly low-air temperature sets the thermal pressure target. Larger = stronger jet, more mobile eddies.' },
+  airDpdTHi: { label: 'Air dP/dT (high)',     default: 200,  min: 0, max: 500, step: 5,
+    fmt: function (v) { return v.toFixed(0) + ' Pa/K'; },
+    tip: 'High-air thermal pressure coefficient. Larger = stronger upper jet.' },
   /* Face Courant cap for the explicit air advection. The air momentum/tracer
      advection in stepAir is explicit upwind, so its effective Courant |u|*dt/d
      grows with dt; at large dt the upwind scheme over-diffuses (spuriously
@@ -227,7 +254,7 @@ var BUILTIN_PRESETS = {
     /* Уменьшаем трение о дно в абиссали, чтобы глубинные течения не гасли мгновенно (default 2.5e-3) */
     cdBottom:       { v: 1.5e-3 },
     
-    /* Увеличиваем поверхностное трение воздуха для более реалистичного приземного слоя (default 1.6e-5) */
+    /* Увеличиваем поверхностное трение воздуха для более реалистичного приземного слоя (default 4e-6) */
     fricAirLow:     { v: 3e-5 },
     
     /* Усиливаем связь между верхним и глубинным слоем океана (default sum ~3.5e-3 -> new ~5.5e-3) */
