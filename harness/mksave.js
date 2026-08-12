@@ -1,12 +1,14 @@
 /* mksave.js — generate a pre-equilibrated simulation state and write it to a
- * .sav file (JSON: params + 8 base64-encoded float textures).
+ * .js file (a `window.PLANET_STATE = {...}` assignment: params + 8 base64-
+ * encoded float textures).
  *
  * Purpose: let tests (and the app's Import button) start from a state that has
  * already run for many simulated days, instead of waiting for the sim to reach
- * equilibrium every time.
+ * equilibrium every time. The .js form loads via a plain <script> tag, so it
+ * works from file:// without fetch/CORS.
  *
  *   node mksave.js --dir=/media/sf_1/planet242/planet --level=5 --days=20 \
- *                  --out=/media/sf_1/planet242/harness/saves/equilibrium_L5.sav
+ *                  --out=/media/sf_1/planet242/harness/saves/equilibrium_L5.js
  *
  * The page context builds the Planet, runs `days` of simulated time, serializes
  * + encodes the state, then round-trips it (decode+apply) to prove the codec
@@ -23,7 +25,7 @@ function arg(name, dflt) {
 const DIR = arg('dir', '/media/sf_1/planet242/planet');
 const LEVEL = parseInt(arg('level', '5'), 10);
 const DAYS = parseFloat(arg('days', '20'));
-const OUT = arg('out', path.resolve(__dirname, 'saves', 'equilibrium_L' + LEVEL + '.sav'));
+const OUT = arg('out', path.resolve(__dirname, 'saves', 'equilibrium_L' + LEVEL + '.js'));
 
 (async () => {
   for (const f of ['geodesics.js', 'shader.js', 'params.js', 'engine.js']) {
@@ -86,7 +88,7 @@ const OUT = arg('out', path.resolve(__dirname, 'saves', 'equilibrium_L' + LEVEL 
   await browser.close();
 
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
-  fs.writeFileSync(OUT, JSON.stringify(res.enc));
+  fs.writeFileSync(OUT, 'window.PLANET_STATE = ' + JSON.stringify(res.enc) + ';\n');
 
   console.log('generated', OUT);
   console.log('  level', res.level, 'days', res.days, 'steps', res.steps, 'ms/step', res.msPerStep);

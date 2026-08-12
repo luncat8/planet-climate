@@ -80,6 +80,10 @@
 <script src="shader.js"></script>      <!-- GLSL program sources -->
 <script src="params.js"></script>      <!-- PARAMS schema + pure preset/model helpers -->
 <script src="engine.js"></script>      <!-- m4, Prog, Planet renderer -->
+<!-- Default state. Loaded as a plain <script> so it works from file:// without
+     fetch/CORS; it sets window.PLANET_STATE. Missing / empty ({}) / broken just
+     leaves it undefined and the app starts from fresh initial conditions. -->
+<script src="planet_state.js"></script>
 <script src="app.js"></script>         <!-- UI + bootstrap; calls boot() -->
 <script src="screenshot.js"></script>   <!-- captureProjectionMap(): projection screenshot + save link -->
 </body>

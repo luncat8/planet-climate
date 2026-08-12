@@ -3,3 +3,17 @@ implement save/load
  parameters and current state
 think how good to use it in tests so if i ask something you know to start from existing save that is already reach equilibrum or some state without wait simulation achieve it. 
 i think better place it instead of reset buton - dropdown with saves 1st item in list is reset (act as reset button)
+
+
+
+ make save in js. and also load default planet_state.js by default
+so it is easy works with file:// without problems
+so available state - load it. if {} empty or broken - use current init
+
+
+add agents md to mention to use this save file when test stationary process. so the system will be loaded already in equilibrum and stable state without transient
+
+
+improve list of saves. currently loaded save file not in list. but it should be active .  because currently active is reset and if user select reset it do not change and not fire   event.
+
+

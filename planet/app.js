@@ -215,7 +215,7 @@ function updateViewportInfo() {
 }
 
 /* ============ state snapshot save / load ============ */
-function rebuildSaveDropdown() {
+function rebuildSaveDropdown(activeValue) {
   var sel = ui.saveSel; if (!sel) return;
   sel.innerHTML = '';
   var o0 = document.createElement('option');
@@ -226,11 +226,16 @@ function rebuildSaveDropdown() {
     o.value = String(i); o.textContent = s.name;
     sel.appendChild(o);
   });
+  // Reflect the actually-active state in the dropdown so it doesn't silently
+  // show "Reset" while a saved state is the live one. Setting value does not
+  // fire onchange, so this never re-applies the state.
+  if (activeValue !== undefined && activeValue !== null) sel.value = activeValue;
 }
 function saveCurrent() {
   var p = ui.planet; if (!p) return;
-  ui.saves.push({ name: 'save ' + (ui.saves.length + 1), state: p.serializeState() });
-  rebuildSaveDropdown();
+  var idx = ui.saves.length;
+  ui.saves.push({ name: 'save ' + (idx + 1), state: p.serializeState() });
+  rebuildSaveDropdown(String(idx));
   persistSaves();
 }
 function loadSave(idx) {
@@ -243,20 +248,20 @@ function loadSave(idx) {
 function exportState() {
   var p = ui.planet; if (!p) return;
   var enc = encodePlanetState(p.serializeState());
-  var blob = new Blob([JSON.stringify(enc)], { type: 'application/json' });
+  var blob = new Blob([planetStateToJS(enc)], { type: 'application/javascript' });
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
-  a.href = url; a.download = 'planet_state.sav'; a.click(); a.remove();
+  a.href = url; a.download = 'planet_state.js'; a.click(); a.remove();
   URL.revokeObjectURL(url);
 }
 function importState(file) {
   var r = new FileReader();
   r.onload = function () {
     try {
-      var st = decodePlanetState(JSON.parse(r.result));
+      var st = decodePlanetState(readPlanetStateJS(r.result));
       ui.planet.applyState(st);
       ui.saves.push({ name: file.name, state: st });
-      rebuildSaveDropdown();
+      rebuildSaveDropdown(String(ui.saves.length - 1));
       persistSaves();
       refreshDynamic();
     } catch (e) { showError('Invalid state file: ' + (e && e.message ? e.message : e)); }
@@ -265,7 +270,7 @@ function importState(file) {
 }
 /* Cross-reload persistence: store only the parameter/clock settings (tiny and
    instant). The full fluid state lives in the in-memory GPU snapshots (dropdown)
-   during a session and is exported/imported as a .sav file when needed — keeping
+   during a session and is exported/imported as a .js file when needed — keeping
    localStorage out of the multi-megabyte readback/encode path entirely. */
 function persistSaves() {
   try {
@@ -375,17 +380,17 @@ function buildUI() {
   row.appendChild(saveBtn);
 
   var stateExpBtn = el('button', 'btn', '⤓');
-  stateExpBtn.title = 'Export current state to a .sav file';
+  stateExpBtn.title = 'Export current state to a .js file';
   stateExpBtn.style.flex = '0 0 auto';
   stateExpBtn.onclick = function () { exportState(); };
   row.appendChild(stateExpBtn);
 
   var fileInp = document.createElement('input');
-  fileInp.type = 'file'; fileInp.accept = '.sav,application/json';
+  fileInp.type = 'file'; fileInp.accept = '.js,application/javascript';
   fileInp.style.display = 'none';
   fileInp.onchange = function () { if (fileInp.files && fileInp.files[0]) importState(fileInp.files[0]); fileInp.value = ''; };
   var impBtn = el('button', 'btn', '⤒');
-  impBtn.title = 'Import state from a .sav file';
+  impBtn.title = 'Import state from a .js file';
   impBtn.style.flex = '0 0 auto';
   impBtn.onclick = function () { fileInp.click(); };
   row.appendChild(impBtn); row.appendChild(fileInp);
@@ -702,7 +707,13 @@ function boot() {
   restoreSaves();
   buildUI();
   try {
-    var p = new Planet(canvas, 5);
+    // Default state: planet_state.js is loaded via <script> in index.html and
+    // lands on window.PLANET_STATE. When it is a real (non-empty) state we start
+    // from it; when it is {} / missing / broken we keep the fresh init below.
+    var st = window.PLANET_STATE;
+    var bootLevel = (st && st.level) ? st.level : 5;
+    var loadedState = false;
+    var p = new Planet(canvas, bootLevel);
     p.onStats = function (s) {
       ui.stats = s;
       ui.fpsEls.fps.textContent = s.fps.toFixed(0) + ' fps';
@@ -712,13 +723,26 @@ function boot() {
       ui.fpsEls.lvlSpan.textContent = String(s.level);
     };
     ui.planet = p;
-    if (ui.persistedSettings) {
+    if (st && st.level && Array.isArray(st.A) && st.A.length === 8) {
+      try {
+        var decoded = decodePlanetState(st);
+        p.applyState(decoded);
+        // Register the loaded save so it appears in the list and the dropdown
+        // shows it as the active state (instead of silently sitting on Reset).
+        ui.saves.push({ name: 'default', state: decoded });
+        loadedState = true;
+      }
+      catch (e) { loadedState = false; /* broken state -> use fresh init */ }
+    }
+    if (!loadedState && ui.persistedSettings) {
       try {
         p.params = Object.assign(defaultParams(), ui.persistedSettings.params);
         p.bounds = Object.assign({}, ui.persistedSettings.bounds || {});
         p.simTime = ui.persistedSettings.simTime || 0;
       } catch (e) { /* ignore corrupt settings */ }
     }
+    // Make the dropdown reflect the loaded default (active) instead of Reset.
+    if (loadedState) rebuildSaveDropdown('0');
     refreshDynamic();
   } catch (e) {
     showError(e && e.message ? e.message : String(e));

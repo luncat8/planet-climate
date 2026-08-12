@@ -10,7 +10,7 @@ const path = require('path');
 function arg(n, d){ const h=process.argv.find(a=>a.startsWith('--'+n+'=')); return h?h.slice(n.length+3):d; }
 const DIR = arg('dir', '/media/sf_1/planet242/planet');
 const LEVEL = parseInt(arg('level','5'),10);
-const SAVE = arg('save', path.resolve(__dirname,'saves','equilibrium_L5.sav'));
+const SAVE = arg('save', path.resolve(__dirname,'saves','equilibrium_L5.js'));
 
 (async () => {
   const browser = await puppeteer.launch({ headless:'new', protocolTimeout:600000,

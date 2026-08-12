@@ -1,9 +1,13 @@
 /* loadsave_test.js — verify the save/load workflow used by the app UI and by
- * tests: load a pre-equilibrated .sav file and confirm the sim starts already
- * evolved (no 20-day wait) and keeps evolving.
+ * tests: load a pre-equilibrated .js state file and confirm the sim starts
+ * already evolved (no 20-day wait) and keeps evolving.
+ *
+ * The .js file is `window.PLANET_STATE = {...}` so it loads via a plain
+ * <script> tag (works from file://). Here we read it as text and run it through
+ * readPlanetStateJS() (defined in engine.js) — the same path the app uses.
  *
  *   node loadsave_test.js --dir=/media/sf_1/planet242/planet \
- *        --save=/media/sf_1/planet242/harness/saves/equilibrium_L5.sav
+ *        --save=/media/sf_1/planet242/harness/saves/equilibrium_L5.js
  */
 const puppeteer = require('/media/sf_1/planet242/harness/node_modules/puppeteer');
 const fs = require('fs');
@@ -14,10 +18,9 @@ function arg(name, dflt) {
   return hit ? hit.slice(name.length + 3) : dflt;
 }
 const DIR = arg('dir', '/media/sf_1/planet242/planet');
-const SAVE = arg('save', path.resolve(__dirname, 'saves', 'equilibrium_L5.sav'));
+const SAVE = arg('save', path.resolve(__dirname, 'saves', 'equilibrium_L5.js'));
 
 (async () => {
-  const enc = JSON.parse(fs.readFileSync(SAVE, 'utf8'));
   const browser = await puppeteer.launch({
     headless: 'new', protocolTimeout: 600000,
     args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
@@ -32,10 +35,11 @@ const SAVE = arg('save', path.resolve(__dirname, 'saves', 'equilibrium_L5.sav'))
     await page.addScriptTag({ content: fs.readFileSync(path.join(DIR, f), 'utf8') });
   }
 
-  const res = await page.evaluate(async (enc) => {
+  const res = await page.evaluate(async (txt) => {
     Math.random = () => 0.5;
     window.requestAnimationFrame = () => 0;
     window.cancelAnimationFrame = () => {};
+    const enc = readPlanetStateJS(txt);   // same as <script src="planet_state.js"> + window.PLANET_STATE
     const planet = new Planet(document.getElementById('c'), enc.level);
     const gl = planet.gl;
     while (gl.getError() !== gl.NO_ERROR) {}
@@ -68,7 +72,7 @@ const SAVE = arg('save', path.resolve(__dirname, 'saves', 'equilibrium_L5.sav'))
       loadedRMS: +loaded.rms.toPrecision(5), loadedNaN: loaded.nan,
       afterRMS: +after.rms.toPrecision(5), afterNaN: after.nan,
     };
-  }, enc);
+  }, fs.readFileSync(SAVE, 'utf8'));
 
   await browser.close();
 

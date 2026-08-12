@@ -456,6 +456,20 @@ function decodePlanetState(o) {
   };
 }
 
+/* A .js state file assigns its encoded object to a global so it can be loaded
+ * with a plain <script src> tag — which works from file:// without fetch/CORS
+ * headaches. The serialized form is plain JSON, so `window.PLANET_STATE = ...`
+ * is valid JS and valid data. readPlanetStateJS() evaluates such a file and
+ * returns the encoded object (callers run it through decodePlanetState). */
+function planetStateToJS(enc) {
+  return 'window.PLANET_STATE = ' + JSON.stringify(enc) + ';\n';
+}
+function readPlanetStateJS(text) {
+  var sandbox = {};
+  var fn = new Function('window', text + '\n;return (typeof PLANET_STATE !== "undefined") ? PLANET_STATE : (window.PLANET_STATE || undefined);');
+  return fn(sandbox);
+}
+
 Planet.prototype.couple = function () {
   var W = this.grid.W, H = this.grid.H;
   var P = this.params;
