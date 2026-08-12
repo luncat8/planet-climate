@@ -421,11 +421,16 @@ Planet.prototype.applyState = function (st) {
    boundary. btoa/atob exist in browsers and Node >= 16, so this is shared by
    the app UI and the headless harness alike. */
 function _f32ToB64(arr) {
+  // Build the binary string in 32k-char chunks via String.fromCharCode.apply.
+  // A single per-char `s +=` over ~1.3 MB is pathologically slow (~2 s for a
+  // level-5 save) because it re-allocates the string every iteration.
   var src = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
   var u = new Uint8Array(src.length);
   u.set(src);
-  var s = '';
-  for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+  var s = '', CHUNK = 0x8000;
+  for (var i = 0; i < u.length; i += CHUNK) {
+    s += String.fromCharCode.apply(null, u.subarray(i, i + CHUNK));
+  }
   return btoa(s);
 }
 function _b64ToF32(b) {

@@ -263,21 +263,25 @@ function importState(file) {
   };
   r.readAsText(file);
 }
-/* Optional cross-reload persistence via localStorage. Saves are large (8 float
-   textures), so quota errors are expected on big grids — we just skip silently. */
+/* Cross-reload persistence: store only the parameter/clock settings (tiny and
+   instant). The full fluid state lives in the in-memory GPU snapshots (dropdown)
+   during a session and is exported/imported as a .sav file when needed — keeping
+   localStorage out of the multi-megabyte readback/encode path entirely. */
 function persistSaves() {
   try {
-    var data = ui.saves.map(function (s) { return { name: s.name, enc: encodePlanetState(s.state) }; });
-    localStorage.setItem('planetSaves', JSON.stringify(data));
-  } catch (e) { /* storage full/disabled: ignore */ }
+    var p = ui.planet; if (!p) return;
+    localStorage.setItem('planetSettings', JSON.stringify({
+      params: Object.assign({}, p.params),
+      bounds: Object.assign({}, p.bounds),
+      simTime: p.simTime,
+    }));
+  } catch (e) { /* storage disabled: ignore */ }
 }
 function restoreSaves() {
   try {
-    var raw = localStorage.getItem('planetSaves');
-    if (!raw) return;
-    var arr = JSON.parse(raw);
-    ui.saves = arr.map(function (s) { return { name: s.name, state: decodePlanetState(s.enc) }; });
-  } catch (e) { ui.saves = []; }
+    var raw = localStorage.getItem('planetSettings');
+    if (raw) ui.persistedSettings = JSON.parse(raw);
+  } catch (e) { ui.persistedSettings = null; }
 }
 
 function buildUI() {
@@ -708,6 +712,13 @@ function boot() {
       ui.fpsEls.lvlSpan.textContent = String(s.level);
     };
     ui.planet = p;
+    if (ui.persistedSettings) {
+      try {
+        p.params = Object.assign(defaultParams(), ui.persistedSettings.params);
+        p.bounds = Object.assign({}, ui.persistedSettings.bounds || {});
+        p.simTime = ui.persistedSettings.simTime || 0;
+      } catch (e) { /* ignore corrupt settings */ }
+    }
     refreshDynamic();
   } catch (e) {
     showError(e && e.message ? e.message : String(e));
