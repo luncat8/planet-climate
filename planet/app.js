@@ -101,6 +101,8 @@ var ui = {
   vinfoEl: null,
   vinfoLayer: null,
   vinfoStreams: null,
+  saves: [],          // [{ name, state }] in-memory state snapshots
+  saveSel: null,
 };
 
 function el(tag, cls, txt) {
@@ -212,6 +214,72 @@ function updateViewportInfo() {
   }
 }
 
+/* ============ state snapshot save / load ============ */
+function rebuildSaveDropdown() {
+  var sel = ui.saveSel; if (!sel) return;
+  sel.innerHTML = '';
+  var o0 = document.createElement('option');
+  o0.value = '__reset__'; o0.textContent = '↻ Reset';
+  sel.appendChild(o0);
+  ui.saves.forEach(function (s, i) {
+    var o = document.createElement('option');
+    o.value = String(i); o.textContent = s.name;
+    sel.appendChild(o);
+  });
+}
+function saveCurrent() {
+  var p = ui.planet; if (!p) return;
+  ui.saves.push({ name: 'save ' + (ui.saves.length + 1), state: p.serializeState() });
+  rebuildSaveDropdown();
+  persistSaves();
+}
+function loadSave(idx) {
+  var p = ui.planet; if (!p) return;
+  var s = ui.saves[idx]; if (!s) return;
+  try { p.applyState(s.state); }
+  catch (e) { showError('Cannot load save: ' + (e && e.message ? e.message : e)); return; }
+  refreshDynamic();
+}
+function exportState() {
+  var p = ui.planet; if (!p) return;
+  var enc = encodePlanetState(p.serializeState());
+  var blob = new Blob([JSON.stringify(enc)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = 'planet_state.sav'; a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+function importState(file) {
+  var r = new FileReader();
+  r.onload = function () {
+    try {
+      var st = decodePlanetState(JSON.parse(r.result));
+      ui.planet.applyState(st);
+      ui.saves.push({ name: file.name, state: st });
+      rebuildSaveDropdown();
+      persistSaves();
+      refreshDynamic();
+    } catch (e) { showError('Invalid state file: ' + (e && e.message ? e.message : e)); }
+  };
+  r.readAsText(file);
+}
+/* Optional cross-reload persistence via localStorage. Saves are large (8 float
+   textures), so quota errors are expected on big grids — we just skip silently. */
+function persistSaves() {
+  try {
+    var data = ui.saves.map(function (s) { return { name: s.name, enc: encodePlanetState(s.state) }; });
+    localStorage.setItem('planetSaves', JSON.stringify(data));
+  } catch (e) { /* storage full/disabled: ignore */ }
+}
+function restoreSaves() {
+  try {
+    var raw = localStorage.getItem('planetSaves');
+    if (!raw) return;
+    var arr = JSON.parse(raw);
+    ui.saves = arr.map(function (s) { return { name: s.name, state: decodePlanetState(s.enc) }; });
+  } catch (e) { ui.saves = []; }
+}
+
 function buildUI() {
   var app = document.getElementById('app');
 
@@ -274,17 +342,53 @@ function buildUI() {
   var panel = el('div', 'panel');
   ui.panelEl = panel;
 
-  // run / reset
+  // run / reset + state snapshots
   var row = el('div', 'row');
   var runBtn = el('button', 'btn', '❚❚ pause');
   runBtn.style.flex = '1';
   runBtn.onclick = function () { setParam('running', !ui.planet.params.running); };
-  var resetBtn = el('button', 'btn', '↻ reset');
-  resetBtn.style.flex = '1';
-  resetBtn.onclick = function () { ui.planet.reset(); };
-  row.appendChild(runBtn); row.appendChild(resetBtn);
+  row.appendChild(runBtn);
+
+  // Save dropdown: first item is "Reset" (acts as the old reset button), the
+  // rest are snapshot slots. Selecting one loads that state.
+  var saveSel = document.createElement('select');
+  saveSel.className = 'btn';
+  saveSel.title = 'Load a saved state (first entry resets to initial conditions)';
+  saveSel.style.flex = '1';
+  saveSel.onchange = function () {
+    var v = saveSel.value;
+    if (v === '__reset__') { if (ui.planet) ui.planet.reset(); }
+    else { loadSave(parseInt(v, 10)); }
+    saveSel.blur();
+  };
+  ui.saveSel = saveSel;
+  row.appendChild(saveSel);
+
+  var saveBtn = el('button', 'btn', '💾');
+  saveBtn.title = 'Snapshot current state';
+  saveBtn.style.flex = '0 0 auto';
+  saveBtn.onclick = function () { saveCurrent(); };
+  row.appendChild(saveBtn);
+
+  var stateExpBtn = el('button', 'btn', '⤓');
+  stateExpBtn.title = 'Export current state to a .sav file';
+  stateExpBtn.style.flex = '0 0 auto';
+  stateExpBtn.onclick = function () { exportState(); };
+  row.appendChild(stateExpBtn);
+
+  var fileInp = document.createElement('input');
+  fileInp.type = 'file'; fileInp.accept = '.sav,application/json';
+  fileInp.style.display = 'none';
+  fileInp.onchange = function () { if (fileInp.files && fileInp.files[0]) importState(fileInp.files[0]); fileInp.value = ''; };
+  var impBtn = el('button', 'btn', '⤒');
+  impBtn.title = 'Import state from a .sav file';
+  impBtn.style.flex = '0 0 auto';
+  impBtn.onclick = function () { fileInp.click(); };
+  row.appendChild(impBtn); row.appendChild(fileInp);
+
   ui.runBtn = runBtn;
   panel.appendChild(row);
+  rebuildSaveDropdown();
 
   // layer view (kept outside the scrolling panel so it is always visible)
   var lviewBox = el('div', 'lview');
@@ -591,6 +695,7 @@ function showError(msg) {
 
 function boot() {
   var canvas = document.getElementById('c');
+  restoreSaves();
   buildUI();
   try {
     var p = new Planet(canvas, 5);

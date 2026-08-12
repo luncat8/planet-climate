@@ -362,6 +362,95 @@ Planet.prototype.reset = function () {
   this.fullscreen('init2', W, H);
 };
 
+/* ============ state save / load ============
+   The persistent simulation state lives in the 8 RGBA32F textures this.A
+   (ocean [0..3] + air [4..7]); this.B is scratch, recomputed every step, so
+   it never needs saving. We read the textures back to the CPU, upload them
+   again on load, and restore the parameter snapshot + clock. The render/update
+   FBOs reference the SAME texture objects, so re-uploading in place keeps them
+   valid (no rebuild required). */
+
+Planet.prototype.readTex = function (tex) {
+  var gl = this.gl, W = this.grid.W, H = this.grid.H;
+  var fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  var buf = new Float32Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.FLOAT, buf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fbo);
+  return buf;
+};
+
+Planet.prototype.writeTex = function (tex, data) {
+  var gl = this.gl, W = this.grid.W, H = this.grid.H;
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, W, H, 0, gl.RGBA, gl.FLOAT, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+};
+
+Planet.prototype.serializeState = function () {
+  var g = this.grid;
+  return {
+    version: 1,
+    level: g.level, W: g.W, H: g.H,
+    simTime: this.simTime, stepCount: this.stepCount,
+    params: Object.assign({}, this.params),
+    bounds: Object.assign({}, this.bounds),
+    A: [0, 1, 2, 3, 4, 5, 6, 7].map(function (i) { return this.readTex(this.A[i]); }, this),
+  };
+};
+
+Planet.prototype.applyState = function (st) {
+  if (!st || st.level === undefined) throw new Error('invalid state object');
+  if (st.level !== this.grid.level)
+    throw new Error('save is level ' + st.level + ', current grid is level ' + this.grid.level);
+  for (var i = 0; i < 8; i++) this.writeTex(this.A[i], st.A[i]);
+  this.params = Object.assign(defaultParams(), st.params);
+  this.bounds = Object.assign({}, st.bounds || {});
+  this.simTime = st.simTime || 0;
+  this.stepCount = st.stepCount || 0;
+  return this;
+};
+
+/* JSON (file) codec for states. The 8 float textures are base64-encoded so the
+   whole thing is plain JSON and survives page.evaluate's structured-clone
+   boundary. btoa/atob exist in browsers and Node >= 16, so this is shared by
+   the app UI and the headless harness alike. */
+function _f32ToB64(arr) {
+  var src = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+  var u = new Uint8Array(src.length);
+  u.set(src);
+  var s = '';
+  for (var i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+  return btoa(s);
+}
+function _b64ToF32(b) {
+  var s = atob(b);
+  var u = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+  return new Float32Array(u.buffer);
+}
+function encodePlanetState(st) {
+  return {
+    version: st.version || 1, level: st.level, W: st.W, H: st.H,
+    simTime: st.simTime, stepCount: st.stepCount,
+    params: st.params, bounds: st.bounds || {},
+    A: st.A.map(function (a) { return _f32ToB64(a); }),
+  };
+}
+function decodePlanetState(o) {
+  return {
+    version: o.version || 1, level: o.level, W: o.W, H: o.H,
+    simTime: o.simTime, stepCount: o.stepCount,
+    params: o.params, bounds: o.bounds || {},
+    A: o.A.map(function (b) { return _b64ToF32(b); }),
+  };
+}
+
 Planet.prototype.couple = function () {
   var W = this.grid.W, H = this.grid.H;
   var P = this.params;
