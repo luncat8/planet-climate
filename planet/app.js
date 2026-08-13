@@ -544,6 +544,10 @@ function buildUI() {
   addFlowCheck('flowUniform', 'Even out speed',
     'Move particles at a steady visible pace regardless of true speed, so even the slow bottom water animates.');
   addFlowSlider('flowGain');
+  addFlowCheck('flowSpatial', 'Spatial blur',
+    'Neighbour-average blur on top of the time average: kills the fast turbulent jitter directly (the EMA only lags it), so the mean current reads cleaner — best for the slow deep layer. 0 = off.');
+  addFlowSlider('flowSpatial');
+  addFlowSlider('flowSpatialIters');
 
   // checkboxes
   var chkDefs = [

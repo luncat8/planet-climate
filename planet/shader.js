@@ -1959,6 +1959,41 @@ void main(){
   o = vec4(mix(prev, cur, clamp(uAlpha,0.0,1.0)), 0.0, 0.0);
 }`;
 
+/* Spatial (Laplacian / neighbour-average) blur of a single velocity source. One
+   Jacobi step: out = mix(in, neighbourAvg(in), uSpatialK). neighbourAvg rotates
+   each 1-ring neighbour's velocity into the central cell basis (xfer) and
+   land-masks it. Unlike the temporal EMA (SMOOTH_FS) this kills the high-frequency
+   turbulent jitter directly instead of just lagging it in time, so a few passes
+   give a steadier mean field with less "slowly-shifting noise". Run after the EMA;
+   ping-ponged in stepSmooth so the input is never the output texture. */
+var SPATIAL_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 o;
+uniform sampler2D uSrc;
+uniform float uSpatialK;
+vec2 sNbrAvg(sampler2D f, int cell){
+  vec2 s = vec2(0.0); float w = 0.0;
+  float landC = texelFetch(uCellB, cTex(cell),0).w;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x);
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    vec2 vj = texelFetch(f, cTex(j),0).xy*(1.0-landj);
+    vj = xfer(vj, nb.z, nb.w);
+    s += vj; w += (1.0-landj);
+  }
+  if(w < 0.5) return texelFetch(f, cTex(cell),0).xy*(1.0-landC);
+  return s/w;
+}
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ o = vec4(0.0); return; }
+  vec2 v = texelFetch(uSrc, cTex(cell),0).xy;
+  vec2 avg = sNbrAvg(uSrc, cell);
+  o = vec4(mix(v, avg, clamp(uSpatialK, 0.0, 1.0)), 0.0, 0.0);
+}`;
+
 var PART_VS = SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uTrail, uState;
 uniform mat4 uMVP;

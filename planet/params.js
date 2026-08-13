@@ -247,7 +247,15 @@ var PARAMS = {
                     fmt: function (v) { return (v | 0) + 'd'; } },
   flowUniform:    { label: 'Even out speed', default: 0 },
   flowGain:       { label: 'Flow gain', default: 1, min: 0.2, max: 8, step: 0.1,
-                    fmt: function (v) { return (+v).toFixed(1) + '×'; } },
+                     fmt: function (v) { return (+v).toFixed(1) + '×'; } },
+  /* Spatial (neighbour-average) blur, applied ON TOP of the temporal EMA. Kills
+     the fast turbulent jitter directly (the EMA only lags it), so a few passes
+     give a steadier mean field with less "slowly-shifting noise" — best for the
+     near-motionless deep layer. 0 = off (use the EMA alone, unchanged default). */
+  flowSpatial:    { label: 'Spatial blur', default: 0, min: 0, max: 1, step: 0.05,
+                     tip: 'Neighbour-average blur of the smoothed field. 0 = off.' },
+  flowSpatialIters: { label: 'Blur passes', default: 2, min: 1, max: 4, step: 1,
+                     tip: 'Jacobi passes per frame for the spatial blur (more = smoother).' },
   showLand:       { default: 1 },
   nightShading:   { default: 1 },
   relief:         { default: 0.004 },

@@ -205,6 +205,7 @@ Planet.prototype.compile = function () {
   this.prog.state = new Prog(gl, QUAD_VS, STATE_FS, 'state');
   this.prog.trail = new Prog(gl, QUAD_VS, TRAIL_FS, 'trail');
   this.prog.smooth = new Prog(gl, QUAD_VS, SMOOTH_FS, 'smooth');
+  this.prog.spatial = new Prog(gl, QUAD_VS, SPATIAL_FS, 'spatial');
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
   this.prog.equiCloud = new Prog(gl, EQUI_VS, EQUI_CLOUD_FS, 'equiCloud');
@@ -395,6 +396,23 @@ Planet.prototype.stepSmooth = function () {
     pr.tex('uCur', this.A[sm.srcIdx]).tex('uPrev', src).f('uAlpha', alpha);
     this.fullscreen(dstFbo, this.grid.W, this.grid.H);
     sm.idx = 1 - sm.idx;
+    // Optional spatial (neighbour-average) blur, applied on top of the EMA.
+    // Ping-ponged within the same 2-buffer pair so the shader never reads the
+    // texture it is writing (no feedback loop). Several passes = stronger blur.
+    var spK = P.flowSpatial === undefined ? 0 : P.flowSpatial;
+    if (this.smoothInit && spK > 0.001) {
+      var iters = (P.flowSpatialIters === undefined ? 2 : P.flowSpatialIters) | 0;
+      if (iters < 1) iters = 1; if (iters > 4) iters = 4;
+      for (var pass = 0; pass < iters; pass++) {
+        var rsrc = sm.tex[sm.idx];
+        var rdst = sm.idx === 0 ? sm.fboB : sm.fboA;
+        var ps = this.prog.spatial.use();
+        this.gridUniforms(ps);
+        ps.tex('uSrc', rsrc).f('uSpatialK', spK);
+        this.fullscreen(rdst, this.grid.W, this.grid.H);
+        sm.idx = 1 - sm.idx;
+      }
+    }
   }
   this.smoothInit = true;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
