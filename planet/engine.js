@@ -199,6 +199,7 @@ Planet.prototype.compile = function () {
   this.prog.air = new Prog(gl, QUAD_VS, AIR_FS, 'air');
   this.prog.cplO = new Prog(gl, QUAD_VS, COUPLE_FS('ocean'), 'coupleOcean');
   this.prog.cplA = new Prog(gl, QUAD_VS, COUPLE_FS('air'), 'coupleAir');
+  this.prog.iceDyn = new Prog(gl, QUAD_VS, ICE_DYN_FS(), 'iceDyn');
   this.prog.init = new Prog(gl, QUAD_VS, INIT_FS, 'init');
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
   this.prog.vflow = new Prog(gl, QUAD_VS, VFLOW_FS, 'vflow');
@@ -263,7 +264,7 @@ Planet.prototype.build = function (level) {
   }
   this.fbo.dynO = this.mkFbo([this.B[0], this.B[1], this.B[2], this.B[3]]);
   this.fbo.dynA = this.mkFbo([this.B[4], this.B[5], this.B[6], this.B[7]]);
-  this.fbo.cplO = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);
+  this.fbo.cplO = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3], this.texIceB]);
   this.fbo.cplA = this.mkFbo([this.A[4], this.A[5], this.A[6], this.A[7]]);
   this.fbo.init = this.mkFbo([this.A[0], this.A[1], this.A[2], this.A[3]]);   // ocean
   this.fbo.init2 = this.mkFbo([this.A[4], this.A[5], this.A[6], this.A[7]]); // air
@@ -304,6 +305,16 @@ Planet.prototype.build = function (level) {
   this.texVFlow = this.mkTex(W, H, null);
   this.fbo.vflow = this.mkFbo([this.texVFlow]);
   this.vflowInit = false;
+
+  /* Unified cryosphere ping-pong: texIceA = current ice (iceThk, iceFrac, _, _),
+     texIceB = scratch written by COUPLE_FS (thermo) then read by ICE_DYN_FS
+     (dynamics) which writes texIceA. The ice state is packed into the free
+     channels of the 8-texture save (TopS.w, DeepS.z) so the save contract is
+     unchanged. */
+  this.texIceA = this.mkTex(W, H, null);
+  this.texIceB = this.mkTex(W, H, null);
+  this.fbo.iceB = this.mkFbo([this.texIceB]);   // COUPLE_FS 5th target (thermo)
+  this.fbo.iceA = this.mkFbo([this.texIceA]);   // ICE_DYN_FS output (dynamics)
 
   /* Temporally-averaged velocity (RG in .xy) for the 4 sources feeding the two
      pools' sublayers: 0 = ocean top (A1), 1 = ocean deep (A3), 2 = low air
@@ -406,6 +417,7 @@ Planet.prototype.destroyGrid = function () {
   if (this.texVFlow) partTexs.push(this.texVFlow);
   var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
   if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes, this.texPhi]);
+  if (this.texIceA) all = all.concat([this.texIceA, this.texIceB]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
@@ -520,13 +532,24 @@ Planet.prototype.writeTex = function (tex, data) {
 
 Planet.prototype.serializeState = function () {
   var g = this.grid;
+  var A = [0, 1, 2, 3, 4, 5, 6, 7].map(function (i) { return this.readTex(this.A[i]); }, this);
+  // Pack the ice field into free save channels (TopS.w = iceThk, DeepS.z = iceFrac)
+  // so the 8-texture save contract is preserved.
+  if (this.texIceA) {
+    var ice = this.readTex(this.texIceA);
+    var topS = A[0], deepS = A[2];
+    for (var c = 0; c < g.W * g.H; c++) {
+      topS[c * 4 + 3] = ice[c * 4];
+      deepS[c * 4 + 2] = ice[c * 4 + 1];
+    }
+  }
   return {
     version: 1,
     level: g.level, W: g.W, H: g.H,
     simTime: this.simTime, stepCount: this.stepCount,
     params: Object.assign({}, this.params),
     bounds: Object.assign({}, this.bounds),
-    A: [0, 1, 2, 3, 4, 5, 6, 7].map(function (i) { return this.readTex(this.A[i]); }, this),
+    A: A,
   };
 };
 
@@ -535,6 +558,17 @@ Planet.prototype.applyState = function (st) {
   if (st.level !== this.grid.level)
     throw new Error('save is level ' + st.level + ', current grid is level ' + this.grid.level);
   for (var i = 0; i < 8; i++) this.writeTex(this.A[i], st.A[i]);
+  // Unpack the ice field from the save channels into the dedicated ice texture.
+  if (this.texIceA) {
+    var ice = new Float32Array(this.grid.W * this.grid.H * 4);
+    for (var c = 0; c < this.grid.W * this.grid.H; c++) {
+      ice[c * 4]     = st.A[0][c * 4 + 3];   // iceThk
+      ice[c * 4 + 1] = st.A[2][c * 4 + 2];   // iceFrac
+      ice[c * 4 + 2] = 0;
+      ice[c * 4 + 3] = 0;
+    }
+    this.writeTex(this.texIceA, ice);
+  }
   this.params = Object.assign(defaultParams(), st.params);
   this.bounds = Object.assign({}, st.bounds || {});
   this.simTime = st.simTime || 0;
@@ -610,7 +644,17 @@ Planet.prototype.couple = function () {
     pr.tex('uTopS', src[0]).tex('uTopV', src[1])
       .tex('uDeepS', src[2]).tex('uDeepV', src[3])
       .tex('uLoA', src[4]).tex('uLoB', src[5])
-      .tex('uHiA', src[6]).tex('uHiB', src[7]);
+      .tex('uHiA', src[6]).tex('uHiB', src[7])
+      .tex('uIce', self.texIceA);
+    if (pair[1] === 'cplO') {
+      // ice read from the CURRENT (previous step) ice texture; thermal update is
+      // written to the 5th target (texIceB), which ICE_DYN_FS then refines.
+      pr.tex('uIce', self.texIceA);
+      pr.f('uIceOn', P.iceOn).f('uIceLf', P.iceLf).f('uIceRho', P.iceRho)
+        .f('uIceGrowth', P.iceGrowth).f('uInsulK', P.insulK)
+        .f('uAlbIceSea', P.albIceSea).f('uAlbIceLand', P.albIceLand)
+        .f('uPrecipIce', P.precipIce).f('uMaxIce', P.maxIce).f('uIceFull', P.iceFull);
+    }
     pr.f('uDt', P.dt).f('uTime', self.simTime)
       .v3('uSun', sun[0], sun[1], sun[2])
       .f('uSolar', P.solar).f('uDayNight', P.dayNight).f('uSeasonDecl', self.decl())
@@ -629,6 +673,26 @@ Planet.prototype.couple = function () {
       .f('uRhoLo', P.atmosDensity);
     self.fullscreen(pair[0], W, H);
   });
+};
+
+/* Unified cryosphere horizontal dynamics. COUPLE_FS already applied the
+   thermodynamic ice update and wrote it to texIceB (the 5th coupling target);
+   this pass moves that ice around (sea drift, land creep, calving, jamming)
+   and writes the final ice back into texIceA for rendering and the next step. */
+Planet.prototype.stepIce = function () {
+  var W = this.grid.W, H = this.grid.H;
+  var P = this.params;
+  var gl = this.gl;
+  var pr = this.prog.iceDyn.use();
+  this.gridUniforms(pr);
+  pr.tex('uIce', this.texIceB)
+    .tex('uTopS', this.A[0]).tex('uTopV', this.A[1]).tex('uLoA', this.A[4])
+    .f('uDt', P.dt)
+    .f('uWindIce', P.windIce).f('uIceCreep', P.iceCreep)
+    .f('uCalve', P.calve).f('uCalveThk', P.calveThk)
+    .f('uIceCFL', P.iceCFL).f('uIceFull', P.iceFull);
+  this.fullscreen('iceA', W, H);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
 
 Planet.prototype.decl = function () {
@@ -699,6 +763,7 @@ Planet.prototype.step = function () {
   this.fullscreen('dynA', W, H);
 
   this.couple();
+  if (P.iceOn > 0.5) this.stepIce();
   if (P.rigidLid > 0.5) this.projectBarotropic();
   this.simTime += P.dt;
   this.stepCount++;
@@ -940,10 +1005,11 @@ Planet.prototype.render = function () {
     .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
     .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
-    .tex('uVFlow', this.texVFlow)
+    .tex('uVFlow', this.texVFlow).tex('uIce', this.texIceA)
     .m4('uMVP', mvp)
     .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
-    .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief);
+    .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief)
+    .f('uShowIce', P.showIce === undefined ? 0 : P.showIce);
   gl.bindVertexArray(this.vaoGlobe);
   gl.drawElements(gl.TRIANGLES, this.grid.indices.length, gl.UNSIGNED_INT, 0);
 
@@ -1017,9 +1083,10 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
     .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
-    .tex('uLookup', this.texLookup).tex('uVFlow', this.texVFlow)
+    .tex('uLookup', this.texLookup).tex('uVFlow', this.texVFlow).tex('uIce', this.texIceA)
     .v3('uSun', sun[0], sun[1], sun[2])
-    .f('uShowLand', P.showLand).f('uNight', P.nightShading);
+    .f('uShowLand', P.showLand).f('uNight', P.nightShading)
+    .f('uShowIce', P.showIce === undefined ? 0 : P.showIce);
   gl.bindVertexArray(this.vaoEmpty);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 

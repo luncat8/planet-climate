@@ -1,0 +1,99 @@
+I've reviewed the ice code paths. Here's the performance analysis and concrete optimizations. Note this is a read‑only review, so I'm giving exact diffs for you to apply — I have not modified files.
+
+## Where the cost actually comes from
+
+Ice adds **one extra full‑screen pass per step** (`stepIce()` → `ICE_DYN_FS`, `engine.js:682-696`), on top of the always‑running `couple()` (two passes, cplO+cplA) where the ice *thermodynamics* lives. The thermodynamic block in `COUPLE_FS` (`shader.js:1547-1611`) adds only a handful of ALU ops per cell and **no extra texture fetches** (it reuses the `iceIn` already read at line 1508), so it's negligible. The real cost is `ICE_DYN_FS`: every cell iterates 6 neighbors and, for each **sea‑facing** neighbor, fetches `uTopV`+`uLoA` and runs `xfer`/`dot` — even though ice covers only a sliver of the globe.
+
+## Optimization 1 — ICE_DYN_FS sea loop: skip ice‑free faces + remove double fetch (biggest win)
+
+Current (`shader.js:1841-1871`) fetches `uIce` for the neighbor **twice** (lines 1867-1868) and does the velocity math for every sea face regardless of ice. Ice‑free faces produce zero flux, so skip them after a single ice fetch:
+
+```glsl
+  if(land < 0.5){
+    for(int k=0;k<6;k++){
+      vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+      if(na.w < 0.5) continue;
+      int   j = int(na.x);
+      float L = na.y, d = na.z;
+      vec4  nb = texelFetch(uNbrB, nTex(cell,k), 0);
+      vec2  nrm = nb.xy;
+      float landj = texelFetch(uCellB, cTex(j), 0).w;
+      if(landj > 0.5){
+        float thkj = max(0.0, texelFetch(uIce, cTex(j), 0).x);
+        if(thkj > uCalveThk){
+          float calve = min(uCalve * (thkj - uCalveThk), thkj * 0.5);
+          mCalve += L * calve;
+        }
+        continue;
+      }
+      // Fetch neighbour ice ONCE (replaces the old double fetch).
+      vec4  icj = texelFetch(uIce, cTex(j), 0);
+      float mj  = max(0.0, icj.x) * clamp(icj.y, 0.0, 1.0);
+      // No ice on either side => zero flux; skip the velocity fetch + rotation
+      // for the (vast majority of) open-water faces.
+      if(m0 <= 0.0 && mj <= 0.0) continue;
+
+      vec2  vtj = texelFetch(uTopV, cTex(j), 0).xy;
+      vec2  wlj = texelFetch(uLoA , cTex(j), 0).xy;
+      vec2  uicej = xfer(vtj, nb.z, nb.w) + uWindIce*xfer(wlj, nb.z, nb.w);
+      vec2  uice0r = xfer(uice0, nb.z, nb.w);
+      float un = 0.5*dot(uice0r + uicej, nrm);
+      un = clamp(un, -uIceCFL/d, uIceCFL/d);
+      float mu = un > 0.0 ? m0 : mj;
+      divM += L * mu * un;
+    }
+  }
+```
+
+This eliminates ~2 texture fetches (`uTopV`,`uLoA`) and ~10 ALU ops per ice‑free sea face — i.e. for almost the entire ocean. Mass‑conserving: when both `m0` and `mj` are 0, the `divM` contribution is necessarily 0 regardless of `un`.
+
+## Optimization 2 — ICE_DYN_FS land loop: early‑out on bare cells + defer `cellC` fetch
+
+Current (`shader.js:1878-1912`) fetches `cellC(j)`/`bedj` for **every** neighbor (unused on sea/calving faces) and iterates even fully ice‑free land pairs. Skip safely and move the `cellC` fetch inside the land‑land branch:
+
+```glsl
+  if(land > 0.5){
+    float s0 = bed + thk0;
+    for(int k=0;k<6;k++){
+      vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+      if(na.w < 0.5) continue;
+      int   j = int(na.x);
+      float L = na.y;
+      float landj = texelFetch(uCellB, cTex(j), 0).w;
+      vec4  icj = texelFetch(uIce, cTex(j), 0);
+      float thkj = max(0.0, icj.x);
+      // This cell and neighbour both bare: no creep flux possible and a
+      // zero-thickness cell never calves -> skip the whole iteration.
+      if(thk0 <= 0.0 && thkj <= 0.0) continue;
+
+      if(landj > 0.5){
+        vec4  ccj = cellC(j);          // only needed for land-land creep
+        float bedj = ccj.z;
+        float sj = bedj + thkj;
+        float dh = s0 - sj;
+        float q  = clamp(uIceCreep * dh, -thk0*0.25, thk0*0.25);
+        float flux = L * q;
+        if(dh > 0.0) outMass += flux;
+        else         inMass  += -flux;
+      } else {
+        if(thk0 > uCalveThk){
+          float calve = min(uCalve * (thk0 - uCalveThk), thk0*0.5);
+          dThkLand -= calve;
+        }
+      }
+    }
+  }
+```
+
+Skip is safe: a `thk0=0` cell with an icy neighbor (`thkj>0`) is **not** skipped (incoming creep preserved), and `thk0=0` can never calve. Most land cells (and their ice‑free neighbors) are now free.
+
+## Optimization 3 — optionally drop the whole pass when ice is absent (lower priority)
+
+With `iceOn=1` and a spun‑up climate, polar ice essentially always exists, so a global "no ice → skip `stepIce`" check rarely helps and would require a GPU reduction/readback (which costs more than the pass). I'd leave the pass running and rely on Optimization 1/2, whose per‑face early‑outs already make the cold majority nearly free. If you later want it, gate `stepIce()` on a cheap CPU‑side "any ice?" flag updated from an occasional mip/reduction, but that's a larger change.
+
+## What NOT to change
+
+- `COUPLE_FS` ice block: negligible (no extra fetches). Gating it on `iceFrac==0` would be **wrong** — a cold open‑water cell must still grow ice, so `dIce` must run regardless.
+- The redundant `uIce` re‑bind in `couple()` (line 652) and unused `fbo.iceB`: harmless, no per‑step cost worth touching.
+
+**Bottom line:** apply Optimizations 1 and 2 to `ICE_DYN_FS`. They're safe (mass‑conserving), require no engine changes, and target exactly the new per‑step pass that causes the slowdown — the sea‑loop skip alone removes the bulk of the texture bandwidth in that pass.

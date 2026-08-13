@@ -1,0 +1,54 @@
+review and implement
+
+I reviewed the unified-cryosphere implementation against the plan and the surrounding engine. The shaders compile (verified with `glslangValidator`) and JS parses, but I found one **critical correctness bug** plus a few minor issues. Note: the Edit tool is unavailable in this read-only review session, so below are the exact fixes for you to apply.
+
+## Critical bug — sea-ice thickness/fraction invariant is broken (ICE_DYN_FS)
+
+In the sea-ice assembly (`shader.js`, `ICE_DYN_FS`, the `land < 0.5` branch):
+
+```glsl
+newFrac = clamp(frac0, 0.0, 1.0);
+newThk  = mNew / max(newFrac, 1e-3);
+```
+
+`mNew` is the advected ice *mass* (`thk·frac`), but `newThk` is rebuilt as `mNew/frac0`. Consequences:
+
+- An open-water cell (`frac0 = 0`) that receives ice by advection gets `newThk = mNew/1e-3` (≈1000× too thick), yet `newFrac` stays 0.
+- Next step `m0 = thk0·frac0 = (huge)·0 = 0`, so the ice is invisible to rendering (`frac=0`) and is lost by advection. **Sea ice therefore cannot spread into open water** — it only survives where it originally froze in place.
+
+Fix: derive coverage consistently from mass using the same `frac = thk/uIceFull` relation COUPLE_FS already uses, so `thk·frac = mNew` is preserved exactly:
+
+```glsl
+float mNew = max(0.0, m0 + dm);              // dm = (-divM*uDt + mCalve*uDt)/area
+newThk  = clamp(sqrt(mNew * uIceFull), 0.0, 200.0);
+newFrac = clamp(newThk / uIceFull, 0.0, 1.0);
+```
+
+This also removes the now-pointless `newFrac>1.0` jamming hack (coverage saturates at 1 naturally as `thk` grows at coasts). You must also:
+1. Add `uniform float uIceFull;` to `ICE_DYN_FS`'s uniform block.
+2. Bind it in `stepIce()` (`engine.js`): `.f('uIceFull', P.iceFull);` — currently it is **not** bound, which would zero all sea ice once this uniform is referenced.
+
+`uIceFull` (`P.iceFull`) already exists in `params.js` and is bound in the couple pass, so the coverage model is then identical across both passes.
+
+## Minor issues
+
+1. **Calving over-adds ice at coasts.** A land cell loses `calve` once (in its own land branch) but *every* bordering sea cell pulls `calve` independently (`mCalve += L*calve`). A land cell on a multi-cell coastline therefore loses `calve` once while N sea cells each gain `calve` → a small mass source at coasts. Acceptable as an approximation, but worth dividing the gain by the sea-neighbor count (or only crediting one representative neighbor) if strict conservation matters.
+
+2. **Unused variables in ICE_DYN_FS**: `coast` (`cc.w`) and `Dep` (`cellD(cell)`) are declared but never used. Harmless (GLSL allows it), but they’re dead.
+
+3. **Redundant bindings / unused FBO** in `engine.js`: `pr.tex('uIce', self.texIceA)` is set twice in `couple()` (line 648 always, and again at 652 inside the `cplO` branch); and `this.fbo.iceB` is created but never used (the couple writes `texIceB` via `fbo.cplO`’s 5th attachment). No functional effect.
+
+4. **`stepIce` order vs. `rigidLid`**: ice runs after `couple()` and before `projectBarotropic()`. That’s fine, but note `stepIce` reads `this.A[0]` (post-couple `T_top`) — consistent.
+
+## Validation gaps (per plan §6)
+
+- The GPU harness (`harness/mksave.js`, `harness/loadsave_test.js`) could **not be run here** (no `puppeteer`/`headless-gl` in this environment). I validated all GLSL with `glslangValidator` and JS with `node -c`, but the required runtime checks — stationarity, no-NaN, mass conservation, and baselines — are still outstanding.
+- **Bundled save / equilibrium shift**: `iceOn` defaults to `1`, so loading the pre-equilibrated `planet_state.js` (which has no ice) will now grow polar ice and perturb the calibrated climate. Per §6 you must regenerate `harness/baselines` and the bundled `planet_state.js` (mksave with `--level=5`), then re-run `loadsave_test.js` to confirm the ice fields stay finite and stationary.
+
+## What’s correct / good
+
+- Save contract preserved: ice is packed into the free `TopS.w` / `DeepS.z` channels at `serializeState` and unpacked at `applyState`; old (ice-less) saves load with zero ice (backward compatible); running `A[0].w`/`A[2].z` stay 0 so ocean passes are unaffected.
+- Thermodynamic feedback in COUPLE_FS is sound: salinity-dependent `Tf`, albedo boost, `(1−insul)` on sensible/evaporative/solar flux, latent-heat term with correct sign (freezing warms, melting cools), brine rejection/freshening, and cold-land precipitation frozen onto ice (correctly uses unmasked `rain` since `precip` is zeroed by `(1−land)`).
+- Land-ice creep and calving are pairwise mass-conserving per edge; CFL clamps and `thk` clamps prevent blow-ups.
+
+**Bottom line:** apply the sea-ice `thk/frac` fix (with the `uIceFull` uniform + binding) before considering this done; the rest are polish/validation items.
