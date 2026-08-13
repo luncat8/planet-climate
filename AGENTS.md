@@ -36,6 +36,8 @@ initial transient.
 - Confirm stationarity by stepping a number of times and asserting the field RMS
   is finite and changing only slightly (see `harness/loadsave_test.js`).
 
+- without strong reason do not test L7 detailed grid - slow.
+
 ## Regenerating the save
 
 `harness/mksave.js` builds a fresh pre-equilibrated state and writes it to a
