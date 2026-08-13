@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Planet — visual (draw) benchmark</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0f14; color: #dfe7ef;
+         font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  .wrap { display: flex; gap: 18px; padding: 18px; align-items: flex-start; flex-wrap: wrap; }
+  #c { width: 460px; height: 460px; background: #000; border-radius: 8px; flex: none; }
+  .panel { flex: 1 1 520px; min-width: 480px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 14px; color: #9fb0c0; max-width: 60ch; }
+  .ctl { display: flex; gap: 14px; align-items: center; margin: 10px 0 14px; flex-wrap: wrap; }
+  label.f { color: #9fb0c0; }
+  input[type=text] { width: 90px; background: #131a22; color: #dfe7ef; border: 1px solid #263241;
+                     border-radius: 6px; padding: 5px 7px; }
+  button { background: #1d6fe0; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px;
+           font-weight: 600; cursor: pointer; }
+  button:disabled { background: #34414f; cursor: default; }
+  table { border-collapse: collapse; width: 100%; margin-top: 6px; }
+  th, td { padding: 6px 10px; text-align: right; border-bottom: 1px solid #1c2530; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  thead th { color: #9fb0c0; font-weight: 600; border-bottom: 1px solid #34414f; }
+  tr.hd60 td { background: rgba(43,196,116,0.10); }
+  .fps { font-weight: 700; }
+  .g { color: #2bc474; } .y { color: #e7c14a; } .r { color: #e2555a; }
+  .status { color: #9fb0c0; margin: 8px 0; min-height: 1.4em; }
+  .note { color: #7f92a4; font-size: 12.5px; max-width: 70ch; margin-top: 14px; }
+  code { background: #131a22; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="c" width="460" height="460"></canvas>
+  <div class="panel">
+    <h1>Planet — visual (draw) benchmark</h1>
+    <p class="sub">Times the <b>whole per-frame pipeline</b> on your GPU: <i>substeps × calc engine
+      (ocean+air) + flow-viz passes + globe/streamline draw</i>. Reports the frame's work time and the
+      max sustainable FPS (<code>1000 / ms</code>). Rows that clear 60 fps are highlighted. Open this file
+      in a real browser — the in-app preview has no GPU.</p>
+    <div class="ctl">
+      <label class="f">Levels <input id="levels" type="text" value="5,6,7"></label>
+      <label class="f">Substeps <input id="subs" type="text" value="10,128"></label>
+      <label class="f">Particles(k) <input id="parts" type="text" value="16"></label>
+      <button id="run">Run benchmark</button>
+    </div>
+    <div class="status" id="status">Ready.</div>
+    <table id="tbl">
+      <thead><tr>
+        <th>level</th><th>scheme</th><th>substeps</th><th>cells</th>
+        <th>frame ms</th><th>draw ms</th><th class="fps">max fps</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="note">
+      <b>frame ms</b> = full frame (physics substeps + flow update + draw), <b>draw ms</b> = draw only
+      (globe + tracers, no stepping). <b>max fps</b> is compute-limited; on a vsync display the GUI still
+      caps at your refresh rate (typically 60). “sub@60” intuition: any config whose <b>frame ms</b> is
+      under ~16.7 runs at a smooth 60. Explicit is the cheaper ocean integrator; implicit adds the Jacobi
+      free-surface solve. Higher level ≈ 4× the cells per step; higher particle count scales the tracer draw.
+    </div>
+  </div>
+</div>
+
+<script src="geodesics.js"></script>
+<script src="shader.js"></script>
+<script src="params.js"></script>
+<script src="engine.js"></script>
+<script src="planet_state.js"></script>
+<script>
+(function () {
+  var canvas = document.getElementById('c');
+  var tbody = document.querySelector('#tbl tbody');
+  var statusEl = document.getElementById('status');
+  var runBtn = document.getElementById('run');
+  var planet = null;
+  var benchRunning = false;
+
+  // ?fast=1 shrinks warmup/sample counts — for a quick correctness pass on slow
+  // (software) renderers; real GPU runs should omit it for stable medians.
+  var FAST = /[?&]fast=1/.test(location.search);
+  function setStatus(s) { statusEl.textContent = s; }
+  // Yield to the event loop: resolve on the next animation frame, but never
+  // wait longer than 50 ms — so a throttled/hidden tab (rAF drops to ~1 Hz)
+  // can't freeze the run.
+  function nextFrame() {
+    return new Promise(function (r) {
+      var done = false, go = function () { if (!done) { done = true; r(); } };
+      requestAnimationFrame(go); setTimeout(go, 50);
+    });
+  }
+  function median(a) { a = a.slice().sort(function (x, y) { return x - y; }); return a[a.length >> 1]; }
+  function fpsClass(f) { return f >= 58 ? 'g' : f >= 30 ? 'y' : 'r'; }
+
+  // One whole-system frame, WITHOUT the internal requestAnimationFrame loop.
+  function frame(p) {
+    var P = p.params;
+    for (var i = 0; i < P.substeps; i++) p.step();
+    p.stepSmooth(); p.stepVFlow(); p.stepFlow(P.dt * P.substeps);
+    p.render();
+  }
+  function drawOnly(p) { p.stepVFlow(); p.render(); }
+
+  async function measure(fn, warm, budgetMs) {
+    var gl = planet.gl;
+    for (var i = 0; i < warm; i++) fn(planet);
+    gl.finish();
+    /* Time-boxed: keep sampling until ~budgetMs elapse (min 3 samples), so a
+       cheap config gets many samples for a stable median while a very heavy one
+       (e.g. L7 ×128) still returns after a bounded time instead of hanging. */
+    var t = [], total = 0, MAXN = FAST ? 20 : 90;
+    while ((total < budgetMs || t.length < 3) && t.length < MAXN) {
+      var t0 = performance.now();
+      fn(planet); gl.finish();
+      var dt = performance.now() - t0;
+      t.push(dt); total += dt;
+      if ((t.length & 7) === 0) await nextFrame();   // keep the tab responsive
+    }
+    return median(t);
+  }
+
+  async function run() {
+    if (benchRunning) return;   // guard against overlapping runs (double-click / auto-run)
+    benchRunning = true;
+    runBtn.disabled = true;
+    tbody.innerHTML = '';
+    var levels = document.getElementById('levels').value.split(',').map(function (s) { return +s.trim(); }).filter(Boolean);
+    var subs = document.getElementById('subs').value.split(',').map(function (s) { return +s.trim(); }).filter(Boolean);
+    var parts = +document.getElementById('parts').value || 16;
+    var schemes = [{ name: 'explicit', v: 0 }, { name: 'implicit', v: 2 }];
+
+    try {
+    if (!planet) planet = new Planet(canvas, levels[0] || 5);
+    planet.params.flowParticles = parts;
+
+    for (var li = 0; li < levels.length; li++) {
+      var level = levels[li];
+      setStatus('Building level ' + level + '…');
+      await nextFrame();
+      planet.build(level);
+      planet.params.flowParticles = parts;
+      planet.rebuildPools();
+      // Load the bundled equilibrium only where the grid matches it (L5).
+      try {
+        var st = window.PLANET_STATE;
+        if (st && st.level === level && Array.isArray(st.A)) planet.applyState(decodePlanetState(st));
+      } catch (e) {}
+      planet.params.running = true;
+      planet.params.mode = 13;            // an ocean-current view so tracers draw
+      planet.params.streamline = 15;      // all four sublayer bits -> both pools drawn
+      var cells = planet.grid.V;
+
+      // draw-only cost (independent of scheme/substeps) once per level
+      setStatus('L' + level + ': measuring draw…');
+      var drawMs = await measure(drawOnly, FAST ? 2 : 6, FAST ? 250 : 800);
+
+      for (var si = 0; si < schemes.length; si++) {
+        for (var bi = 0; bi < subs.length; bi++) {
+          planet.params.oceanScheme = schemes[si].v;
+          planet.params.substeps = subs[bi];
+          setStatus('L' + level + ' ' + schemes[si].name + ' ×' + subs[bi] + '…');
+          await nextFrame();
+          var frameMs = await measure(frame, FAST ? 2 : 6, FAST ? 300 : 1200);
+          var fps = 1000 / frameMs;
+          var tr = document.createElement('tr');
+          if (frameMs <= 16.7) tr.className = 'hd60';
+          tr.innerHTML =
+            '<td>L' + level + '</td>' +
+            '<td>' + schemes[si].name + '</td>' +
+            '<td>' + subs[bi] + '</td>' +
+            '<td>' + cells.toLocaleString() + '</td>' +
+            '<td>' + frameMs.toFixed(2) + '</td>' +
+            '<td>' + drawMs.toFixed(2) + '</td>' +
+            '<td class="fps ' + fpsClass(fps) + '">' + fps.toFixed(0) + '</td>';
+          tbody.appendChild(tr);
+        }
+      }
+    }
+    setStatus('Done. Higher “max fps” is better; ≥60 rows are highlighted.');
+    } catch (e) {
+      setStatus('Benchmark error: ' + (e && e.message ? e.message : e));
+    } finally {
+      runBtn.disabled = false;
+      benchRunning = false;
+    }
+  }
+
+  runBtn.addEventListener('click', run);
+  // auto-run once on load (unless suppressed for scripted testing)
+  if (!/[?&]noauto=1/.test(location.search))
+    window.addEventListener('load', function () { setTimeout(run, 200); });
+})();
+</script>
+</body>
+</html>

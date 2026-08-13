@@ -298,6 +298,53 @@ Planet.prototype.build = function (level) {
                                      a conveyor shifted one slot per frame.
      Double-buffered (a frame reads the whole trail while rewriting it). */
   var self = this;
+  this.buildPools();
+
+  // Vertical-flow field: .x = ocean interface w, .y = air w (see VFLOW_FS).
+  this.texVFlow = this.mkTex(W, H, null);
+  this.fbo.vflow = this.mkFbo([this.texVFlow]);
+  this.vflowInit = false;
+
+  /* Temporally-averaged velocity (RG in .xy) for the 4 sources feeding the two
+     pools' sublayers: 0 = ocean top (A1), 1 = ocean deep (A3), 2 = low air
+     (A4), 3 = high air (A6). Updated once per frame by SMOOTH_FS. */
+  this.smoothSrc = [1, 3, 4, 6];
+  this.smooth = this.smoothSrc.map(function (srcIdx, i) {
+    var a = self.mkTex(W, H, null), b = self.mkTex(W, H, null);
+    self.fbo['smooth' + i + 'a'] = self.mkFbo([a]); self.fbo['smooth' + i + 'b'] = self.mkFbo([b]);
+    return { tex:[a, b], idx:0, fboA:'smooth' + i + 'a', fboB:'smooth' + i + 'b', srcIdx: srcIdx };
+  });
+  this.smoothInit = false;   // first pass copies the raw field (alpha=1)
+
+  this.ibo = gl.createBuffer();
+  this.vaoGlobe = gl.createVertexArray();
+  gl.bindVertexArray(this.vaoGlobe);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, g.indices, gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  this.vaoEmpty = gl.createVertexArray();
+
+  this.reset();
+};
+
+/* Build the two flow-viz particle pools (ocean {top,deep}, air {low,high}).
+   Grid dimensions PW*PH come from params.flowParticles (thousands of tracers
+   PER pool); a bigger count costs more per-frame GPU work but is a one-time,
+   rarely-changed setting, so we simply rebuild the pool textures when it moves
+   (rebuildPools) rather than trying to resize live — favouring steady-state
+   draw/update speed over cheap changes, per design. Independent of the physics
+   grid, so it can be rebuilt without touching the simulation state. */
+Planet.prototype.buildPools = function () {
+  var self = this;
+  var kp = (this.params && this.params.flowParticles !== undefined) ? this.params.flowParticles : 16;
+  var side = Math.max(8, Math.round(Math.sqrt(Math.max(1000, kp * 1000))));
+  /* Clamp to the GPU's texture limit: the trail texture is PW x (PH*PT), so its
+     height (side*PT) must fit MAX_TEXTURE_SIZE. On a typical 16384 GPU this caps
+     at ~167k/pool (well above the slider's 64k max); tiny/software GLs clamp
+     lower but never error. */
+  var maxTex = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE) || 4096;
+  side = Math.min(side, maxTex, Math.floor(maxTex / this.PT));
+  this.PW = side; this.PH = side;
   var prnd = Grid.mulberry32(((this.params.seed === undefined ? 12345 : this.params.seed) ^ 0x9e37) >>> 0);
   var Np = this.PW * this.PH, T = this.PT;
   function seedPool() {
@@ -335,32 +382,21 @@ Planet.prototype.build = function (level) {
     self.fbo['tr' + i + 'a'] = self.mkFbo([ta]); self.fbo['tr' + i + 'b'] = self.mkFbo([tb]);
     return { cfg: P, state:[sa, sb], trail:[ta, tb], idx:0 };
   });
+};
 
-  // Vertical-flow field: .x = ocean interface w, .y = air w (see VFLOW_FS).
-  this.texVFlow = this.mkTex(W, H, null);
-  this.fbo.vflow = this.mkFbo([this.texVFlow]);
-  this.vflowInit = false;
-
-  /* Temporally-averaged velocity (RG in .xy) for the 4 sources feeding the two
-     pools' sublayers: 0 = ocean top (A1), 1 = ocean deep (A3), 2 = low air
-     (A4), 3 = high air (A6). Updated once per frame by SMOOTH_FS. */
-  this.smoothSrc = [1, 3, 4, 6];
-  this.smooth = this.smoothSrc.map(function (srcIdx, i) {
-    var a = self.mkTex(W, H, null), b = self.mkTex(W, H, null);
-    self.fbo['smooth' + i + 'a'] = self.mkFbo([a]); self.fbo['smooth' + i + 'b'] = self.mkFbo([b]);
-    return { tex:[a, b], idx:0, fboA:'smooth' + i + 'a', fboB:'smooth' + i + 'b', srcIdx: srcIdx };
+/* Rebuild just the particle pools (after the count slider changes) without
+   disturbing the physics grid or its equilibrium state. */
+Planet.prototype.rebuildPools = function () {
+  if (!this.grid) return;
+  var gl = this.gl, self = this;
+  (this.pools || []).forEach(function (p, i) {
+    p.state.concat(p.trail).forEach(function (t) { if (t) gl.deleteTexture(t); });
+    ['st' + i + 'a', 'st' + i + 'b', 'tr' + i + 'a', 'tr' + i + 'b'].forEach(function (k) {
+      if (self.fbo[k]) { gl.deleteFramebuffer(self.fbo[k]); delete self.fbo[k]; }
+    });
   });
-  this.smoothInit = false;   // first pass copies the raw field (alpha=1)
-
-  this.ibo = gl.createBuffer();
-  this.vaoGlobe = gl.createVertexArray();
-  gl.bindVertexArray(this.vaoGlobe);
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.ibo);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, g.indices, gl.STATIC_DRAW);
-  gl.bindVertexArray(null);
-  this.vaoEmpty = gl.createVertexArray();
-
-  this.reset();
+  this.pools = [];
+  this.buildPools();
 };
 
 Planet.prototype.destroyGrid = function () {

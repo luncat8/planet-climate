@@ -95,6 +95,14 @@ Controls unchanged except **Move between layers** (`flowRecycle`, the master
 on/off for migration + flux-driven aging) and the new **Mix rate** (`flowMix`,
 0–3×, scales `uTransK` — how eagerly particles overturn).
 
+**Particle count** (`flowParticles`, 2–64 k per pool) sizes the `PW×PH` particle
+grid. Because it's a rarely-touched setting, changing it does a one-time pool
+rebuild (`rebuildPools` — new `state`/`trail` textures, physics grid and
+equilibrium untouched) rather than resizing live; this keeps the steady-state
+update/draw path fast at the cost of a brief rebuild on change. The side is
+clamped to the GPU's `MAX_TEXTURE_SIZE` (the trail texture is `PW × PH·PT`), so
+huge counts degrade gracefully instead of erroring.
+
 ## Vertical mass-flux (up/down) field + view
 
 
@@ -147,8 +155,8 @@ intentionally not done here.
 ## Buffers / cost
 
 Per **pool** (2 total): `state` A/B (`PW×PH`, head+packed layer/age) and `trail`
-A/B (`PW×PH·PT`, position+slot-layer). `PW=PH=128`, `PT=40` ⇒ halving the texture
-count vs. Round 2's four systems. Shared, built once: 4 smoothed-velocity EMA
+A/B (`PW×PH·PT`, position+slot-layer). `PW=PH` derives from the **Particle count**
+slider (default 16 k ⇒ 126², clamped to `MAX_TEXTURE_SIZE`); `PT=40`. Shared, built once: 4 smoothed-velocity EMA
 textures (one per sublayer source) and the `VFLOW` mass-flux field. Passes per
 frame: 1 `VFLOW`, 4 `SMOOTH`, 2×(`STATE`,`TRAIL`). Physics is untouched.
 

@@ -138,8 +138,21 @@ function el(tag, cls, txt) {
 var GRID_PARAMS = ['bathyMode', 'depthMax', 'shelfWidth', 'bathyRough', 'dShelf', 'hTop', 'hTotal', 'seed', 'planetRadius'];
 
 var _gridRebuildTimer = null;
+var _poolRebuildTimer = null;
 function setParam(k, v) {
   if (ui.planet) ui.planet.params[k] = v;
+  if (k === 'flowParticles') {
+    /* Resizing the particle textures is a rebuild, not a live uniform, but it's
+       a rarely-touched setting, so debounce a pool-only rebuild (physics grid +
+       equilibrium untouched). Prefers fast steady-state work over cheap changes. */
+    if (_poolRebuildTimer) clearTimeout(_poolRebuildTimer);
+    _poolRebuildTimer = setTimeout(function () {
+      _poolRebuildTimer = null;
+      if (ui.planet) ui.planet.rebuildPools();
+    }, 160);
+    refreshDynamic();
+    return;
+  }
   if (GRID_PARAMS.indexOf(k) >= 0) {
     /* Regenerating the grid is far too heavy to run on every tick of a slider
        drag, so coalesce the changes and rebuild once the user settles. */
@@ -533,6 +546,7 @@ function buildUI() {
   }
   addFlowCheck('flowAvg', 'Time-averaged flow',
     'Advect on a running average of the velocity field so turbulent noise cancels and the mean current stands out.');
+  addFlowSlider('flowParticles');
   addFlowSlider('flowSmooth');
   addFlowCheck('flowLines', 'Continuous trails',
     'Draw each tracer as its swept path (a smooth trail), instead of just a moving dot.');

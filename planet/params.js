@@ -234,6 +234,8 @@ var PARAMS = {
   /* ---- Flow visualisation toolbox (combinable rendering methods) ----------
      None of these touch the physics; they only change how the streamline /
      particle layer is advected and drawn. */
+  flowParticles:  { label: 'Particle count', default: 16, min: 2, max: 64, step: 2,
+                    fmt: function (v) { return (v | 0) + 'k'; } },
   flowAvg:        { label: 'Time-averaged flow', default: 1 },
   flowSmooth:     { label: 'Averaging strength', default: 0.9, min: 0, max: 0.98, step: 0.01,
                     fmt: function (v) { return Math.round(v * 100) + '%'; } },
