@@ -14,7 +14,7 @@
  * + encodes the state, then round-trips it (decode+apply) to prove the codec
  * works before the file is written.
  */
-const puppeteer = require('puppeteer');
+const puppeteer = require('/media/sf_1/planet242/harness/node_modules/puppeteer');
 const fs = require('fs');
 const path = require('path');
 

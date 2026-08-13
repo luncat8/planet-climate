@@ -11,19 +11,19 @@ var LAYER_VIEW = {
     { id: 'T', label: 'T', title: 'Temperature' },
     { id: 'P', label: 'P', title: 'Pressure' },
     { id: 'speed', label: 'Spd', title: 'Speed' },
+    { id: 'vert', label: '↕', title: 'Vertical mass flux (red = up, blue = down)' },
     { id: 'humidity', label: 'Hum', title: 'Humidity' },
     { id: 'salinity', label: 'Sal', title: 'Salinity' },
     { id: 'rain', label: 'Rain', title: 'Rain' },
     { id: 'thick', label: 'h', title: 'Top-layer thickness (m)' },
     { id: 'depth', label: 'D', title: 'Ocean depth / bathymetry (m)' },
     { id: 'eta', label: 'η', title: 'Interface displacement h_top - h_ref (m)' },
-    { id: 'w', label: 'W', title: 'Vertical velocity — up/down flow (m/s)' },
   ],
   map: {
-    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6, w: 18 },
-    lowAir: { T: 0, P: 2, humidity: 3, speed: 4, w: 19 },
-    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17, w: 20 },
-    deepOcean: { T: 8, speed: 13, salinity: 14, w: 21 },
+    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
+    lowAir: { T: 0, P: 2, humidity: 3, speed: 4, vert: 20 },
+    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17, vert: 18 },
+    deepOcean: { T: 8, speed: 13, salinity: 14 },
   },
 };
 
@@ -204,7 +204,6 @@ function refreshDynamic() {
     ui.knobVals[key].textContent = def && def.fmt ? def.fmt(v) : String(v);
   });
   if (ui.oceanSchemeSel) ui.oceanSchemeSel.value = String(P.oceanScheme);
-  if (ui.velSmoothModeSel) ui.velSmoothModeSel.value = String(P.velSmoothMode);
   if (ui.implicitItersWrap) {
     var greyed = (P.oceanScheme !== 2);
     ui.implicitItersWrap.style.opacity = greyed ? '0.4' : '1';
@@ -483,38 +482,6 @@ function buildUI() {
   wrap.appendChild(table);
   lviewBox.appendChild(wrap);
   app.appendChild(lviewBox);
-  // streamlines control: 0 = dots, >0 = streak length (kept visible, not in collapsed tuning)
-  var stWrap = el('div', 'stline');
-  stWrap.appendChild(el('span', 'slab', 'streamline streak'));
-  var stInp = document.createElement('input');
-  stInp.type = 'range';
-  var stb = boundsOf(ui.planet, 'streamTrail');
-  stInp.min = stb.min; stInp.max = stb.max; stInp.step = stb.step;
-  stInp.value = ui.planet ? ui.planet.params.streamTrail : 6000;
-  stInp.oninput = function () { setParam('streamTrail', parseFloat(stInp.value)); };
-  stWrap.appendChild(stInp);
-  var stVal = el('span', 'v', '');
-  stWrap.appendChild(stVal);
-  panel.appendChild(stWrap);
-  ui.knobVals['streamTrail'] = stVal;
-  ui.knobInputs['streamTrail'] = stInp;
-
-  // Streamline velocity smoothing selector (modes 0..4). Uniform-only, so no
-  // grid rebuild — mirrors the oceanScheme <select> above.
-  var vsmWrap = el('div');
-  vsmWrap.appendChild(el('div', 'lab', 'Streamline smoothing'));
-  var vsmSel = document.createElement('select');
-  vsmSel.className = 'btn';
-  (PARAMS.velSmoothMode.opts || []).forEach(function (o) {
-    var op = document.createElement('option');
-    op.value = String(o.v); op.textContent = o.label;
-    vsmSel.appendChild(op);
-  });
-  vsmSel.onchange = function () { setParam('velSmoothMode', parseInt(vsmSel.value, 10)); };
-  vsmWrap.appendChild(vsmSel);
-  panel.appendChild(vsmWrap);
-  ui.velSmoothModeSel = vsmSel;
-
   var bar = el('div', 'bar');
   panel.appendChild(bar);
   var barlab = el('div', 'barlab');
@@ -522,13 +489,69 @@ function buildUI() {
   barlab.appendChild(el('span', null, 'high'));
   panel.appendChild(barlab);
 
+  /* ---- Flow visualization toolbox --------------------------------------
+     Combinable methods for turning the noisy velocity field into clean,
+     legible flow. Each checkbox is independent; sliders tune the method they
+     sit under. Registered into ui.checks / ui.knobInputs so the shared
+     refreshDynamic()/syncSliders() keep them in sync with the params. */
+  panel.appendChild(el('div', 'lab', 'Flow visualization'));
+  var flowDesc = el('div');
+  flowDesc.style.cssText = 'font-size:10px;line-height:1.45;color:#64748b;margin-bottom:6px';
+  flowDesc.textContent = 'Average out turbulence so coherent currents read as lines — helps the slow deep layer most.';
+  panel.appendChild(flowDesc);
+
+  function addFlowCheck(key, label, title) {
+    var lab = el('label', 'chk');
+    var sp = el('span', null, label);
+    if (title) sp.title = title;
+    lab.appendChild(sp);
+    var inp = document.createElement('input');
+    inp.type = 'checkbox';
+    inp.className = 'accent-cyan-400';
+    inp.onchange = function () { setParam(key, inp.checked ? 1 : 0); };
+    ui.checks[key] = inp;
+    lab.appendChild(inp);
+    panel.appendChild(lab);
+  }
+  function addFlowSlider(key) {
+    var spec = PARAMS[key];
+    var wrap = el('div', 'stline');
+    wrap.style.margin = '2px 0 8px';
+    wrap.appendChild(el('span', 'slab', spec.label));
+    var inp = document.createElement('input');
+    inp.type = 'range';
+    var b = boundsOf(ui.planet, key);
+    inp.min = b.min; inp.max = b.max; inp.step = b.step;
+    inp.value = ui.planet ? ui.planet.params[key] : spec.default;
+    inp.oninput = function () { setParam(key, parseFloat(inp.value)); };
+    wrap.appendChild(inp);
+    var val = el('span', 'v', '');
+    wrap.appendChild(val);
+    panel.appendChild(wrap);
+    ui.knobInputs[key] = inp;
+    ui.knobVals[key] = val;
+  }
+  addFlowCheck('flowAvg', 'Time-averaged flow',
+    'Advect on a running average of the velocity field so turbulent noise cancels and the mean current stands out.');
+  addFlowSlider('flowSmooth');
+  addFlowCheck('flowLines', 'Continuous trails',
+    'Draw each tracer as its swept path (a smooth trail), instead of just a moving dot.');
+  addFlowSlider('flowSegs');
+  addFlowCheck('flowRecycle', 'Move between layers',
+    'Particles descend/ascend between the two layers with probability proportional to the vertical mass flux, tracing the overturning circulation. Off = each particle stays in its layer.');
+  addFlowSlider('flowMix');
+  addFlowSlider('flowLife');
+  addFlowCheck('flowUniform', 'Even out speed',
+    'Move particles at a steady visible pace regardless of true speed, so even the slow bottom water animates.');
+  addFlowSlider('flowGain');
+
   // checkboxes
   var chkDefs = [
     ['showClouds', 'Clouds & rain overlay'],
     ['dayNight', 'Day / night cycle'],
     ['nightShading', 'Night shading'],
     ['showLand', 'Show continents'],
-    ['visTrailFade', 'Trail fade'],
+    ['rigidLid', 'Rigid-lid (deep return flow)'],
   ];
   chkDefs.forEach(function (d) {
     var lab = el('label', 'chk');
@@ -616,8 +639,8 @@ function buildUI() {
     var spec = PARAMS[key];
     if (spec.step === undefined) return;
     if (key === 'streamTrail') return;
+    if (key.indexOf('flow') === 0) return;    // shown in the Flow visualization panel
     if (key === 'oceanScheme') return;   // rendered as a <select> above
-    if (key === 'velSmoothMode') return; // rendered as a <select> (streamline smoothing)
     var wrap = el('div');
     wrap.style.marginBottom = '10px';
     var kv = el('div', 'kv');

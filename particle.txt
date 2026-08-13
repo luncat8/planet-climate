@@ -1,8 +1,0 @@
-particles currently looks not good.
-
-better do probability of move particles between layers proportional to vertical flow.
-spawn also proportional to vertical flow
-
-make particle pool. some particle lifespan.
-
-particle move, particle move between layers. after life end it despawn. so pool keep average number of particles alive.

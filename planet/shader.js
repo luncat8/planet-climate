@@ -41,19 +41,29 @@ var MODE_FIELDS = [
   '(ht-50.0)/20.0',                        // 15 top-layer thickness h_top (m)
   'Dc/5000.0',                             // 16 ocean depth D (m)
   '(ht-hRc)/8.0*0.5+0.5',                  // 17 interface displacement eta (m)
-   // 18-21 vertical velocity (W view). uVert holds per-layer divergence; negate so
-   // red = upwelling / blue = downwelling. Air (18,19) and ocean (20,21) use
-   // different BASE scales because air divergence (~1e-5) is ~1000x the ocean's
-   // (~1e-8) and the deep's (~1e-10). uWScale is a runtime gain (UI slider) so the
-   // user can boost the ocean/deep contrast without recompiling.
-   'clamp(-(texelFetch(uVert,cTex(cell),0).x) * 3e4 * uWScale * 0.5 + 0.5, 0.0, 1.0)', // 18 high-air vertical velocity
-   'clamp(-(texelFetch(uVert,cTex(cell),0).y) * 3e4 * uWScale * 0.5 + 0.5, 0.0, 1.0)', // 19 low-air vertical velocity
-   'clamp(-(texelFetch(uVert,cTex(cell),0).z) * 1e7 * uWScale * 0.5 + 0.5, 0.0, 1.0)', // 20 ocean vertical velocity
-    'clamp(-(texelFetch(uVert,cTex(cell),0).w) * 1e7 * uWScale * 0.5 + 0.5, 0.0, 1.0)', // 21 deep-ocean vertical velocity
-
+  ' texelFetch(uVFlow,cTex(cell),0).x/4.0e-3*0.5+0.5',   // 18 ocean vertical mass flux
+  '(-texelFetch(uVFlow,cTex(cell),0).x)/4.0e-3*0.5+0.5', // 19 (unused) deep = inverse of 18
+  ' texelFetch(uVFlow,cTex(cell),0).y/1.0e-1*0.5+0.5',   // 20 air vertical mass flux
+  '(-texelFetch(uVFlow,cTex(cell),0).y)/1.0e-1*0.5+0.5', // 21 (unused) high air = inverse of 20
 ];
 // modes that use magnitude (dark-background) coloring; palette-color fields excluded
 var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1, 16:1 };
+// modes that use the signed diverging (down=blue / up=warm) palette
+var MODE_DIV = { 18:1, 19:1, 20:1, 21:1 };
+function modeDivSrc(m) { return MODE_DIV[m] ? 'base = divPal(vVal);' : ''; }
+
+/* Signed diverging palette for the vertical mass-flux modes. Input t in [0,1]
+   with 0.5 = no vertical mass transfer; below = sinking (blue), above = rising
+   (red), on a dark background so both signs read against the near-zero interior. */
+var DIVPAL_GLSL = `vec3 divPal(float t){
+  float d = clamp(t,0.0,1.0) - 0.5;
+  vec3 dark = vec3(0.02,0.03,0.06);
+  vec3 down = vec3(0.15,0.42,0.95);   // mass moving down
+  vec3 up   = vec3(0.95,0.18,0.12);   // mass upwelling (red)
+  float a = clamp(abs(d)*2.0, 0.0, 1.0);
+  a = pow(a, 0.75);
+  return mix(dark, d < 0.0 ? down : up, a);
+}`;
 function modeValueSrc(m) {
   return 'float v = ' + (MODE_FIELDS[m] != null ? MODE_FIELDS[m] : MODE_FIELDS[9]) + ';';
 }
@@ -93,7 +103,7 @@ function modeMagSrc(m) {
    rather than a lit surface field. Shading them with the day/night terminator
    hides half the map for no reason, so they render unlit with land as flat
    grey so the coastline still reads. */
-var MODE_GEOM = { 16: 1, 17: 1 };
+var MODE_GEOM = { 16: 1, 17: 1, 18: 1, 19: 1, 20: 1, 21: 1 };
 function modeLitSrc(m, expr) {
   return MODE_GEOM[m] ? 'lit = 1.0;' : '';
 }
@@ -106,7 +116,6 @@ function modeLandSrc(m) {
 var SHADER_COMMON = `
 uniform ivec2 uDim;          // W, H of the cell texture
 uniform int   uCount;        // number of real cells (V)
-uniform float uWScale;       // W-view (vertical-velocity) color-scale gain
 uniform sampler2D uCellA;    // pos.xyz , area
 uniform sampler2D uCellB;    // east.xyz, land
 uniform sampler2D uCellC;    // D (total depth), hRef, bedElev, coastDist
@@ -191,7 +200,7 @@ void main(){
 
 function EQUI_FS(m) {
 return SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uLookup, uVert;
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uLookup, uVFlow;
 uniform vec3  uSun;
 uniform float uShowLand, uNight;
 in vec2 vUv;
@@ -206,6 +215,7 @@ vec3 pal(float t){
   if(t<0.8) return mix(c3,c4,(t-0.6)/0.2);
   return mix(c4,c5,(t-0.8)/0.2);
 }
+${DIVPAL_GLSL}
 void main(){
   vec2 uv = vUv;
   int cell = int(texture(uLookup, uv).r + 0.5);
@@ -224,6 +234,7 @@ ${modeValueSrc(m)}
   float vLand = cb.w;
 
   vec3 base = pal(vVal);
+${modeDivSrc(m)}
 ${modeMagSrc(m)}
 ${modeLandSrc(m)}
 
@@ -348,18 +359,16 @@ void main(){
      grad(eta) note in the neighbour loop). */
   float Dep  = cellD(cell);
   float hRef0= cellHref(cell);
-  float eta0 = ts0.w;
-  float hd0  = Dep + eta0 - h0;
+  float hd0  = Dep - h0;
+  float eta0 = h0 - hRef0;
   vec2  trT0 = ts0.yz;          // (T_top,  S_top)
   vec2  trD0 = ds0.xy;          // (T_deep, S_deep)
 
   float gp = gPrime(ts0.y, ts0.z, ds0.x, ds0.y);
 
   float divF = 0.0;             // div(h_top*u_top): the mass flux
-  float divF_deep = 0.0;        // div(h_deep*u_deep): deep mass flux
   float divT = 0.0, divD = 0.0; // div(u) per layer (advective-form correction)
-  vec2  gradEta = vec2(0.0);    // grad(eta), eta stored in topS.w
-  vec2  gradH = vec2(0.0);      // grad(h_top)
+  vec2  gradH = vec2(0.0);      // grad(eta), eta = h_top - hRef
   float lapEta = 0.0;           // lap(eta), for the forward-backward stabiliser
   float mDif   = 0.0;           // sum(L/d): discrete Laplacian metric ~ k_max^2*area
   vec2  lapVt = vec2(0.0), lapVd = vec2(0.0);
@@ -404,32 +413,41 @@ void main(){
        flow but gives the checkerboard the pressure feedback it was missing.
        gPrev is lagged one step, which is normal practice and keeps this to a
        single pass.  uRhieChow = 0 restores the legacy stencil exactly. */
-     float unT = 0.5*dot(vt0+vtj, nrm)*wet;
-     float unD = 0.5*dot(vd0+vdj, nrm)*wet;
-     vec2  gPrevJ = xfer(texelFetch(uTopV, cTex(j), 0).zw, nb.z, nb.w);
-     float dEtaF  = tsj.w - ts0.w;
-     float dHF    = tsj.x - h0;
-     float gComp  = dEtaF/d;                        // compact face gradient of eta
-     float gAvg   = 0.5*dot(gPrev0 + gPrevJ, nrm);  // averaged cell gradient
-     unT -= uRhieChow*uDt*uPgfTop*(gComp - gAvg)*wet;
+    float unT = 0.5*dot(vt0+vtj, nrm)*wet;
+    float unD = 0.5*dot(vd0+vdj, nrm)*wet;
+    vec2  gPrevJ = xfer(texelFetch(uTopV, cTex(j), 0).zw, nb.z, nb.w);
+    float dEtaF  = (tsj.x - h0) - (cellHref(j) - hRef0);
+    float gComp  = dEtaF/d;                        // compact face gradient
+    float gAvg   = 0.5*dot(gPrev0 + gPrevJ, nrm);  // averaged cell gradient
+    unT -= uRhieChow*uDt*uPgfTop*(gComp - gAvg)*wet;
 
-     // --- CONTINUITY: mass flux through this face = L * h_face * u_n --------
-     float hFace = 0.5*(h0 + tsj.x);
-     divF += L*hFace*unT;
-     divT += L*unT;
-     divD += L*unD;
+    // --- CONTINUITY: mass flux through this face = L * h_face * u_n --------
+    float hFace = 0.5*(h0 + tsj.x);
+    divF += L*hFace*unT;
+    divT += L*unT;
+    divD += L*unD;
 
-     float hdj = Dep + tsj.w - tsj.x;
-     float hFaceD = 0.5*(hd0 + hdj);
-     divF_deep += L*hFaceD*unD;
+    /* Interface-DISPLACEMENT gradient (Gauss), drives both layers with
+       opposite signs.
 
-     /* Barotropic (eta) and baroclinic (h_top) pressure gradients. eta is stored
-        in topS.w and is now an independent prognostic; h_top is topS.x. The
-        barotropic term -g*grad(eta) drives BOTH layers identically (the fast
-        external mode), while the baroclinic term +/-g'*grad(h_top) splits them
-        into the overturning return limb. */
-     gradEta += L*0.5*dEtaF*nrm*wet;
-     gradH += L*0.5*dHF*nrm*wet;
+       This must be grad(eta) with eta = h_top - hRef, NOT grad(h_top).
+       h_top is a sigma-like thickness: where the reference layer thickness
+       varies (shallow shelf vs deep basin) a RESTING ocean already has a
+       non-zero grad(h_top), and using it directly injects a permanent,
+       purely topographic pressure gradient -- the classic sigma-coordinate
+       PGF error. With the barotropic gain of ~9.81 that is not a small
+       error: a 200 m step over 2000 km geostrophically balances a ~9.8 m/s
+       jet, which the 2.99 m/s speed clamp would then hide as a permanent
+       fake coastal current.
+
+       Subtracting the per-cell reference removes the resting state exactly.
+
+       Grouped as (h_j - h_0) - (hRef_j - hRef_0) rather than
+       (h_j - hRef_j) - (h_0 - hRef_0): the two agree in exact arithmetic, but
+       only the first makes the reference term vanish EXACTLY in float32 when
+       hRef is uniform, so a flat slab reproduces the original bit for bit
+       instead of drifting by rounding. */
+    gradH += L*0.5*dEtaF*nrm*wet;
     /* lap(eta) via the same Gauss/FV stencil, and the metric sum(L/d)/area
        that converts it into the local (c*k*dt)^2 stability number below. */
     lapEta += (L/d)*dEtaF*wet;
@@ -451,9 +469,8 @@ void main(){
   }
 
   float ia = 1.0/area;
-  divF *= ia; divF_deep *= ia; divT *= ia; divD *= ia;
-  gradEta *= ia; gradH *= ia; lapEta *= ia; mDif *= ia;
-   lapVt *= ia; lapVd *= ia; advVt *= ia; advVd *= ia;
+  divF *= ia; divT *= ia; divD *= ia; gradH *= ia; lapEta *= ia; mDif *= ia;
+  lapVt *= ia; lapVd *= ia; advVt *= ia; advVd *= ia;
   lapTt *= ia; lapTd *= ia; advTt *= ia; advTd *= ia;
 
   // ---- MASS: dh/dt + div(h*u) = S ----------------------------------------
@@ -496,53 +513,44 @@ void main(){
      equals grad(div u) only for curl-free flow, so it also damped the gyres
      and cost 30-44% of mean surface speed.
 
-      uFbStab = 0 restores the plain explicit scheme bit for bit. */
-   /* Scale the correction by the LOCAL stability number rather than applying
-      it uniformly. mDif = sum(L/d)/area is the diagonal of the discrete
-      Laplacian, so nu2 = dt^2*g*D_rest*mDif is (c*k_grid*dt)^2 at the grid scale:
-      it is ~0.02 at L5/dt=120 (already stable, so almost nothing is applied)
-      and ~1 where the scheme actually diverges. Saturating it at 1 keeps the
-      correction from exceeding the term it is stabilising - without this the
-      coefficient over-damps the fine grids hardest, which is backwards: a
-      fixed fbStab=0.5 cost 10% of mean surface speed at L5 but 55% at L7. */
-   float nu2 = uFbStab*uDt*uDt*uPgfTop*Dep*mDif;
-   float fbGain = nu2/(1.0 + nu2);        // -> 0 when stable, -> 1 when stiff
-   /* Scheme A (uScheme==1) drops the fast div(h*u) transport from the thickness
-      continuity entirely. With uScheme==0 this multiplies divF by exactly 1.0, so
-      the arithmetic path is byte-identical to the original (divF*1.0 == divF in
-      float32). Scheme A still accumulates divF (unused) and leaves the momentum
-      pressure-gradient pointing at the slow steric/E-P signal, so the two-way
-      h<->u wave-formation closure cannot close and no gravity wave can grow. */
-   // ---- TWO CONTINUITIES (free-surface) ------------------------------------
-   // Surface: eta moves with the top-layer mass flux (free-surface height).
-   float eta1 = eta0 - uDt*divF*(uScheme==1?0.0:1.0)
-                    + fbGain*uDt*uDt*uPgfTop*Dep*lapEta;
-   eta1 = clamp(eta1, -200.0, 200.0);
-   if(isnan(eta1)) eta1 = eta0;
-   // Interface: h_top moves by net top-deep flux (interface displacement).
-   float h1 = h0 - uDt*divF*(uScheme==1?0.0:1.0) + uDt*divF_deep
-                    + fbGain*uDt*uDt*uPgfTop*Dep*lapEta
-                    - uDt*uStericRate*(h0 - hEq)
-                    - uDt*uMassSpring*(h0 - hRef0);
-   /* Depth-aware clamp: the old fixed [40, uHtot-40] window inverts once the
-      column is shallower than 80 m. hLimits() scales the floor with D. */
-   h1 = clampH(h1, Dep);
-   if(isnan(h1)) h1 = h0;
-   float hd1 = Dep + eta1 - h1;
+     uFbStab = 0 restores the plain explicit scheme bit for bit. */
+  /* Scale the correction by the LOCAL stability number rather than applying
+     it uniformly. mDif = sum(L/d)/area is the diagonal of the discrete
+     Laplacian, so nu2 = dt^2*g*H*mDif is (c*k_grid*dt)^2 at the grid scale:
+     it is ~0.02 at L5/dt=120 (already stable, so almost nothing is applied)
+     and ~1 where the scheme actually diverges. Saturating it at 1 keeps the
+     correction from exceeding the term it is stabilising - without this the
+     coefficient over-damps the fine grids hardest, which is backwards: a
+     fixed fbStab=0.5 cost 10% of mean surface speed at L5 but 55% at L7. */
+  float nu2 = uFbStab*uDt*uDt*uPgfTop*h0*mDif;
+  float fbGain = nu2/(1.0 + nu2);        // -> 0 when stable, -> 1 when stiff
+  /* Scheme A (uScheme==1) drops the fast div(h*u) transport from the thickness
+     continuity entirely. With uScheme==0 this multiplies divF by exactly 1.0, so
+     the arithmetic path is byte-identical to the original (divF*1.0 == divF in
+     float32). Scheme A still accumulates divF (unused) and leaves the momentum
+     pressure-gradient pointing at the slow steric/E-P signal, so the two-way
+     h<->u wave-formation closure cannot close and no gravity wave can grow. */
+  float h1 = h0 - uDt*divF*(uScheme==1?0.0:1.0)
+                 + fbGain*uDt*uDt*uPgfTop*h0*lapEta
+                 - uDt*uStericRate*(h0 - hEq)
+                 - uDt*uMassSpring*(h0 - hRef0);
+  /* Depth-aware clamp: the old fixed [40, uHtot-40] window inverts once the
+     column is shallower than 80 m. hLimits() scales the floor with D. */
+  h1 = clampH(h1, Dep);
+  if(isnan(h1)) h1 = h0;
+  float hd1 = Dep - h1;
 
-   // ---- MOMENTUM ----------------------------------------------------------
-   // top:  -uPgfTop      *grad(eta)  (barotropic, shared)
-   //       -uPgfDeepGain*g'*grad(h_top) (baroclinic, opposite sign -> return limb)
-   // deep: -uPgfTop      *grad(eta)  (barotropic, shared)
-   //        +uPgfDeepGain*g'*grad(h_top) (baroclinic, opposite sign -> return limb)
-   //
-   // uPgfTop defaults to 9.81. Strictly, a 1.5-layer reduced-gravity model
-   // would use g' (~0.02) here; the full-g value acts as a stand-in for the
-   // barotropic/free-surface pressure this rigid-lid model does not carry, and
-   // is what gives the surface currents realistic magnitudes. It is now a
-   // uniform rather than a literal so it can be retuned without editing GLSL.
-   vec2 accT = -uPgfTop*gradEta - uPgfDeepGain*gp*gradH + uNuVel*lapVt - advVt + vt0*divT;
-   vec2 accD = -uPgfTop*gradEta + uPgfDeepGain*gp*gradH + uNuVel*lapVd - advVd + vd0*divD;
+  // ---- MOMENTUM ----------------------------------------------------------
+  // top:  -uPgfTop      *grad(eta)  (flow away from a thick/warm column)
+  // deep: +uPgfDeepGain*g'*grad(eta) (opposite sign -> return limb)
+  //
+  // uPgfTop defaults to 9.81. Strictly, a 1.5-layer reduced-gravity model
+  // would use g' (~0.02) here; the full-g value acts as a stand-in for the
+  // barotropic/free-surface pressure this rigid-lid model does not carry, and
+  // is what gives the surface currents realistic magnitudes. It is now a
+  // uniform rather than a literal so it can be retuned without editing GLSL.
+  vec2 accT = -uPgfTop*gradH + uNuVel*lapVt - advVt + vt0*divT;
+  vec2 accD = +uPgfDeepGain*gp*gradH + uNuVel*lapVd - advVd + vd0*divD;
 
 
   // inter-layer stress, EQUAL AND OPPOSITE, inverse-column-mass weighted:
@@ -647,12 +655,12 @@ void main(){
     trD1 += f*(trT1 - trD1);
   }
 
-   oTopS  = vec4(h1, trT1.x, trT1.y, eta1);
-   /* .zw = this step's grad(eta), the lagged input to next step's Rhie-Chow
-      face interpolation. Held at 0 when the correction is off so that
-      uRhieChow = 0 reproduces the legacy state bit for bit, channels included
-      (the verification harness hashes raw texture bytes). */
-   oTopV  = vec4(vt1, (uRhieChow > 0.0) ? gradEta : vec2(0.0));
+  oTopS  = vec4(h1, trT1.x, trT1.y, 0.0);
+  /* .zw = this step's grad(eta), the lagged input to next step's Rhie-Chow
+     face interpolation. Held at 0 when the correction is off so that
+     uRhieChow = 0 reproduces the legacy state bit for bit, channels included
+     (the verification harness hashes raw texture bytes). */
+  oTopV  = vec4(vt1, (uRhieChow > 0.0) ? gradH : vec2(0.0));
   oDeepS = vec4(trD1.x, trD1.y, 0.0, 0.0);
   oDeepV = vec4(vd1, 0.0, 0.0);
 }`;
@@ -1082,6 +1090,150 @@ void main(){
   o = vec4(m, 0.0, 0.0, 1.0);
 }`;
 
+/* ===========================================================================
+   BAROTROPIC (RIGID-LID) PROJECTION  —  fixes the deep-layer mass bug.
+
+   The two-layer solver assumes the column depth D is fixed (h_deep = D - h_top),
+   which is a rigid-lid kinematic constraint: the depth-integrated (barotropic)
+   transport U = h_top*u_top + h_deep*u_deep must be NON-DIVERGENT. But nothing
+   in the momentum update enforces it — the top feels a huge -9.81*grad(eta)
+   (a stand-in for the surface pressure the model never carries) while the deep
+   feels only +g'*grad(eta) with g' ~ 1e-3*9.81, so the return flow is ~1000x
+   too weak and div(U) != 0. Measured: corr(div(h_top u), div(h_deep u)) ~ 0
+   instead of -1, i.e. the layers do not mass-balance.
+
+   Standard cure: a Chorin pressure projection. Find a barotropic potential phi
+   with  lap(phi) = div(U*)  (U* = provisional transport) and correct BOTH
+   layers by the SAME depth-independent velocity  du = grad(phi)/D. Then
+   U_new = U* - D*du = U* - grad(phi) is divergence-free, so
+   div(h_top u_top) = -div(h_deep u_deep) EXACTLY (mass in == mass out), while
+   the shear u_top - u_deep (the baroclinic/overturning mode) is untouched.
+   phi is the surface pressure the model was faking; solving it makes the deep
+   layer the genuine return limb. Neumann BC at coasts (wet mask) since no
+   transport crosses land. =========================================================================== */
+
+/* 1. Divergence of the provisional depth-integrated transport. Writes
+   (phi0=0, b=div(U*)) so the Jacobi below can carry the RHS in .y. */
+var BARO_DIV_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 oEta;
+uniform sampler2D uTopS, uTopV, uDeepV, uPhiPrev;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oEta = vec4(0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell),0).w;
+  float h0 = texelFetch(uTopS, cTex(cell),0).x;
+  float D0 = cellD(cell);
+  vec2 U0 = h0*texelFetch(uTopV, cTex(cell),0).xy + (D0-h0)*texelFetch(uDeepV, cTex(cell),0).xy;
+  float area = texelFetch(uCellA, cTex(cell),0).w;
+  float divU = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x); float L = na.y;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    vec2 nrm = nb.xy;
+    float hj = texelFetch(uTopS, cTex(j),0).x;
+    float Dj = cellD(j);
+    vec2 vtj = xfer(texelFetch(uTopV, cTex(j),0).xy, nb.z, nb.w);
+    vec2 vdj = xfer(texelFetch(uDeepV,cTex(j),0).xy, nb.z, nb.w);
+    vec2 Uj = hj*vtj + (Dj-hj)*vdj;
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    divU += L*0.5*dot(U0+Uj, nrm)*wet;
+  }
+  divU /= area;
+  // warm start: carry last frame's phi in .x so the Jacobi solve amortises to
+  // convergence across the many substeps per frame; b (=div U*) in .y.
+  float phiPrev = texelFetch(uPhiPrev, cTex(cell),0).x;
+  if(isnan(phiPrev)) phiPrev = 0.0;
+  oEta = vec4(phiPrev, divU, 0.0, 0.0);
+}`;
+
+/* 2. Damped Jacobi sweep of  lap(phi) = b  on the FV stencil. Reads
+   (phi,b) and writes (phi_new,b,_,|residual|). */
+var BARO_JACOBI_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 oEta;
+uniform sampler2D uEtaIn;
+uniform float uJacobiOmega;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oEta = vec4(0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell),0).w;
+  vec2 me = texelFetch(uEtaIn, cTex(cell),0).xy;   // (phi, b)
+  float area = texelFetch(uCellA, cTex(cell),0).w;
+  float num = 0.0, den = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x); float L = na.y, d = na.z;
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    float w = (L/d)*wet;
+    num += w*texelFetch(uEtaIn, cTex(j),0).x;
+    den += w;
+  }
+  if(den < 1e-20){ oEta = vec4(0.0, me.y, 0.0, 0.0); return; }
+  float target = (num - area*me.y)/den;            // lap(phi)=b  =>  phi
+  float phi = mix(me.x, target, uJacobiOmega);
+  if(isnan(phi)) phi = 0.0;
+  oEta = vec4(phi, me.y, 0.0, abs(target - me.x));
+}`;
+
+/* 3. Correct both layers by the shared barotropic velocity du = grad(phi)/D.
+   Reads the SOURCE velocities from the scratch copy (uTopV/uDeepV = P[1]/P[3])
+   and writes the corrected fields back to A[1]/A[3]. Preserves topV.zw (the
+   lagged grad(eta) used by Rhie-Chow). */
+var BARO_CORRECT_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oTopV;
+layout(location=1) out vec4 oDeepV;
+layout(location=2) out vec4 oPhi;
+uniform sampler2D uTopS, uTopV, uDeepV, uEta;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  vec4 tv = texelFetch(uTopV, cTex(cell),0);
+  vec2 vd = texelFetch(uDeepV, cTex(cell),0).xy;
+  float phi0 = texelFetch(uEta, cTex(cell),0).x;
+  if(cell >= uCount){ oTopV = tv; oDeepV = vec4(vd,0.0,0.0); oPhi = vec4(phi0,0.0,0.0,0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell),0).w;
+  float D0 = max(cellD(cell), 1.0);
+  float area = texelFetch(uCellA, cTex(cell),0).w;
+  vec2 grad = vec2(0.0);
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x); float L = na.y;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    float phij = texelFetch(uEta, cTex(j),0).x;
+    grad += L*0.5*(phij - phi0)*nb.xy*wet;
+  }
+  grad /= area;
+  vec2 du = (grad/D0)*(1.0-land);
+  vec2 vt1 = tv.xy - du;
+  vec2 vd1 = vd    - du;
+  vt1 = clamp(vt1, vec2(-3.0), vec2(3.0));
+  vd1 = clamp(vd1, vec2(-3.0), vec2(3.0));
+  if(any(isnan(vt1))) vt1 = tv.xy;
+  if(any(isnan(vd1))) vd1 = vd;
+  oTopV  = vec4(vt1, tv.zw);
+  oDeepV = vec4(vd1, 0.0, 0.0);
+  oPhi   = vec4(phi0, 0.0, 0.0, 0.0);   // persist for next frame's warm start
+}`;
+
+/* Tiny MRT passthrough: copy two velocity textures (used to snapshot A[1]/A[3]
+   into scratch before the in-place correction). */
+var BARO_COPY_FS = SHADER_HEAD + `
+precision highp float;
+layout(location=0) out vec4 o0;
+layout(location=1) out vec4 o1;
+uniform sampler2D uSrc0, uSrc1;
+void main(){
+  ivec2 t = ivec2(gl_FragCoord.xy);
+  o0 = texelFetch(uSrc0, t, 0);
+  o1 = texelFetch(uSrc1, t, 0);
+}`;
+
 var AIR_FS = SHADER_HEAD + SHADER_COMMON + `
 layout(location=0) out vec4 oLoA;
 layout(location=1) out vec4 oLoB;
@@ -1328,8 +1480,7 @@ void main(){
 
   float Dep = cellD(cell);
   float hT = clampH(ts.x, Dep);
-  float eta = ts.w;
-  float hD = Dep + eta - hT;
+  float hD = Dep - hT;
   float Ts = ts.y, St = ts.z;      float Td = ds.x, Sd = ds.y;
   vec2  vl = la.xy,  vh = ha.xy;
   float Tl = la.z,   Th = ha.z;
@@ -1374,12 +1525,10 @@ void main(){
   // dS = +E*S/(rho*h).
   St += uDt*EmP*St/(rhoW*hT);
 
-  // ---- SURFACE MASS FLUX: free surface and interface both move together ------
+  // ---- SURFACE MASS FLUX: only the interface moves, total volume is fixed --
   float hT0 = hT;
-  float dEp = -uDt*(EmP/rhoW + uSurfMass*(1.0-land));
-  eta += dEp;
-  hT = clampH(hT + dEp, Dep);
-  hD = Dep + eta - hT;
+  hT = clampH(hT - uDt*(EmP/rhoW + uSurfMass*(1.0-land)), Dep);
+  hD = Dep - hT;
   // The interface moved, so water crossed it and must carry its T and S along
   // (same entrainment/detrainment bookkeeping as in the dynamics pass).
   float dEnt = hT - hT0;
@@ -1513,10 +1662,13 @@ void main(){
   vt *= (1.0-land);              vd *= (1.0-land);
 
 ${mode === 'ocean'
-    ? `  oTopS  = vec4(hT, Ts, St, eta);
-   oTopV  = vec4(vt, tv.zw);
-   oDeepS = vec4(Td, Sd, 0.0, 0.0);
-   oDeepV = vec4(vd, 0.0, 0.0);`
+    ? `  oTopS  = vec4(hT, Ts, St, 0.0);
+  /* .zw is the lagged grad(eta) the ocean step stores for its Rhie-Chow face
+     interpolation. The coupling pass must PRESERVE it -- zeroing it here would
+     silently disable the checkerboard damping every other pass. */
+  oTopV  = vec4(vt, tv.zw);
+  oDeepS = vec4(Td, Sd, 0.0, 0.0);
+  oDeepV = vec4(vd, 0.0, 0.0);`
     : `  oLoA = vec4(vl, Tl, Pl);
   oLoB = vec4(q , cloud, 0.0, 0.0);
   oHiA = vec4(vh, Th, Ph);
@@ -1578,394 +1730,305 @@ void main(){
   oHiB = vec4(0.0008*c2, 0.0, 0.0, 0.0);
 }`;
 
-/* Shared velocity sampling for the streamline particle programs. Lets the SAME
-   denoised velocity feed BOTH advection (PART_FS) and streak direction
-   (PART_VS) so the two can never disagree. Modes:
-     0 = raw (legacy, bit-exact)
-     1 = in-shader 6-neighbour average, basis-rotated into the central cell
-     2..4 = read the pre-computed smooth texture (this.velSmoothCur) */
-var SAMPLE_VEL_GLSL = `
-vec2 sVelRaw(int cell, int vmode){
-  if(vmode==0) return texelFetch(uLoA, cTex(cell),0).xy;
-  if(vmode==1) return texelFetch(uTopV, cTex(cell),0).xy;
-  if(vmode==2) return texelFetch(uHiA, cTex(cell),0).xy;
-  return texelFetch(uDeepV, cTex(cell),0).xy;
-}
-/* Average the 1-ring neighbour velocities (rotated into the central cell basis
-   and land-masked) of field f at cell. */
-vec2 sNbrAvg(sampler2D f, int cell){
-  vec2 s = vec2(0.0); float w = 0.0;
-  float landC = texelFetch(uCellB, cTex(cell),0).w;
-  for(int k=0;k<6;k++){
-    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
-    if(na.w < 0.5) continue;
-    int j = int(na.x);
-    float landj = texelFetch(uCellB, cTex(j),0).w;
-    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
-    vec2 vj = texelFetch(f, cTex(j),0).xy*(1.0-landj);
-    vj = xfer(vj, nb.z, nb.w);
-    s += vj; w += (1.0-landj);
+/* ---------------------------------------------------------------------------
+   FLOW VISUALISATION -- streamlines / particles.
+
+   The raw per-cell velocity is dominated by fast turbulent fluctuations, so
+   naive advection produces slowly-shifting noise rather than clean current
+   lines -- worst of all in the slow deep/bottom layer. Three combinable
+   techniques (all toggled from the UI) address that:
+
+     * uUseSmooth : advect on a temporally-AVERAGED velocity field (a running
+                    EMA maintained per layer by SMOOTH_FS). Noise cancels over
+                    time, the coherent mean current survives, and stable
+                    streamlines emerge from the noise.
+     * uNormalize : move at a near-constant visible pace (direction only, speed
+                    replaced by uBaseSpeed) so even the very slow bottom water
+                    animates; true speed is still conveyed by brightness.
+     * uGain      : a plain velocity multiplier to amplify slow layers.
+
+   layerVel() is the single point where all three are applied, shared by the
+   advection pass (PART_FS) and the line/point draw (PART_VS), so they always
+   agree. uUseSmooth=0, uNormalize=0, uGain=1 reproduce the legacy field. */
+var PART_VEL_GLSL = `
+// A pool has TWO sublayers (ocean: top/deep, air: low/high). Each particle
+// carries its current sublayer; layerVel picks that sublayer's field, honouring
+// time-averaging, even-out-speed and gain.
+uniform sampler2D uVel0, uVel1, uSmooth0, uSmooth1;
+uniform float uMul0, uMul1;   // per-sublayer velocity scale (slow layers >1)
+uniform float uUseSmooth;     // 1 = read the temporally-averaged field
+uniform float uNormalize;     // 1 = constant-speed (direction only)
+uniform float uBaseSpeed;     // target speed used when uNormalize>0.5 (m/s)
+uniform float uGain;          // velocity multiplier
+vec2 layerVel(int cell, int layer){
+  vec2 v;
+  if(uUseSmooth > 0.5) v = (layer==0 ? texelFetch(uSmooth0,cTex(cell),0) : texelFetch(uSmooth1,cTex(cell),0)).xy;
+  else                 v = (layer==0 ? texelFetch(uVel0,  cTex(cell),0) : texelFetch(uVel1,  cTex(cell),0)).xy;
+  v *= (layer==0 ? uMul0 : uMul1);
+  if(uNormalize > 0.5){
+    float m = length(v);
+    v = (m > 1e-8) ? v/m*uBaseSpeed : vec2(0.0);
   }
-  if(w < 0.5) return texelFetch(f, cTex(cell),0).xy*(1.0-landC);
-  return s/w;
+  return v * uGain;
 }
-vec2 sampleVel(int cell, int vmode){
-  vec2 raw = sVelRaw(cell, vmode);
-  if(vmode==1 || vmode==3) raw *= uVelScale;
-  if(uVelSmoothMode==0) return raw;
-  if(uVelSmoothMode==1){
-    vec2 avg;
-    if(vmode==0) avg = sNbrAvg(uLoA, cell);
-    else if(vmode==1) avg = sNbrAvg(uTopV, cell);
-    else if(vmode==2) avg = sNbrAvg(uHiA, cell);
-    else avg = sNbrAvg(uDeepV, cell);
-    if(vmode==1 || vmode==3) avg *= uVelScale;
-    return mix(raw, avg, uVelSmooth);
-  }
-  vec2 sm;
-  if(vmode==0) sm = texelFetch(uSmoothLoA, cTex(cell),0).xy;
-  else if(vmode==1) sm = texelFetch(uSmoothTopV, cTex(cell),0).xy*uVelScale;
-  else if(vmode==2) sm = texelFetch(uSmoothHiA, cTex(cell),0).xy;
-  else sm = texelFetch(uSmoothDeepV, cTex(cell),0).xy*uVelScale;
-  return sm;
+int cellOf(vec3 pos, sampler2D lut){
+  float lon = atan(pos.z, pos.x), lat = asin(clamp(pos.y,-1.0,1.0));
+  return int(texture(lut, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).r + 0.5);
 }`;
 
-/* Velocity-field smoothing pass. Runs at cell resolution (W×H) on the four
-   velocity sources (topV/deepV/loA/hiA). Writes the smoothed .xy to four
-   attachments, copying the raw .zw scalars through. Two sub-modes selected by
-   uVelSmoothMode:
-     2 = spatial Jacobi step:  out = mix(raw, neighbourAvg(g), uVelSmooth)
-     3 = temporal EMA:         out = mix(g, raw, uAlpha)
-   Iterating mode 2 over the ping-pong (engine.updateVelSmooth) builds up a
-   multi-pass blur; mode 4 = spatial loop then a mode-3 EMA into the persistent
-   smooth. This is the corrected replacement for the wrong-grid 29_orn buffer. */
-var VELO_SMOOTH_FS = SHADER_HEAD + SHADER_COMMON + `
-layout(location=0) out vec4 oTopV;
-layout(location=1) out vec4 oDeepV;
-layout(location=2) out vec4 oLoA;
-layout(location=3) out vec4 oHiA;
-uniform sampler2D uRawTopV, uRawDeepV, uRawLoA, uRawHiA;
-uniform sampler2D uGTopV, uGDeepV, uGLoA, uGHiA;
-uniform int uVelSmoothMode;          // 2 = spatial step, 3 = temporal EMA
-uniform float uVelSmooth, uAlpha;
+/* ---------------------------------------------------------------------------
+   VERTICAL FLOW FIELD.
 
-vec2 sNbrAvg(sampler2D f, int cell){
-  vec2 s = vec2(0.0); float w = 0.0;
-  float landC = texelFetch(uCellB, cTex(cell),0).w;
-  for(int k=0;k<6;k++){
-    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
-    if(na.w < 0.5) continue;
-    int j = int(na.x);
-    float landj = texelFetch(uCellB, cTex(j),0).w;
-    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
-    vec2 vj = texelFetch(f, cTex(j),0).xy*(1.0-landj);
-    vj = xfer(vj, nb.z, nb.w);
-    s += vj; w += (1.0-landj);
-  }
-  if(w < 0.5) return texelFetch(f, cTex(cell),0).xy*(1.0-landC);
-  return s/w;
-}
+   Water is (nearly) incompressible and air only weakly compressible here, so
+   where a layer's horizontal transport CONVERGES the fluid must go down, and
+   where it DIVERGES fluid rises to replace it. The interface vertical velocity
+   is therefore a single, well-defined quantity per column:
 
+       w_interface  =  div( h_top * u_top )            (ocean)
+       w_air        = -div( u_low )                    (air, sign so +=rising)
+
+   By construction the two OCEAN layers share it with opposite sign (what sinks
+   out of the top enters the deep) and likewise the two AIR layers -- exactly
+   the "just inverted, up to a multiplier" relation. We compute it ONCE per
+   frame here (fast, one FV divergence pass, same 1-ring stencil the dynamics
+   use) into .x (ocean) / .y (air), then reuse it for both the up/down render
+   modes and the mass-consistent particle recycling. */
+var VFLOW_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 o;
+uniform sampler2D uTopS, uTopV, uDeepV, uLoA;
 void main(){
   int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
-  if(cell >= uCount){ oTopV=vec4(0.0); oDeepV=vec4(0.0); oLoA=vec4(0.0); oHiA=vec4(0.0); return; }
-  vec4 rT = texelFetch(uRawTopV, cTex(cell),0);
-  vec4 rD = texelFetch(uRawDeepV, cTex(cell),0);
-  vec4 rL = texelFetch(uRawLoA,  cTex(cell),0);
-  vec4 rH = texelFetch(uRawHiA,  cTex(cell),0);
-  if(uVelSmoothMode==2){
-    oTopV  = vec4(mix(rT.xy, sNbrAvg(uGTopV, cell), uVelSmooth), rT.zw);
-    oDeepV = vec4(mix(rD.xy, sNbrAvg(uGDeepV,cell), uVelSmooth), rD.zw);
-    oLoA   = vec4(mix(rL.xy, sNbrAvg(uGLoA,  cell), uVelSmooth), rL.zw);
-    oHiA   = vec4(mix(rH.xy, sNbrAvg(uGHiA,  cell), uVelSmooth), rH.zw);
-  } else {
-    vec2 gT = texelFetch(uGTopV, cTex(cell),0).xy;
-    vec2 gD = texelFetch(uGDeepV,cTex(cell),0).xy;
-    vec2 gL = texelFetch(uGLoA,  cTex(cell),0).xy;
-    vec2 gH = texelFetch(uGHiA,  cTex(cell),0).xy;
-    oTopV  = vec4(mix(gT, rT.xy, uAlpha), rT.zw);
-    oDeepV = vec4(mix(gD, rD.xy, uAlpha), rD.zw);
-    oLoA   = vec4(mix(gL, rL.xy, uAlpha), rL.zw);
-    oHiA   = vec4(mix(gH, rH.xy, uAlpha), rH.zw);
+  if(cell >= uCount){ o = vec4(0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell),0).w;
+  float h0  = texelFetch(uTopS, cTex(cell),0).x;
+  float Dep = cellD(cell);
+  vec2  vt0 = texelFetch(uTopV, cTex(cell),0).xy;
+  vec2  vd0 = texelFetch(uDeepV,cTex(cell),0).xy;
+  vec2  vl0 = texelFetch(uLoA,  cTex(cell),0).xy;
+  float area = texelFetch(uCellA, cTex(cell),0).w;
+  float divOc = 0.0, divDeep = 0.0, divAir = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x); float L = na.y;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    vec2 nrm = nb.xy;
+    float hj  = texelFetch(uTopS, cTex(j),0).x;
+    vec2  vtj = xfer(texelFetch(uTopV, cTex(j),0).xy, nb.z, nb.w);
+    vec2  vdj = xfer(texelFetch(uDeepV,cTex(j),0).xy, nb.z, nb.w);
+    vec2  vlj = xfer(texelFetch(uLoA,  cTex(j),0).xy, nb.z, nb.w);
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    float hdF = 0.5*((Dep-h0) + (cellD(j)-hj));
+    divOc   += L*0.5*(h0+hj)*0.5*dot(vt0+vtj, nrm)*wet;   // div(h_top u_top)
+    divDeep += L*hdF*0.5*dot(vd0+vdj, nrm)*wet;           // div(h_deep u_deep)
+    divAir  += L*0.5*dot(vl0+vlj, nrm);                   // div(u_low)
   }
+  divOc /= area; divDeep /= area; divAir /= area;
+  // VERTICAL MASS FLUX (kg/m^2/s). Velocity is not conserved across the density
+  // jump between layers, but MASS is: what sinks out of one layer enters the
+  // other. Each channel is rho * (horizontal transport divergence), and the
+  // integral of a divergence over a closed layer is zero, so globally
+  // upwelling mass == downwelling mass BY CONSTRUCTION.
+  //   rho_water = 1027 ; low-air column mass = rho_lo(1.1) * Hlo(5000) = 5500.
+  // .x = ocean interface mass flux (+ = upwelling: deep water rising into top)
+  // .y = air interface mass flux   (+ = ascent from low-level convergence)
+  // .z = deep-layer transport-divergence mass flux (diagnostic only; the deep
+  //      render/recycle uses -.x so the two layers are exact-inverse by design).
+  o = vec4(1027.0*divOc, -5500.0*divAir, 1027.0*divDeep, 0.0);
 }`;
 
-/* Particle update. Each slot carries two RGBA32F records:
-     uPartPos : xyz = unit position, w = continuous layer coord in [0,3]
-     uPartMeta: x = life remaining (s), y = max life (s), z = alive (0/1), w = seed
-   A particle advects along the horizontal flow of its current layer and crosses
-   layers with a PROBABILITY proportional to the local vertical flow. It has a
-   finite lifespan: when life runs out it despawns (alive -> 0). Dead slots are
-   respawned (proportionally to the local vertical flow) at a rate that balances
-   deaths, so the pool keeps a roughly constant average number of live particles
-   (partTarget * pool). */
-var PART_FS = SHADER_HEAD + SHADER_COMMON + `
-layout(location=0) out vec4 oPos;
-layout(location=1) out vec4 oMeta;
-uniform sampler2D uPartPos, uPartMeta, uLookup, uLoA, uTopV, uHiA, uDeepV;
-uniform sampler2D uSmoothTopV, uSmoothDeepV, uSmoothLoA, uSmoothHiA;
-uniform sampler2D uVert;            // per-cell vertical velocity, 4 layers (RGBA)
-uniform float uDt, uRadius, uSeed, uVelScale, uVertCouple, uVertRefH;
-uniform float uLifeMin, uLifeMax, uTarget;
-uniform int uVelSmoothMode;
-uniform float uVelSmooth;
+/* ---------------------------------------------------------------------------
+   PERSISTENT PARTICLE STATE (advection + recycling).
+
+   Particles are long-lived tracers, not per-frame confetti. This pass advances
+   ONLY the head position of each particle and its life phase; the swept trail
+   is maintained separately by TRAIL_FS (a history conveyor) so the tail is a
+   real path, not an instantaneously re-integrated streak that flickers when
+   the field turns.
+
+   Recycling is mass-consistent (uRecycle): a particle ages faster where the
+   flow converges (it is being carried DOWN out of its layer), and when it is
+   reborn it is placed where the flow DIVERGES (upwelling). Deaths at sinks +
+   births at sources keeps the particle density ~uniform, i.e. it honours
+   incompressibility, and makes particles trace the overturning circulation
+   instead of blinking at random. uRecycle=0 falls back to plain long life with
+   uniform random rebirth. */
+var STATE_FS = SHADER_HEAD + SHADER_COMMON + PART_VEL_GLSL + `
+out vec4 oState;
+uniform sampler2D uTrail, uState, uLookup, uVFlow;
+uniform float uDt, uLife, uRadius, uSeed, uMove, uTransK, uMaxP, uVScale, uFluxSign;
+uniform int   uWChan;         // 0 = read uVFlow.x (ocean), 1 = .y (air)
 uniform ivec2 uPDim;
-` + SAMPLE_VEL_GLSL + `
+
 vec3 randDir(float s){
   float a = hash11(s)*6.2831853;
   float z = hash11(s+91.7)*2.0-1.0;
   float r = sqrt(max(0.0,1.0-z*z));
   return vec3(r*cos(a), z, r*sin(a));
 }
-// 4 visualization layers, top->bottom: 0 high-air, 1 low-air, 2 ocean, 3 deep.
-int layerToVelMode(int L){ return L==0 ? 2 : (L==1 ? 0 : (L==2 ? 1 : 3)); }
-// Per-layer horizontal speed scaling (was per-streamlayer velScale).
-float layerScale(int L){ return L==2 ? 6.0 : (L==3 ? 60.0 : 1.0); }
-// Air divergence is ~1e-5, ocean ~1e-8, deep ~1e-10; this normaliser makes strong
-// (mostly air) cells accept with probability ~1 while weak cells accept rarely, so
-// SPAWN POSITION is sampled proportionally to the vertical flow magnitude.
-const float FLOW_NORM = 2.0e-5;
-// Rejection-sample a cell whose vertical flow is strong. Returns the cell and the
-// layer (0..3) with the largest |vertical flow| there.
-bool pickFlowCell(float pid, out int cell, out int layer){
-  for(int k=0;k<4;k++){
-    float rc = hash11(pid*1.31 + float(k)*4.7 + uSeed*2.9);
-    int c = clamp(int(rc * float(uCount)), 0, uCount-1);
-    vec4 wv = texelFetch(uVert, cTex(c), 0);
-    float f = max(max(abs(wv.x),abs(wv.y)), max(abs(wv.z),abs(wv.w)));
-    float ra = hash11(pid*2.71 + float(k)*1.3 + uSeed*0.7);
-    if(ra < f / FLOW_NORM){
-      cell = c;
-      int Ll = 0; float best=-1.0;
-      if(abs(wv.x)>best){best=abs(wv.x);Ll=0;}
-      if(abs(wv.y)>best){best=abs(wv.y);Ll=1;}
-      if(abs(wv.z)>best){best=abs(wv.z);Ll=2;}
-      if(abs(wv.w)>best){best=abs(wv.w);Ll=3;}
-      layer = Ll;
-      return true;
-    }
-  }
-  return false;
-}
 
 void main(){
   ivec2 t = ivec2(gl_FragCoord.xy);
   int pid = t.x + t.y*uPDim.x;
-  vec4 pos = texelFetch(uPartPos, t, 0);
-  vec4 meta = texelFetch(uPartMeta, t, 0);
-  float alive = meta.z;
+  vec4 s0 = texelFetch(uState, t, 0);
+  vec3 pos = texelFetch(uTrail, t, 0).xyz;      // slot 0 of the trail = head
+  int   layer = int(floor(s0.w));               // 0 or 1  (sublayer)
+  float age   = s0.w - float(layer);            // life phase in [0,1)
+  if(dot(pos,pos) < 0.1){ pos = randDir(float(pid)+uSeed); age = hash11(float(pid)*3.1+uSeed); }
+  pos = normalize(pos);
 
-  // ---- DEAD slot: maybe respawn (keeps the average live population at target) ----
-  if(alive < 0.5){
-    float f = clamp(uTarget, 0.0, 1.0);
-    float Tbar = 0.5*(uLifeMin + uLifeMax);
-    // births/sec that, at equilibrium with death rate 1/Tbar, yields fraction f alive
-    float pPerSec = f / max(1e-3, (1.0 - f) * Tbar);
-    float pr = clamp(pPerSec * uDt * 2.0, 0.0, 1.0); // *2 compensates rejection loss
-    float rr = hash11(float(pid)*0.37 + uSeed*2.3 + meta.w*5.0);
-    if(rr < pr){
-      int c; int Ll;
-      bool ok = pickFlowCell(float(pid) + meta.w*11.0, c, Ll);
-      if(!ok){
-        c = clamp(int(hash11(float(pid)*9.1+uSeed)*float(uCount)), 0, uCount-1);
-        Ll = int(hash11(float(pid)*3.3+uSeed)*4.0);
-      }
-      vec4 ca = texelFetch(uCellA, cTex(c), 0);
-      vec3 n = normalize(ca.xyz);
-      vec3 jpos = normalize(n + 0.12*randDir(float(pid)*1.7 + uSeed + float(Ll)));
-      float ml = uLifeMin + hash11(float(pid)*6.3+uSeed)*(uLifeMax - uLifeMin);
-      oPos  = vec4(jpos, float(Ll));
-      oMeta = vec4(ml, ml, 1.0, hash11(float(pid)*7.7+uSeed));
-      return;
-    }
-    oPos = pos; oMeta = meta; return;
+  int cell = cellOf(pos, uLookup);
+  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
+  vec3 e1 = cb.xyz, e2 = cross(e1, pos);
+  vec2 vel = layerVel(cell, layer);
+  vec3 v3 = vel.x*e1 + vel.y*e2;
+  vec3 step3 = v3*uDt/uRadius;
+  float sm = length(step3);
+  if(sm > 0.08) step3 *= 0.08/sm;               // cap per-step angular hop
+  pos = normalize(pos + step3);
+
+  // ---- MASS-PROPORTIONAL VERTICAL MOVEMENT BETWEEN LAYERS ----------------
+  // f>0 favours sublayer 0 -> 1 (ocean: sink to deep; air: rise to high); f<0
+  // favours 1 -> 0. The transition probability is proportional to the vertical
+  // mass flux, so particles descend at downwelling and rise at upwelling and
+  // thereby trace the overturning circulation instead of being confined to a
+  // single layer.
+  if(uMove > 0.5){
+    float f = uFluxSign * (uWChan==0 ? texelFetch(uVFlow, cTex(cell),0).x
+                                     : texelFetch(uVFlow, cTex(cell),0).y);
+    float fN = f / max(uVScale, 1e-9);
+    float rnd = hash11(float(pid)*2.3 + uSeed*7.0 + age);
+    if(layer==0 && fN > 0.0){ if(rnd < clamp(uTransK*fN, 0.0, uMaxP)) layer = 1; }
+    else if(layer==1 && fN < 0.0){ if(rnd < clamp(uTransK*(-fN), 0.0, uMaxP)) layer = 0; }
   }
 
-  // ---- ALIVE slot: advect, cross layers, age ---------------------------------
-  vec3 p = pos.xyz;
-  float L = pos.w;
-  if(dot(p,p) < 0.1) p = randDir(float(pid)+uSeed);
-  p = normalize(p);
-  int layer = clamp(int(floor(L + 0.5)), 0, 3);
-  int vm = layerToVelMode(layer);
-  float lon = atan(p.z, p.x);
-  float lat = asin(clamp(p.y,-1.0,1.0));
-  vec2 uv = vec2(lon/6.2831853+0.5, lat/3.14159265+0.5);
-  int cell = int(texture(uLookup, uv).r + 0.5);
-
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
-  vec3 e1 = cb.xyz, e2 = cross(e1, p);
-  vec2 vel = sampleVel(cell, vm) * layerScale(layer);
-  vec3 v3 = vel.x*e1 + vel.y*e2;
-  p = normalize(p + v3*uDt/uRadius);
-
-  // Layer crossing: probability of stepping ONE layer this step, proportional to
-  // the local vertical flow (up if wL>0, down if wL<0).
-  vec4 wv = texelFetch(uVert, cTex(cell), 0);
-  float wL = (layer==0) ? wv.x : (layer==1) ? wv.y : (layer==2) ? wv.z : wv.w;
-  float pu = clamp( max(0.0, wL) * uVertCouple * uDt / uVertRefH, 0.0, 1.0);
-  float pd = clamp( max(0.0,-wL) * uVertCouple * uDt / uVertRefH, 0.0, 1.0);
-  float r1 = hash11(float(pid)*1.7 + uSeed*3.1 + meta.w*13.0);
-  float r2 = hash11(float(pid)*2.3 + uSeed*5.7 + meta.w*7.0);
-  if(r1 < pu)      L += 1.0;
-  else if(r2 < pd) L -= 1.0;
-  L = clamp(L, 0.0, 3.0);
-
-  float life = meta.x - uDt;
-  if(life <= 0.0){ oPos = vec4(p, L); oMeta = vec4(0.0, meta.y, 0.0, meta.w); return; }
-  oPos  = vec4(p, L);
-  oMeta = vec4(life, meta.y, 1.0, meta.w);
+  // ---- LIFESPAN --------------------------------------------------------
+  age += uDt / uLife;
+  if(age >= 1.0){                                 // despawn -> respawn (pool size fixed)
+    pos = randDir(float(pid)*1.7 + uSeed*13.0);
+    age = 0.0;
+    layer = (hash11(float(pid)*5.7 + uSeed*3.0) < 0.5) ? 0 : 1;
+  }
+  age = min(age, 0.9999);                         // keep layer+age decodable
+  oState = vec4(pos, float(layer) + age);
 }`;
 
-/* Vertical-velocity (up/down flow) map. Computed once per frame at cell
-   resolution (W×H, much cheaper than per-particle) and consumed both by the
-   particle advection (to move parcels between layers) and by the globe/equirect
-   "W" mode (to draw the field). For each of the 4 layers we take the horizontal
-   divergence of its velocity field; by continuity the interface vertical
-   velocity equals the cumulative divergence above it, and a parcel's vertical
-   motion is the mean of the two interfaces bounding its layer. */
-var VEL_VERT_FS = SHADER_HEAD + SHADER_COMMON + `
-layout(location=0) out vec4 o;
-// uCellA/uCellB/uNbrA/uNbrB are declared by SHADER_COMMON; uHiA/uLoA/uTopV/uDeepV
-// are the per-layer velocity fields and uTopS carries h_top(.x) and eta(.w).
-uniform sampler2D uHiA, uLoA, uTopV, uDeepV, uTopS;
-
-float divFluxField(sampler2D f, sampler2D s, int cell, float Dep, bool isDeep, float airH){
-  float area = texelFetch(uCellA, cTex(cell),0).w;
-  float land = texelFetch(uCellB, cTex(cell),0).w;
-  float h0;
-  if(isDeep){
-    float e0 = texelFetch(s, cTex(cell),0).w;
-    h0 = Dep + e0 - texelFetch(s, cTex(cell),0).x;
-  } else if(airH > 0.0){
-    h0 = airH;
-  } else {
-    h0 = texelFetch(s, cTex(cell),0).x;
-  }
-  float div = 0.0;
-  for(int k=0;k<6;k++){
-    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
-    if(na.w < 0.5) continue;
-    int j = int(na.x);
-    float L = na.y;
-    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
-    vec2 nrm = nb.xy;
-    float landj = texelFetch(uCellB, cTex(j),0).w;
-    float wet = (1.0-landj)*(1.0-land);
-    vec2 v0 = texelFetch(f, cTex(cell),0).xy;
-    vec2 vj = texelFetch(f, cTex(j),0).xy;
-    vj = xfer(vj, nb.z, nb.w);
-    float hNb;
-    if(isDeep){
-      float ej = texelFetch(s, cTex(j),0).w;
-      hNb = Dep + ej - texelFetch(s, cTex(j),0).x;
-    } else if(airH > 0.0){
-      hNb = airH;
-    } else {
-      hNb = texelFetch(s, cTex(j),0).x;
-    }
-    float hFace = 0.5*(h0 + hNb);
-    vec2 vf = 0.5*(v0 + vj);
-    div += dot(vf, nrm) * L * wet * hFace;
-  }
-  return div / max(area, 1.0);
-}
-
+/* History conveyor. One texel per (particle, slot); slot 0 is the newest point.
+   Each frame every slot shifts one step toward the tail and the fresh head is
+   written to slot 0, so the stored trail IS the swept path. .w carries the
+   sublayer the particle was in at that point, so the trail is coloured by layer
+   and a descent/ascent shows as a colour transition along the tail. A rebirth
+   (head jumps far from last frame's head) collapses every slot onto the new
+   head so the trail restarts as a zero-length point and then grows. */
+var TRAIL_FS = SHADER_HEAD + `
+precision highp float;
+out vec4 o;
+uniform sampler2D uTrail, uState;
+uniform ivec2 uPDim;      // particles are PW x PH
+uniform int   uSlots;     // trail length T (texture is PW x PH*T)
 void main(){
-  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
-  if(cell >= uCount){ o = vec4(0.0); return; }
-  float Dep = cellD(cell);
-  // Per-layer FLUX DIVERGENCE of each velocity field. A parcel in layer k
-  // moves vertically by this (see PART_FS): convergence (div<0) -> upwelling,
-  // divergence (div>0) -> downwelling, so it can escape a closed gyre. The "W"
-  // view negates it so red = up / blue = down. Using each layer's OWN flux
-  // divergence (not a cumulative sum) keeps the ocean/deep fields ocean-specific
-  // instead of echoing the much larger air divergence.
-  float dH = divFluxField(uHiA,  uTopS, cell, Dep, false, 6000.0);  // high-air
-  float dL = divFluxField(uLoA,  uTopS, cell, Dep, false, 5000.0);  // low-air
-  float dO = divFluxField(uTopV, uTopS, cell, Dep, false, 0.0);     // ocean top
-  float dD = divFluxField(uDeepV, uTopS, cell, Dep, true,  0.0);    // ocean deep
-  o = vec4(dH, dL, dO, dD);
+  ivec2 f = ivec2(gl_FragCoord.xy);
+  int px = f.x;
+  int slot = f.y / uPDim.y;
+  int py = f.y - slot*uPDim.y;
+  vec4 sHead = texelFetch(uState, ivec2(px, py), 0);
+  vec3 head = sHead.xyz;
+  float headLayer = floor(sHead.w);
+  vec3 prevHead = texelFetch(uTrail, ivec2(px, py), 0).xyz;            // slot 0 (old head)
+  bool respawn = dot(normalize(head), normalize(prevHead)) < 0.98;      // ~11 deg jump
+  if(respawn || slot == 0){ o = vec4(head, headLayer); return; }
+  o = texelFetch(uTrail, ivec2(px, py + (slot-1)*uPDim.y), 0);          // shift (xyz + layer)
+}`;
+
+/* Temporal averaging pass. Maintains a per-layer running exponential moving
+   average of the raw (u,v) field:  avg <- mix(avg, current, uAlpha).
+   Small uAlpha = long memory = heavy smoothing (noise cancels, mean survives);
+   uAlpha=1 copies the instantaneous field (no averaging). One texel per cell,
+   run once per layer per frame -- cheap. */
+var SMOOTH_FS = SHADER_HEAD + `
+out vec4 o;
+uniform sampler2D uCur, uPrev;
+uniform float uAlpha;
+void main(){
+  ivec2 t = ivec2(gl_FragCoord.xy);
+  vec2 cur  = texelFetch(uCur,  t, 0).xy;
+  vec2 prev = texelFetch(uPrev, t, 0).xy;
+  if(any(isnan(cur)))  cur  = vec2(0.0);
+  if(any(isnan(prev))) prev = cur;
+  o = vec4(mix(prev, cur, clamp(uAlpha,0.0,1.0)), 0.0, 0.0);
 }`;
 
 var PART_VS = SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uPartPos, uPartMeta, uLoA, uTopV, uHiA, uDeepV, uLookup;
-uniform sampler2D uSmoothTopV, uSmoothDeepV, uSmoothLoA, uSmoothHiA;
+uniform sampler2D uTrail, uState;
 uniform mat4 uMVP;
 uniform ivec2 uPDim;
-uniform float uTrail, uRadius, uEquirect, uVelScale, uAsPoints, uPointSize;
-uniform int uVelSmoothMode, uStreamMask;
-uniform float uVelSmooth, uTrailFade;
-uniform vec3 uStreamCols[4];
-out float vA; out vec3 vColor;
-` + SAMPLE_VEL_GLSL + `
-int layerToVelMode(int L){ return L==0 ? 2 : (L==1 ? 0 : (L==2 ? 1 : 3)); }
-float layerScale(int L){ return L==2 ? 6.0 : (L==3 ? 60.0 : 1.0); }
-void main(){
-  int pid = (uAsPoints > 0.5) ? gl_VertexID : (gl_VertexID >> 1);
-  int isTail = (uAsPoints > 0.5) ? 0 : (gl_VertexID & 1);
-  ivec2 t = ivec2(pid % uPDim.x, pid / uPDim.x);
-  vec4 p = texelFetch(uPartPos, t, 0);
-  vec4 meta = texelFetch(uPartMeta, t, 0);
-  vec3 pos = normalize(p.xyz);
-  float L = p.w;
-  int layer = clamp(int(floor(L + 0.5)), 0, 3);
-  int vm = layerToVelMode(layer);
-  vColor = uStreamCols[layer];
-  // Per-layer on/off (bitmask) AND alive flag gate visibility.
-  float vis = (meta.z > 0.5 && ((uStreamMask >> layer) & 1) != 0) ? 1.0 : 0.0;
+uniform int   uSlots;      // texture holds PW x PH*uSlots
+uniform float uRadius, uEquirect, uAsPoints, uPointSize;
+uniform int   uDrawSlots;  // how many trail slots to draw (<= uSlots)
+uniform vec3  uColor0, uColor1;   // sublayer colours
+uniform int   uMask, uIdx0, uIdx1; // streamline enable bits for the two sublayers
+out float vA;
+out vec3  vCol;
 
-  float lon = atan(pos.z, pos.x), lat = asin(clamp(pos.y,-1.0,1.0));
-  vec2 uv = vec2(lon/6.2831853+0.5, lat/3.14159265+0.5);
-  int cell = int(texture(uLookup, uv).r + 0.5);
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
-  vec3 e1 = cb.xyz, e2 = cross(e1, pos);
-  vec2 vel = sampleVel(cell, vm) * layerScale(layer);
-  vec3 v3 = vel.x*e1 + vel.y*e2;                              // tangent velocity (m/s)
-  // Back-step along the flow to draw a streak.  Clamp the angular extent so a
-  // velocity spike (e.g. near coasts) or an oversized trail cannot fling the
-  // tail far across the planet and paint a long stray line (globe mode bug).
-  float s = length(v3) * (uTrail / uRadius) * ((vm==1 || vm==3) ? 10.0 : 1.0);
-  s = min(s, 0.35);                                           // ~20 deg cap
-  vec3 tdir = (length(v3) > 1e-6) ? v3 / length(v3) : vec3(0.0);
-  vec3 tail = normalize(pos - tdir * s);                      // arc back along flow
-  vec3 outp = isTail == 1 ? tail : pos;
-  // The "uTrailFade" option dims the trailing vertex into a comet so a
-  // velocity-direction reversal flips only the faint end, not a full-bright streak.
-  vA = vis * ((isTail == 1 && uTrailFade > 0.5) ? 0.2 : 1.0);
+vec4 slotTex(int px, int py, int slot){
+  return texelFetch(uTrail, ivec2(px, py + slot*uPDim.y), 0);
+}
+
+void main(){
+  int K = max(uDrawSlots, 2);
+  int pid, slot;
+  if(uAsPoints > 0.5){ pid = gl_VertexID; slot = 0; }
+  else {
+    int perp = 2*(K-1);                 // 2 verts per LINES segment, K-1 segments
+    pid = gl_VertexID / perp;
+    int loc = gl_VertexID - pid*perp;
+    int seg = loc >> 1;                 // segment 0..K-2 (0 = nearest head)
+    slot = seg + (loc & 1);             // slot 0..K-1 along the trail
+  }
+  int px = pid % uPDim.x, py = pid / uPDim.x;
+  vec4 st = slotTex(px, py, slot);
+  vec3 pos = normalize(st.xyz);
+  int layer = int(floor(st.w + 0.5));               // sublayer at this trail point
+
+  vCol = (layer == 0) ? uColor0 : uColor1;
+  int on = (layer == 0) ? ((uMask >> uIdx0) & 1) : ((uMask >> uIdx1) & 1);
+
+  float age = texelFetch(uState, ivec2(px, py), 0).w;
+  age = age - floor(age);                            // strip the packed layer
+  float env = smoothstep(0.0, 0.07, age) * (1.0 - smoothstep(0.82, 1.0, age));
+  float tailFade = 1.0 - float(slot)/float(K) * 0.85;
+  vA = env * tailFade * float(on);
+
   if(uEquirect > 0.5){
-    vec2 uvHead = vec2(lon/6.2831853+0.5, lat/3.14159265+0.5);
-    vec2 uvTail = vec2(atan(tail.z,tail.x)/6.2831853+0.5, asin(clamp(tail.y,-1.0,1.0))/3.14159265+0.5);
-    // A streak that straddles the date line or a pole would be drawn as one
-    // straight segment spanning the whole viewport.  Instead push the far
-    // endpoint to the adjacent map edge so the streak stops at the boundary.
-    bool wrap = abs(uvHead.x - uvTail.x) > 0.5 || abs(uvHead.y - uvTail.y) > 0.5;
-    if (wrap) {
-      if (abs(uvHead.x - uvTail.x) > 0.5) uvTail.x = uvHead.x > 0.5 ? 1.0 : 0.0;
-      if (abs(uvHead.y - uvTail.y) > 0.5) uvTail.y = uvHead.y > 0.5 ? 1.0 : 0.0;
-    }
-    vec2 uvdraw = (isTail == 1 ? uvTail : uvHead);
-    gl_Position = vec4(uvdraw*2.0 - 1.0, 0.0, 1.0);
+    vec3 h = normalize(slotTex(px, py, 0).xyz);
+    vec2 uvH = vec2(atan(h.z,h.x)/6.2831853+0.5, asin(clamp(h.y,-1.0,1.0))/3.14159265+0.5);
+    vec2 uv  = vec2(atan(pos.z,pos.x)/6.2831853+0.5, asin(clamp(pos.y,-1.0,1.0))/3.14159265+0.5);
+    if(abs(uvH.x - uv.x) > 0.5) uv.x = uvH.x > 0.5 ? 1.0 : 0.0;   // clamp seam/pole wrap
+    if(abs(uvH.y - uv.y) > 0.5) uv.y = uvH.y > 0.5 ? 1.0 : 0.0;
+    gl_Position = vec4(uv*2.0 - 1.0, 0.0, 1.0);
   } else {
-    gl_Position = uMVP * vec4(outp*1.012, 1.0);
+    gl_Position = uMVP * vec4(pos*1.012, 1.0);
   }
   gl_PointSize = uPointSize;
 }`;
 
 var PART_PS = SHADER_HEAD + `
-in float vA; in vec3 vColor; uniform float uAsPoints; out vec4 o;
+precision highp float;
+in float vA; in vec3 vCol; uniform float uAsPoints; out vec4 o;
 void main(){
+  if (vA <= 0.001) discard;
   float a = vA * 0.75;
   if (uAsPoints > 0.5) {
     float d = length(gl_PointCoord - 0.5);
     a *= smoothstep(0.5, 0.15, d);
   }
-  o = vec4(vColor, a);
+  o = vec4(vCol, a);
 }`;
 
 function GLOBE_VS(m) {
 return SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uVert;
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uVFlow;
 uniform mat4 uMVP;
 uniform float uRelief;
 out vec3 vN; out float vVal; out float vLand; out float vCloud; out vec3 vPos;
@@ -2019,8 +2082,10 @@ vec3 pal(float t){
   if(t<0.8) return mix(c3,c4,(t-0.6)/0.2);
   return mix(c4,c5,(t-0.8)/0.2);
 }
+${DIVPAL_GLSL}
 void main(){
   vec3 base = pal(vVal);
+${modeDivSrc(m)}
 ${modeMagSrc(m)}
 ${modeLandSrc(m)}
   vec3 N = normalize(vN);

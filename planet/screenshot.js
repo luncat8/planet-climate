@@ -30,6 +30,7 @@ var MODE_LOW_AIR_SPEED = 4;
 var VIEW_KEYS = [
   'equirect', 'nightShading', 'mode', 'showClouds', 'showLand',
   'relief', 'streamline', 'streamTrail', 'dayNight',
+  'flowAvg', 'flowSmooth', 'flowLines', 'flowSegs', 'flowUniform', 'flowGain',
 ];
 
 /* Catalog of capture configs shown in both dropdowns. The first is the default
