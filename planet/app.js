@@ -503,6 +503,58 @@ function buildUI() {
   barlab.appendChild(el('span', null, 'high'));
   panel.appendChild(barlab);
 
+  /* ---- Flow visualization toolbox --------------------------------------
+     Combinable methods for turning the noisy velocity field into clean,
+     legible flow. Each checkbox is independent; sliders tune the method they
+     sit under. Registered into ui.checks / ui.knobInputs so the shared
+     refreshDynamic()/syncSliders() keep them in sync with the params. */
+  panel.appendChild(el('div', 'lab', 'Flow visualization'));
+  var flowDesc = el('div');
+  flowDesc.style.cssText = 'font-size:10px;line-height:1.45;color:#64748b;margin-bottom:6px';
+  flowDesc.textContent = 'Average out turbulence so coherent currents read as lines — helps the slow deep layer most.';
+  panel.appendChild(flowDesc);
+
+  function addFlowCheck(key, label, title) {
+    var lab = el('label', 'chk');
+    var sp = el('span', null, label);
+    if (title) sp.title = title;
+    lab.appendChild(sp);
+    var inp = document.createElement('input');
+    inp.type = 'checkbox';
+    inp.className = 'accent-cyan-400';
+    inp.onchange = function () { setParam(key, inp.checked ? 1 : 0); };
+    ui.checks[key] = inp;
+    lab.appendChild(inp);
+    panel.appendChild(lab);
+  }
+  function addFlowSlider(key) {
+    var spec = PARAMS[key];
+    var wrap = el('div', 'stline');
+    wrap.style.margin = '2px 0 8px';
+    wrap.appendChild(el('span', 'slab', spec.label));
+    var inp = document.createElement('input');
+    inp.type = 'range';
+    var b = boundsOf(ui.planet, key);
+    inp.min = b.min; inp.max = b.max; inp.step = b.step;
+    inp.value = ui.planet ? ui.planet.params[key] : spec.default;
+    inp.oninput = function () { setParam(key, parseFloat(inp.value)); };
+    wrap.appendChild(inp);
+    var val = el('span', 'v', '');
+    wrap.appendChild(val);
+    panel.appendChild(wrap);
+    ui.knobInputs[key] = inp;
+    ui.knobVals[key] = val;
+  }
+  addFlowCheck('flowAvg', 'Time-averaged flow',
+    'Advect on a running average of the velocity field so turbulent noise cancels and the mean current stands out.');
+  addFlowSlider('flowSmooth');
+  addFlowCheck('flowLines', 'Continuous lines',
+    'Draw smooth multi-segment streamlines that follow the field, instead of dots / single short streaks.');
+  addFlowSlider('flowSegs');
+  addFlowCheck('flowUniform', 'Even out speed',
+    'Move particles at a steady visible pace regardless of true speed, so even the slow bottom water animates.');
+  addFlowSlider('flowGain');
+
   // checkboxes
   var chkDefs = [
     ['showClouds', 'Clouds & rain overlay'],
@@ -596,6 +648,7 @@ function buildUI() {
     var spec = PARAMS[key];
     if (spec.step === undefined) return;
     if (key === 'streamTrail') return;
+    if (key.indexOf('flow') === 0) return;    // shown in the Flow visualization panel
     if (key === 'oceanScheme') return;   // rendered as a <select> above
     var wrap = el('div');
     wrap.style.marginBottom = '10px';

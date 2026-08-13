@@ -1564,11 +1564,57 @@ void main(){
   oHiB = vec4(0.0008*c2, 0.0, 0.0, 0.0);
 }`;
 
-var PART_FS = SHADER_HEAD + SHADER_COMMON + `
+/* ---------------------------------------------------------------------------
+   FLOW VISUALISATION -- streamlines / particles.
+
+   The raw per-cell velocity is dominated by fast turbulent fluctuations, so
+   naive advection produces slowly-shifting noise rather than clean current
+   lines -- worst of all in the slow deep/bottom layer. Three combinable
+   techniques (all toggled from the UI) address that:
+
+     * uUseSmooth : advect on a temporally-AVERAGED velocity field (a running
+                    EMA maintained per layer by SMOOTH_FS). Noise cancels over
+                    time, the coherent mean current survives, and stable
+                    streamlines emerge from the noise.
+     * uNormalize : move at a near-constant visible pace (direction only, speed
+                    replaced by uBaseSpeed) so even the very slow bottom water
+                    animates; true speed is still conveyed by brightness.
+     * uGain      : a plain velocity multiplier to amplify slow layers.
+
+   layerVel() is the single point where all three are applied, shared by the
+   advection pass (PART_FS) and the line/point draw (PART_VS), so they always
+   agree. uUseSmooth=0, uNormalize=0, uGain=1 reproduce the legacy field. */
+var PART_VEL_GLSL = `
+uniform sampler2D uLoA, uTopV, uHiA, uDeepV, uVelSmooth;
+uniform int   uVelMode;
+uniform float uVelMul;      // per-layer scale (ocean layers use >1), applied to raw
+uniform float uUseSmooth;   // 1 = read the temporally-averaged field
+uniform float uNormalize;   // 1 = constant-speed (direction only)
+uniform float uBaseSpeed;   // target speed used when uNormalize>0.5 (m/s)
+uniform float uGain;        // velocity multiplier
+vec2 layerVel(int cell){
+  vec2 v;
+  if(uUseSmooth > 0.5)  v = texelFetch(uVelSmooth, cTex(cell),0).xy;
+  else if(uVelMode==0)  v = texelFetch(uLoA,   cTex(cell),0).xy;
+  else if(uVelMode==1)  v = texelFetch(uTopV,  cTex(cell),0).xy;
+  else if(uVelMode==2)  v = texelFetch(uHiA,   cTex(cell),0).xy;
+  else                  v = texelFetch(uDeepV, cTex(cell),0).xy;
+  v *= uVelMul;
+  if(uNormalize > 0.5){
+    float m = length(v);
+    v = (m > 1e-8) ? v/m*uBaseSpeed : vec2(0.0);
+  }
+  return v * uGain;
+}
+int cellOf(vec3 pos, sampler2D lut){
+  float lon = atan(pos.z, pos.x), lat = asin(clamp(pos.y,-1.0,1.0));
+  return int(texture(lut, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).r + 0.5);
+}`;
+
+var PART_FS = SHADER_HEAD + SHADER_COMMON + PART_VEL_GLSL + `
 out vec4 oPart;
-uniform sampler2D uPart, uLookup, uLoA, uTopV, uHiA, uDeepV;
-uniform float uDt, uLife, uRadius, uSeed, uVelScale;
-uniform int uVelMode;
+uniform sampler2D uPart, uLookup;
+uniform float uDt, uLife, uRadius, uSeed;
 uniform ivec2 uPDim;
 
 vec3 randDir(float s){
@@ -1587,21 +1633,17 @@ void main(){
   if(dot(pos,pos) < 0.1) pos = randDir(float(pid)+uSeed);
   pos = normalize(pos);
 
-  float lon = atan(pos.z, pos.x);
-  float lat = asin(clamp(pos.y,-1.0,1.0));
-  vec2 uv = vec2(lon/6.2831853+0.5, lat/3.14159265+0.5);
-  int cell = int(texture(uLookup, uv).r + 0.5);
-
+  int cell = cellOf(pos, uLookup);
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 e1 = cb.xyz, e2 = cross(e1, pos);
-  vec2 vel;
-  if(uVelMode==0)      vel = texelFetch(uLoA, cTex(cell),0).xy;
-  else if(uVelMode==1) vel = texelFetch(uTopV, cTex(cell),0).xy*uVelScale;
-  else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
-  else                 vel = texelFetch(uDeepV, cTex(cell),0).xy*uVelScale;
-  vec2 uvw = vel;
-  vec3 v3 = uvw.x*e1 + uvw.y*e2;
-  pos = normalize(pos + v3*uDt/uRadius);
+  vec2 vel = layerVel(cell);
+  vec3 v3 = vel.x*e1 + vel.y*e2;
+  // clamp the per-step angular hop so an amplified spike can't teleport a
+  // particle across the globe in one substep.
+  vec3 step3 = v3*uDt/uRadius;
+  float sm = length(step3);
+  if(sm > 0.08) step3 *= 0.08/sm;
+  pos = normalize(pos + step3);
 
   age -= uDt/uLife;
   if(age <= 0.0){
@@ -1611,53 +1653,88 @@ void main(){
   oPart = vec4(pos, age);
 }`;
 
-var PART_VS = SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uPart, uLoA, uTopV, uHiA, uDeepV, uLookup;
+/* Temporal averaging pass. Maintains a per-layer running exponential moving
+   average of the raw (u,v) field:  avg <- mix(avg, current, uAlpha).
+   Small uAlpha = long memory = heavy smoothing (noise cancels, mean survives);
+   uAlpha=1 copies the instantaneous field (no averaging). One texel per cell,
+   run once per layer per frame -- cheap. */
+var SMOOTH_FS = SHADER_HEAD + `
+out vec4 o;
+uniform sampler2D uCur, uPrev;
+uniform float uAlpha;
+void main(){
+  ivec2 t = ivec2(gl_FragCoord.xy);
+  vec2 cur  = texelFetch(uCur,  t, 0).xy;
+  vec2 prev = texelFetch(uPrev, t, 0).xy;
+  if(any(isnan(cur)))  cur  = vec2(0.0);
+  // A freshly-allocated prev texture (or one seeded with garbage) must not
+  // poison the average: mix(NaN, cur, 1.0) is NaN because NaN*0 == NaN, and
+  // that NaN would then persist forever. Fall back to the current field.
+  if(any(isnan(prev))) prev = cur;
+  o = vec4(mix(prev, cur, clamp(uAlpha,0.0,1.0)), 0.0, 0.0);
+}`;
+
+var PART_VS = SHADER_HEAD + SHADER_COMMON + PART_VEL_GLSL + `
+uniform sampler2D uPart, uLookup;
 uniform mat4 uMVP;
 uniform ivec2 uPDim;
-uniform float uTrail, uRadius, uEquirect, uVelScale, uAsPoints, uPointSize;
-uniform int uVelMode;
+uniform float uTrail, uRadius, uEquirect, uAsPoints, uPointSize;
+uniform int   uLineSteps;   // segments per streamline (1 = legacy single streak)
 out float vA;
+
+// One RK1 back-integration step of the (smoothed) field, returning the
+// previous point along the flow.
+vec3 backStep(vec3 pos, float segArc){
+  int cell = cellOf(pos, uLookup);
+  vec3 e1 = texelFetch(uCellB, cTex(cell), 0).xyz;
+  vec3 e2 = cross(e1, pos);
+  vec2 vel = layerVel(cell);
+  vec3 v3 = vel.x*e1 + vel.y*e2;
+  float m = length(v3);
+  if(m < 1e-9) return pos;
+  float dang = min(m*segArc, 0.06);            // per-segment angular cap
+  return normalize(pos - (v3/m)*dang);
+}
+
 void main(){
-  int pid = (uAsPoints > 0.5) ? gl_VertexID : (gl_VertexID >> 1);
-  int isTail = (uAsPoints > 0.5) ? 0 : (gl_VertexID & 1);
+  int K = max(uLineSteps, 1);
+  int pid, n;
+  if(uAsPoints > 0.5){ pid = gl_VertexID; n = 0; }
+  else {
+    int perp = 2*K;                            // 2 verts per LINES segment
+    pid = gl_VertexID / perp;
+    int loc = gl_VertexID - pid*perp;
+    int seg = loc >> 1;                         // segment index 0..K-1
+    n = seg + (loc & 1);                        // back-index 0..K of this vertex
+  }
   ivec2 t = ivec2(pid % uPDim.x, pid / uPDim.x);
   vec4 p = texelFetch(uPart, t, 0);
-  vec3 pos = normalize(p.xyz);
-  float lon = atan(pos.z, pos.x), lat = asin(clamp(pos.y,-1.0,1.0));
-  int cell = int(texture(uLookup, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).r + 0.5);
-  vec4 cb = texelFetch(uCellB, cTex(cell), 0);
-  vec3 e1 = cb.xyz, e2 = cross(e1, pos);
-  vec2 vel;
-  if(uVelMode==0)      vel = texelFetch(uLoA, cTex(cell),0).xy;
-  else if(uVelMode==1) vel = texelFetch(uTopV, cTex(cell),0).xy*uVelScale;
-  else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
-  else                 vel = texelFetch(uDeepV, cTex(cell),0).xy*uVelScale;
-  vec3 v3 = vel.x*e1 + vel.y*e2;                              // tangent velocity (m/s)
-  // Back-step along the flow to draw a streak.  Clamp the angular extent so a
-  // velocity spike (e.g. near coasts) or an oversized trail cannot fling the
-  // tail far across the planet and paint a long stray line (globe mode bug).
-  float s = length(v3) * (uTrail / uRadius);
-  s = min(s, 0.35);                                           // ~20 deg cap
-  vec3 tdir = (length(v3) > 1e-6) ? v3 / length(v3) : vec3(0.0);
-  vec3 tail = normalize(pos - tdir * s);                      // arc back along flow
-  vec3 outp = isTail == 1 ? tail : pos;
-  vA = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
+  vec3 head = normalize(p.xyz);
+
+  // March back n integration steps along the field to this vertex's position.
+  // segArc is the per-segment share of the total trail budget.
+  float segArc = (uTrail / uRadius) / float(K);
+  vec3 pos = head;
+  for(int i=0;i<64;i++){
+    if(i >= n) break;
+    pos = backStep(pos, segArc);
+  }
+
+  // alpha: particle age envelope * fade toward the tail of the line.
+  float ageFade = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
+  float lineFade = (K > 1) ? (1.0 - float(n)/float(K)*0.85) : 1.0;
+  vA = ageFade * lineFade;
+
   if(uEquirect > 0.5){
-    vec2 uvHead = vec2(lon/6.2831853+0.5, lat/3.14159265+0.5);
-    vec2 uvTail = vec2(atan(tail.z,tail.x)/6.2831853+0.5, asin(clamp(tail.y,-1.0,1.0))/3.14159265+0.5);
-    // A streak that straddles the date line or a pole would be drawn as one
-    // straight segment spanning the whole viewport.  Instead push the far
-    // endpoint to the adjacent map edge so the streak stops at the boundary.
-    bool wrap = abs(uvHead.x - uvTail.x) > 0.5 || abs(uvHead.y - uvTail.y) > 0.5;
-    if (wrap) {
-      if (abs(uvHead.x - uvTail.x) > 0.5) uvTail.x = uvHead.x > 0.5 ? 1.0 : 0.0;
-      if (abs(uvHead.y - uvTail.y) > 0.5) uvTail.y = uvHead.y > 0.5 ? 1.0 : 0.0;
-    }
-    vec2 uv = (isTail == 1 ? uvTail : uvHead);
+    vec2 uvHead = vec2(atan(head.z,head.x)/6.2831853+0.5, asin(clamp(head.y,-1.0,1.0))/3.14159265+0.5);
+    vec2 uv     = vec2(atan(pos.z ,pos.x )/6.2831853+0.5, asin(clamp(pos.y ,-1.0,1.0))/3.14159265+0.5);
+    // Streaks straddling the date line or a pole would otherwise draw as a
+    // segment spanning the whole viewport; clamp the wrapped end to the edge.
+    if(abs(uvHead.x - uv.x) > 0.5) uv.x = uvHead.x > 0.5 ? 1.0 : 0.0;
+    if(abs(uvHead.y - uv.y) > 0.5) uv.y = uvHead.y > 0.5 ? 1.0 : 0.0;
     gl_Position = vec4(uv*2.0 - 1.0, 0.0, 1.0);
   } else {
-    gl_Position = uMVP * vec4(outp*1.012, 1.0);
+    gl_Position = uMVP * vec4(pos*1.012, 1.0);
   }
   gl_PointSize = uPointSize;
 }`;

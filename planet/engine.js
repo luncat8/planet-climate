@@ -197,6 +197,7 @@ Planet.prototype.compile = function () {
   this.prog.init = new Prog(gl, QUAD_VS, INIT_FS, 'init');
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
   this.prog.part = new Prog(gl, QUAD_VS, PART_FS, 'part');
+  this.prog.smooth = new Prog(gl, QUAD_VS, SMOOTH_FS, 'smooth');
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
   this.prog.equiCloud = new Prog(gl, EQUI_VS, EQUI_CLOUD_FS, 'equiCloud');
@@ -294,6 +295,18 @@ Planet.prototype.build = function (level) {
              velMode:L.velMode, velScale:L.velScale, color:L.color };
   });
 
+  /* Per-layer temporally-averaged velocity (RG in .xy), ping-ponged. The
+     running EMA lets coherent currents emerge from turbulent noise so the
+     streamlines read as clean lines instead of slowly-shifting speckle. One
+     W*H texture per layer, updated once per frame by SMOOTH_FS. */
+  this.smooth = streamLayers.map(function (L, i) {
+    var a = self.mkTex(W, H, null), b = self.mkTex(W, H, null);
+    var fa = self.mkFbo([a]), fb = self.mkFbo([b]);
+    self.fbo['smooth' + i + 'a'] = fa; self.fbo['smooth' + i + 'b'] = fb;
+    return { tex:[a,b], idx:0, fboA:'smooth' + i + 'a', fboB:'smooth' + i + 'b' };
+  });
+  this.smoothInit = false;   // first pass copies the raw field (alpha=1)
+
   this.ibo = gl.createBuffer();
   this.vaoGlobe = gl.createVertexArray();
   gl.bindVertexArray(this.vaoGlobe);
@@ -308,6 +321,7 @@ Planet.prototype.build = function (level) {
 Planet.prototype.destroyGrid = function () {
   var gl = this.gl;
   var partTexs = this.part.reduce(function (a, s) { return a.concat(s.tex); }, []);
+  if (this.smooth) partTexs = this.smooth.reduce(function (a, s) { return a.concat(s.tex); }, partTexs);
   var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
   if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
@@ -316,7 +330,50 @@ Planet.prototype.destroyGrid = function () {
   if (this.ibo) gl.deleteBuffer(this.ibo);
   if (this.vaoGlobe) gl.deleteVertexArray(this.vaoGlobe);
   if (this.vaoEmpty) gl.deleteVertexArray(this.vaoEmpty);
-  this.A = []; this.B = []; this.part = [];
+  this.A = []; this.B = []; this.part = []; this.smooth = [];
+};
+
+/* Raw velocity texture feeding layer `velMode`'s temporal average and draw.
+   0 = low air, 1 = ocean top, 2 = high air, 3 = deep ocean (see streamLayers). */
+Planet.prototype.velSrcTex = function (velMode) {
+  return velMode === 0 ? this.A[4]
+       : velMode === 1 ? this.A[1]
+       : velMode === 2 ? this.A[6]
+       : this.A[3];
+};
+
+/* Advance the per-layer velocity EMA one frame. alpha = 1 - flowSmooth, so a
+   higher "Averaging strength" means a smaller alpha and a longer memory. The
+   first pass after (re)build copies the raw field so the average starts warm
+   rather than fading up from zero. */
+Planet.prototype.stepSmooth = function () {
+  var gl = this.gl;
+  var P = this.params;
+  var s = P.flowSmooth === undefined ? 0.9 : P.flowSmooth;
+  var alpha = this.smoothInit ? Math.max(0.0, Math.min(1.0, 1.0 - s)) : 1.0;
+  for (var i = 0; i < this.smooth.length; i++) {
+    var sm = this.smooth[i];
+    var src = sm.tex[sm.idx];
+    var dstFbo = sm.idx === 0 ? sm.fboB : sm.fboA;
+    var pr = this.prog.smooth.use();
+    pr.tex('uCur', this.velSrcTex(this.part[i].velMode)).tex('uPrev', src).f('uAlpha', alpha);
+    this.fullscreen(dstFbo, this.grid.W, this.grid.H);
+    sm.idx = 1 - sm.idx;
+  }
+  this.smoothInit = true;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+};
+Planet.prototype.smoothTex = function (i) {
+  var sm = this.smooth[i];
+  return sm.tex[sm.idx];
+};
+
+/* Base speed used by the "even out speed" mode. Normalising every layer to the
+   same unit magnitude makes the visible line length depend only on the trail
+   budget and the gain slider (not on the layer's true, wildly different speed),
+   so the very slow bottom water animates and reads just like the surface. */
+Planet.prototype.flowBaseSpeed = function (velMode) {
+  return 1.0;
 };
 
 Planet.prototype.gridUniforms = function (p) {
@@ -664,6 +721,25 @@ Planet.prototype._maxResidual = function (texName) {
   return buf[0];
 };
 
+/* Bind the shared flow-visualisation velocity uniforms for layer `i` onto the
+   currently-used program (advection pass and the line/point draw both use the
+   identical layerVel() in GLSL, so they stay in sync). */
+Planet.prototype.bindFlow = function (p, i) {
+  var P = this.params;
+  var s = this.part[i];
+  var useSmooth = (P.flowAvg === undefined ? 1 : P.flowAvg) > 0.5 ? 1.0 : 0.0;
+  if (!this.smoothInit) useSmooth = 0.0;   // no EMA yet -> fall back to raw field
+  var norm = (P.flowUniform ? 1.0 : 0.0);
+  p.tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
+    .tex('uVelSmooth', this.smoothTex(i))
+    .i('uVelMode', s.velMode)
+    .f('uVelMul', s.velScale)
+    .f('uUseSmooth', useSmooth)
+    .f('uNormalize', norm)
+    .f('uBaseSpeed', this.flowBaseSpeed(s.velMode))
+    .f('uGain', P.flowGain === undefined ? 1.0 : P.flowGain);
+};
+
 Planet.prototype.stepParticles = function (dt) {
   var gl = this.gl;
   for (var i = 0; i < this.part.length; i++) {
@@ -673,11 +749,10 @@ Planet.prototype.stepParticles = function (dt) {
     var p = this.prog.part.use();
     this.gridUniforms(p);
     p.tex('uPart', src).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH)
       .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', this.params.planetRadius)
-      .f('uSeed', this.seedRand() * 1000)
-      .i('uVelMode', s.velMode).f('uVelScale', s.velScale);
+      .f('uSeed', this.seedRand() * 1000);
+    this.bindFlow(p, i);
     this.fullscreen(dstFbo, this.PW, this.PH);
     s.idx = 1 - s.idx;
   }
@@ -749,6 +824,8 @@ Planet.prototype.render = function () {
   }
 
   var dots = P.streamTrail <= 0;
+  var lines = (P.flowLines === undefined ? 1 : P.flowLines) > 0.5 && !dots;
+  var K = lines ? Math.max(1, P.flowSegs | 0) : 1;
   var psz = 2.0 * Math.min(2, dpr);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
@@ -761,14 +838,13 @@ Planet.prototype.render = function () {
     var pp = this.prog.points.use();
     this.gridUniforms(pp);
     pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
-      .iv2('uPDim', this.PW, this.PH)      .m4('uMVP', mvp).f('uEquirect', 0.0)
+      .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp).f('uEquirect', 0.0)
       .f('uTrail', trail).f('uRadius', this.params.planetRadius)
-      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
-      .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
+      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz).i('uLineSteps', K)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
+    this.bindFlow(pp, pi);
     gl.bindVertexArray(this.vaoEmpty);
-    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
+    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2 * K));
   }
   gl.depthMask(true);
   gl.disable(gl.BLEND);
@@ -813,6 +889,8 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
   }
 
   var dots = P.streamTrail <= 0;
+  var lines = (P.flowLines === undefined ? 1 : P.flowLines) > 0.5 && !dots;
+  var K = lines ? Math.max(1, P.flowSegs | 0) : 1;
   var psz = 2.0 * Math.min(2, window.devicePixelRatio || 1);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
@@ -824,14 +902,13 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     var pp = this.prog.points.use();
     this.gridUniforms(pp);
     pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
       .f('uTrail', trail).f('uRadius', this.params.planetRadius)
-      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
-      .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
+      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz).i('uLineSteps', K)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
+    this.bindFlow(pp, pi);
     gl.bindVertexArray(this.vaoEmpty);
-    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
+    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2 * K));
   }
   gl.depthMask(true);
   gl.disable(gl.BLEND);
@@ -843,6 +920,7 @@ Planet.prototype.loop = function () {
   var P = this.params;
   if (P.running) {
     for (var i = 0; i < P.substeps; i++) this.step();
+    this.stepSmooth();
     this.stepParticles(P.dt * P.substeps);
   }
   this.render();

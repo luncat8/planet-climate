@@ -224,6 +224,18 @@ var PARAMS = {
   streamline:     { default: 2 },
   streamTrail:    { label: 'Streamline length', default: 6000, min: 0, max: 30000, step: 500,
                     fmt: function (v) { return v <= 0 ? 'dots' : (v / 60).toFixed(0) + ' min'; } },
+  /* ---- Flow visualisation toolbox (combinable rendering methods) ----------
+     None of these touch the physics; they only change how the streamline /
+     particle layer is advected and drawn. */
+  flowAvg:        { label: 'Time-averaged flow', default: 1 },
+  flowSmooth:     { label: 'Averaging strength', default: 0.9, min: 0, max: 0.98, step: 0.01,
+                    fmt: function (v) { return Math.round(v * 100) + '%'; } },
+  flowLines:      { label: 'Continuous lines', default: 1 },
+  flowSegs:       { label: 'Line segments', default: 24, min: 2, max: 48, step: 1,
+                    fmt: function (v) { return String(v | 0); } },
+  flowUniform:    { label: 'Even out speed', default: 0 },
+  flowGain:       { label: 'Flow gain', default: 1, min: 0.2, max: 8, step: 0.1,
+                    fmt: function (v) { return (+v).toFixed(1) + '×'; } },
   showLand:       { default: 1 },
   nightShading:   { default: 1 },
   relief:         { default: 0.004 },
