@@ -48,6 +48,7 @@ function applyPreset(src) {
   var p = ui.planet;
   if (!p) return;
   var map = normalizePreset(src);
+  var gridChanged = false;
   Object.keys(map).forEach(function (key) {
     if (!PARAMS[key]) return; // ignore unknown params
     var e = map[key];
@@ -57,8 +58,12 @@ function applyPreset(src) {
     if (e.v !== undefined) {
       var b = boundsOf(p, key);
       p.params[key] = clamp(Number(e.v), b.min, b.max);
+      if (GRID_PARAMS.indexOf(key) >= 0) gridChanged = true;
     }
   });
+  /* A planet-scale geometry change (radius) bakes into the static grid
+     texture, so rebuild rather than silently doing nothing. */
+  if (gridChanged) rebuild(ui.level);
   syncSliders();
   refreshDynamic();
 }
@@ -115,7 +120,7 @@ function el(tag, cls, txt) {
 /* Params that are baked into the static uCellC bathymetry texture at build
    time. Changing one of these has no effect until the grid is regenerated,
    so trigger a rebuild instead of silently doing nothing. */
-var GRID_PARAMS = ['bathyMode', 'depthMax', 'shelfWidth', 'bathyRough', 'dShelf', 'hTop', 'hTotal', 'seed'];
+var GRID_PARAMS = ['bathyMode', 'depthMax', 'shelfWidth', 'bathyRough', 'dShelf', 'hTop', 'hTotal', 'seed', 'planetRadius'];
 
 var _gridRebuildTimer = null;
 function setParam(k, v) {
@@ -623,8 +628,14 @@ function buildUI() {
     var name = sel.value;
     if (name === 'Default') {
       ui.planet.bounds = {};
+      var before = {};
+      GRID_PARAMS.forEach(function (k) { before[k] = ui.planet.params[k]; });
       var def = defaultParams();
       Object.keys(def).forEach(function (key) { ui.planet.params[key] = def[key]; });
+      /* A planet-scale geometry param (radius) may have changed, so rebuild the
+         grid the same way a real preset would. */
+      var gridChanged = GRID_PARAMS.some(function (k) { return ui.planet.params[k] !== before[k]; });
+      if (gridChanged) rebuild(ui.level);
       syncSliders(); refreshDynamic();
     } else {
       applyPreset(BUILTIN_PRESETS[name]);

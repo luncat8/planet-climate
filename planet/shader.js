@@ -25,7 +25,7 @@ var CORI_FRIC_GLSL = `vec2 coriFric(vec2 v0, vec2 acc, float dt, float fric, flo
 var MODE_FIELDS = [
   '(la.z-238.0)/72.0',                       // 0  low-air T
   '(wt.x-260.0)/50.0',                       // 1  ocean-surface T
-  '(la.w-101325.0)/2600.0*0.5+0.5',          // 2  low-air P
+  '(la.w-uPlow)/(2600.0*uPlow/101325.0)*0.5+0.5', // 2  low-air P
   'lb.x/0.022',                              // 3  humidity
   'length(la.xy)/34.0',                      // 4  wind speed
   'length(wt.yz)/1.1',                        // 5  ocean current
@@ -33,7 +33,7 @@ var MODE_FIELDS = [
   '(wt.w-33.0)/4.0',                         // 7  salinity
   '(wd.x-272.0)/16.0',                       // 8  deep-ocean T
   '(ha.z-215.0)/45.0',                       // 9  high-air T
-  '(ha.w-45000.0)/4000.0*0.5+0.5',           // 10 high-air P
+  '(ha.w-uPhigh)/(4000.0*uPhigh/45000.0)*0.5+0.5', // 10 high-air P
   'hb.x/0.022',                              // 11 high-air humidity
   'length(ha.xy)/34.0',                      // 12 high-air speed
   'length(wd.yz)/0.25',                      // 13 deep-ocean speed
@@ -101,6 +101,7 @@ uniform sampler2D uCellB;    // east.xyz, land
 uniform sampler2D uCellC;    // D (total depth), hRef, bedElev, coastDist
 uniform sampler2D uNbrA;     // idx , edgeLen , dist , valid
 uniform sampler2D uNbrB;     // nx , ny , rotA , rotB
+uniform float uPlow, uPhigh;  // reference surface / high-layer pressure [Pa]
 
 ivec2 cTex(int i){ int y = i / uDim.x; return ivec2(i - y*uDim.x, y); }
 ivec2 nTex(int i,int k){ int y = i / uDim.x; return ivec2(i - y*uDim.x, y + k*uDim.y); }
@@ -288,6 +289,7 @@ uniform float uMassSpring;   // weak global mass correction (1/s)
 uniform float uHtot, uHref;  // legacy global depth / reference thickness (m)
                              // (superseded per-cell by uCellC; kept for INIT)
 uniform float uPgfTop;       // pressure-gradient gain, top layer  [m/s^2 per m]
+uniform float uGravity;      // surface gravity (m/s^2) -- replaces literal 9.81
 uniform float uPgfDeepGain;  // multiplier on the deep layer's g'  [-]
 uniform float uRhieChow;     // Rhie-Chow face-velocity smoothing  [-] 0 = legacy
 uniform float uFbStab;       // forward-backward gravity-wave stabiliser [-] 0 = legacy
@@ -302,7 +304,7 @@ float buoy(float T, float S){ return uAlphaT*(T-283.0) - uBetaS*(S-35.0); }
 float gPrime(float Tt, float St, float Td, float Sd){
   float rhoT = 1027.0*(1.0 - uAlphaT*(Tt-283.0) + uBetaS*(St-35.0));
   float rhoD = 1027.0*(1.0 - uAlphaT*(Td-283.0) + uBetaS*(Sd-35.0));
-  return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
+  return uGravity*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
 }
 
 ${CORI_FRIC_GLSL}
@@ -674,6 +676,7 @@ uniform float uSteric, uStericRate;
 uniform float uMassSpring;
 uniform float uHtot, uHref;
 uniform float uPgfTop, uPgfDeepGain;
+uniform float uGravity;      // surface gravity (m/s^2) -- replaces literal 9.81
 uniform float uRhieChow;
 uniform float uCoriCN;
 
@@ -681,7 +684,7 @@ float buoy(float T, float S){ return uAlphaT*(T-283.0) - uBetaS*(S-35.0); }
 float gPrime(float Tt, float St, float Td, float Sd){
   float rhoT = 1027.0*(1.0 - uAlphaT*(Tt-283.0) + uBetaS*(St-35.0));
   float rhoD = 1027.0*(1.0 - uAlphaT*(Td-283.0) + uBetaS*(Sd-35.0));
-  return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
+  return uGravity*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
 }
 ${CORI_FRIC_GLSL}
 
@@ -927,12 +930,13 @@ uniform sampler2D uTopS, uTopV, uDeepS, uDeepV;
 uniform sampler2D uEta;
 uniform float uDt, uNuT, uAlphaT, uBetaS;
 uniform float uPgfTop, uPgfDeepGain;
+uniform float uGravity;      // surface gravity (m/s^2) -- replaces literal 9.81
 
 float buoy(float T, float S){ return uAlphaT*(T-283.0) - uBetaS*(S-35.0); }
 float gPrime(float Tt, float St, float Td, float Sd){
   float rhoT = 1027.0*(1.0 - uAlphaT*(Tt-283.0) + uBetaS*(St-35.0));
   float rhoD = 1027.0*(1.0 - uAlphaT*(Td-283.0) + uBetaS*(Sd-35.0));
-  return 9.81*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
+  return uGravity*clamp((rhoD - rhoT)/rhoD, -1.0, 1.0);
 }
 
 void main(){
@@ -1267,6 +1271,7 @@ uniform float uSurfMass;   // extra uniform surface mass forcing on h_top (m/s)
 uniform float uVertHeat;   // vertical heat exchange coeff [W/m^2/K]
 uniform float uVertSalt;   // vertical salt exchange coeff [kg/m^2/s per ppt]
 uniform float uHtot;       // total ocean depth [m]
+uniform float uGravity, uRhoLo;  // planet gravity + low-air density (replace 9.81 / rhoL=1.1)
 
 uniform float uAirCs;      // 0 = overwrite P from T (legacy); else relax toward it
 uniform float uAirPRelax;  // 1/s nudge of prognostic P toward thermal P(T)
@@ -1278,11 +1283,8 @@ const float cpA  = 1004.0;
 const float cpW  = 4000.0;
 const float rhoW = 1027.0;
 const float CwLd = 5.0e6;
-const float Ca   = 5.6e6;
-const float Cah  = 3.6e6;
-const float rhoL = 1.1;
-const float Hlo  = 5000.0;
-const float Hhi  = 6000.0;
+const float Hlo  = 5000.0;   // low-air scale thickness [m]
+const float Hhi  = 6000.0;   // high-air scale thickness [m]
 
 float meanInsol(float lat, float decl){
   float x = -tan(clamp(lat,-1.4,1.4))*tan(decl);
@@ -1319,6 +1321,15 @@ void main(){
   float q  = lb.x,   qh = hb.x;
   float cloud = lb.y, rain = hb.y;
 
+  /* Planet-aware air properties. Computed per-call because they depend on the
+     uRhoLo / uGravity / uPlow uniforms (GLSL forbids non-const global
+     initializers). Earth (rhoL = 1.1, g = 9.81) reproduces the original
+     5.6e6 / 3.6e6 heat capacities and unchanged dP/dT coefficients. */
+  float Ca   = 5.6e6 * (uRhoLo / 1.1);
+  float Cah  = 3.6e6 * (uRhoLo / 1.1);
+  float dpdTscale = (uRhoLo * uGravity) / (1.1 * 9.81);
+  float PsatLo = uPlow * 0.964899;   // 98000 / 101325 of surface pressure
+
   // heat capacity per m^2 of each ocean layer, and of the land skin
   float CwT = cpW*rhoW*hT;         // J/m^2/K
   float CwD = cpW*rhoW*hD;
@@ -1330,7 +1341,7 @@ void main(){
   float S = uSolar*mu*(1.0 - clamp(alb,0.0,0.9));
 
   float spd = length(vl);
-  float qs_s = qsat(Ts, 101325.0);
+  float qs_s = qsat(Ts, uPlow);
   float evap = (1.0 - 0.75*land)*uEvap*(0.6 + 0.08*spd)*max(0.0, qs_s - q);  // kg/m2/s
   float precip = rain*0.001*(1.0-land);                                      // kg/m2/s
   // Net freshwater loss from the ocean surface. Masked ONCE, here, so that the
@@ -1342,7 +1353,7 @@ void main(){
 
   Ts += uDt*(Fsol_s - Fsens - Le*evap)/Cw;
   Tl += uDt*(Fsens + 0.10*S)/Ca;
-  q  += uDt*evap/(rhoL*Hlo);
+  q  += uDt*evap/(uRhoLo*Hlo);
   // Evaporation leaves salt behind, precipitation dilutes: the salt CONTENT
   // rho*h*S of the top layer is unchanged, only its thickness changes, so
   // dS = +E*S/(rho*h).
@@ -1372,7 +1383,7 @@ void main(){
   // momentum flux barely nudges the ocean but strongly decelerates the wind.
   vec2 rel = vl - vt;
   vec2 dstress = uWindStress*uDt*rel*(1.0-land);
-  float massRatio = (rhoL*Hlo)/(rhoW*hT);
+  float massRatio = (uRhoLo*Hlo)/(rhoW*hT);
   vl -= dstress;
   vt += dstress*massRatio;
 
@@ -1393,11 +1404,11 @@ void main(){
   vec2 dmom = 0.35*r*(vl - vh);
   vl -= dmom; vh += dmom*0.6;
 
-  float qsh = qsat(Th, 45000.0);
+  float qsh = qsat(Th, uPhigh);
   float cond = max(0.0, qh - qsh)*0.4;
   qh -= cond;
   Th += cond*Le/cpA*0.35;
-  float qsl = qsat(Tl, 98000.0);
+  float qsl = qsat(Tl, PsatLo);
   float condl = max(0.0, q - qsl)*0.25;
   q  -= condl;
   Tl += condl*Le/cpA*0.30;
@@ -1420,7 +1431,7 @@ void main(){
   float rd = -0.00017*(Td-283.0) + 0.00078*(Sd-35.0);
   float dRho = rt - rd;                        // >0 unstable, <0 stable
   vec2  dvOc = vt - vd;
-  float gpOc = max(-dRho, 0.0)*9.81/1.0;       // reduced gravity of the pair
+  float gpOc = max(-dRho, 0.0)*uGravity;        // reduced gravity of the pair
   float stab;
   if(dRho > 0.0){
     // convectively unstable: overturning, capped so dt*rate stays sane
@@ -1466,8 +1477,8 @@ void main(){
      Otherwise this is only a relaxation TARGET: the air step integrates
      ∂P/∂t = -c²ρ∇·u, and we nudge toward P_therm on a ~day timescale so
      Hadley/Walker stay thermally driven without instantly wiping eddies. */
-  float PlTh = 101325.0 - uAirDpdT*(Tl - 288.0) + 0.4*uAirDpdT*(Th - 250.0);
-  float PhTh = 45000.0  + uAirDpdTHi*(0.5*(Tl + Th) - 268.0);
+  float PlTh = uPlow - uAirDpdT*dpdTscale*(Tl - 288.0) + 0.4*uAirDpdT*dpdTscale*(Th - 250.0);
+  float PhTh = uPhigh + uAirDpdTHi*dpdTscale*(0.5*(Tl + Th) - 268.0);
   float Pl, Ph;
   if(uAirCs < 0.5){
     Pl = PlTh;
@@ -1532,6 +1543,7 @@ layout(location=1) out vec4 oLoB;
 layout(location=2) out vec4 oHiA;
 layout(location=3) out vec4 oHiB;
 uniform float uSeed;
+uniform float uGravity, uRhoLo;
 ${CORI_FRIC_GLSL}
 
 void main(){
@@ -1543,8 +1555,9 @@ void main(){
   float rn = hash21(vec2(float(cell), uSeed+7.0))-0.5;
   float Tl0 = 268.0 + 30.0*c2 + rn*1.2;
   float Th0 = 232.0 + 12.0*c2 + rn*0.6;
-  float Pl0 = 101325.0 - 180.0*(Tl0 - 288.0) + 72.0*(Th0 - 250.0);
-  float Ph0 = 45000.0  + 200.0*(0.5*(Tl0 + Th0) - 268.0);
+  float dpdTscale0 = (uRhoLo * uGravity) / (1.1 * 9.81);
+  float Pl0 = uPlow - 180.0*dpdTscale0*(Tl0 - 288.0) + 72.0*dpdTscale0*(Th0 - 250.0);
+  float Ph0 = uPhigh + 200.0*dpdTscale0*(0.5*(Tl0 + Th0) - 268.0);
   oLoA = vec4(rn*0.5, rn*0.5, Tl0, Pl0);
   oLoB = vec4(0.004*c2, 0.0, 0.0, 0.0);
   oHiA = vec4(rn*0.5, rn*0.5, Th0, Ph0);

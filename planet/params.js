@@ -17,8 +17,16 @@ var PARAMS = {
      freeze the sun (tidal lock) while Coriolis keeps spinning. */
   omegaOrbit:{ label: 'Sun angular rate',     default: 6.2831853 / 86400, min: 0, max: 3e-4, step: 1e-6,
                fmt: function (v) { return v > 1e-8 ? (6.2831853 / v / 3600).toFixed(1) + ' h/day' : 'frozen (locked)'; } },
-  solar:     { label: 'Solar constant',       default: 1361,  min: 800, max: 2000, step: 10,   fmt: function (v) { return v + ' W/m²'; } },
-  greenhouse:{ label: 'Greenhouse',           default: 0.55,  min: 0,   max: 1,    step: 0.01 },
+  solar:     { label: 'Solar constant',       default: 1361,  min: 800, max: 4000, step: 10,   fmt: function (v) { return v + ' W/m²'; } },
+  greenhouse:{ label: 'Greenhouse factor',    default: 0.55,  min: 0,   max: 1,    step: 0.01 },
+  /* ---- PLANET-SCALE PHYSICS (Earth-tuned defaults; exposed so non-Earth
+      bodies can be simulated). All downstream shaders read these as uniforms
+      (uGravity, uSurfacePressure via uPlow/uPhigh, uRhoLo, planet-radius), so the
+      default values reproduce the original Earth behaviour exactly. */
+  gravity:       { label: 'Surface gravity',    default: 9.81,    min: 0.1, max: 30,     step: 0.01, fmt: function (v) { return v.toFixed(2) + ' m/s²'; } },
+  surfacePressure:{ label: 'Surface pressure',  default: 101325,  min: 0,   max: 2e7,    step: 1000, fmt: function (v) { return (v / 1000).toFixed(v < 1e4 ? 3 : 0) + ' kPa'; } },
+  atmosDensity:  { label: 'Air density (low)',  default: 1.1,     min: 0,   max: 200,     step: 0.1,  fmt: function (v) { return v.toFixed(3) + ' kg/m³'; } },
+  planetRadius:  { label: 'Planet radius',      default: 6371e3,  min: 1e5, max: 1e7,     step: 1e3,  fmt: function (v) { return (v / 1000).toFixed(0) + ' km'; } },
   nuVelAir:  { label: 'Air viscosity ν',      default: 1.6e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
   nuTAir:    { label: 'Air heat diffusion',   default: 1.1e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
   /* 1.6e-5 s^-1 is a 17-hour e-folding — any free vortex dies before it can
@@ -267,7 +275,7 @@ var BUILTIN_PRESETS = {
   },
   'Vivid Ocean': {
     /* Уменьшаем горизонтальную вязкость океана (default 6e3) → меньше сглаживания, живее фронты */
-    nuVelOcean:     { v: 2e3 },
+    nuVelOcean:     { v: 3e3 },
 
     /* Снижаем трение верхнего слоя (default 1.5e-6) и дна (default 2.5e-3) → течения дольше живут */
     fricOceanTop:   { v: 8e-7 },
@@ -286,6 +294,53 @@ var BUILTIN_PRESETS = {
 
     /* Немного больше шума для разрыва симметрии и появления структур (default 0.02) */
     noise:          { v: 0.04 }
+  },
+
+  /* ---- PLANET PRESETS -------------------------------------------------
+     Earth is the reference baseline (the other presets are meant to be compared
+     against it). Moon and Venus exercise the new planet-scale physics params:
+     gravity, surfacePressure, atmosDensity and planetRadius. Non-Earth bodies
+     keep the default ocean geometry (the engine always carries ocean layers),
+     but the air column is scaled by pressure/density/gravity so the climate
+     responds correctly. */
+  'Earth': {
+    gravity:        { v: 9.81 },
+    surfacePressure:{ v: 101325 },
+    atmosDensity:   { v: 1.1 },
+    planetRadius:   { v: 6371e3 },
+    greenhouse:     { v: 0.55 },
+    omegaSpin:      { v: 7.292e-5 },
+    omegaOrbit:     { v: 6.2831853 / 86400 },
+    solar:          { v: 1361 },
+  },
+  /* Moon: low gravity, (at least tiny surface pressure and air
+     density so the fluid solver stays finite), slow-ish rotation, Earth-like
+     insolation from the Sun. 
+     we apply 'terraformed Moon' pressure.
+     */
+  'Moon': {
+    gravity:        { v: 1.62 },
+    surfacePressure:{ v: 50000 },
+    atmosDensity:   { v: 0.8 },
+    planetRadius:   { v: 1737e3 },
+    greenhouse:     { v: 0.0 },
+    omegaSpin:      { v: 2.66e-6 },
+    omegaOrbit:     { v: 2 * Math.PI / (27.3 * 86400) },
+    solar:          { v: 1361 },
+    depthMax:       { v: 200 },
+  },
+  /* Venus: ~0.9 g, very high surface pressure (CO2) and dense low-air column,
+     strong greenhouse (hot), very slow rotation, ~1.9x Earth insolation. */
+  'Venus': {
+    gravity:        { v: 8.87 },
+    surfacePressure:{ v: 9.2e6 },
+    atmosDensity:   { v: 65 },
+    planetRadius:   { v: 6052e3 },
+    greenhouse:     { v: 1.0 },
+    omegaSpin:      { v: 3e-7 },
+    omegaOrbit:     { v: 2 * Math.PI / (225 * 86400) },
+    solar:          { v: 2614 },
+    depthMax:       { v: 200 },
   },
 
 };

@@ -225,6 +225,7 @@ Planet.prototype.build = function (level) {
      used to call Math.random(), which made runs unreproducible. */
   var gp = this.params || {};
   var g = new Grid(level, gp.seed === undefined ? 12345 : gp.seed, {
+    radius:     gp.planetRadius === undefined ? 6371e3 : gp.planetRadius,
     bathyMode:  gp.bathyMode,  hTotal:     gp.hTotal,
     hTop:       gp.hTop,       depthMax:   gp.depthMax,
     shelfWidth: gp.shelfWidth, bathyRough: gp.bathyRough,
@@ -325,7 +326,9 @@ Planet.prototype.gridUniforms = function (p) {
     .tex('uNbrA', this.texNbrA).tex('uNbrB', this.texNbrB)
     .f('uHmin', this.params.hMin === undefined ? 40 : this.params.hMin)
     .f('uRiCrit', this.params.riCrit === undefined ? 0.25 : this.params.riCrit)
-    .f('uMixConv', this.params.mixConv === undefined ? 50 : this.params.mixConv);
+    .f('uMixConv', this.params.mixConv === undefined ? 50 : this.params.mixConv)
+    .f('uPlow', this.params.surfacePressure === undefined ? 101325 : this.params.surfacePressure)
+    .f('uPhigh', (this.params.surfacePressure === undefined ? 101325 : this.params.surfacePressure) * 0.442692);
 };
 Planet.prototype.fullscreen = function (fboName, w, h) {
   var gl = this.gl;
@@ -358,7 +361,9 @@ Planet.prototype.reset = function () {
     .f('uHtop', this.params.hTop).f('uHtotal', this.params.hTotal);
   this.fullscreen('init', W, H);
   var p2 = this.prog.init2.use();
-  this.gridUniforms(p2); p2.f('uSeed', this.seedRand() * 1000);
+  this.gridUniforms(p2);
+  p2.f('uSeed', this.seedRand() * 1000)
+    .f('uGravity', this.params.gravity).f('uRhoLo', this.params.atmosDensity);
   this.fullscreen('init2', W, H);
 };
 
@@ -496,7 +501,9 @@ Planet.prototype.couple = function () {
       .f('uAirCs', P.airCs === undefined ? 40 : P.airCs)
       .f('uAirPRelax', P.airPRelax === undefined ? 8e-6 : P.airPRelax)
       .f('uAirDpdT', P.airDpdT === undefined ? 180 : P.airDpdT)
-      .f('uAirDpdTHi', P.airDpdTHi === undefined ? 200 : P.airDpdTHi);
+      .f('uAirDpdTHi', P.airDpdTHi === undefined ? 200 : P.airDpdTHi)
+      .f('uGravity', P.gravity)
+      .f('uRhoLo', P.atmosDensity);
     self.fullscreen(pair[0], W, H);
   });
 };
@@ -541,6 +548,7 @@ Planet.prototype.step = function () {
       .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
       .f('uCdBottom', P.cdBottom).f('uFricDepthRef', P.fricDepthRef)
       .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
+      .f('uGravity', P.gravity)
       .f('uDrag', P.oceanDrag + P.mechanicalFric)
       .f('uSteric', P.steric).f('uStericRate', P.stericRate)
       .f('uMassSpring', P.massSpring)
@@ -559,7 +567,7 @@ Planet.prototype.step = function () {
     .f('uDt', P.dt).f('uOmega', P.omegaSpin)
     .f('uNuVel', P.nuVelAir).f('uNuT', P.nuTAir)
     .f('uFricLo', P.fricAirLow).f('uFricHi', P.fricAirHigh)
-    .f('uRhoLo', 1.1).f('uRhoHi', 0.55)
+    .f('uRhoLo', P.atmosDensity).f('uRhoHi', P.atmosDensity * 0.5)
     .f('uCoriCN', P.coriCN ? 1 : 0)
     .f('uCourantMax', P.airCourantMax)
     .f('uAirAdvect', P.airAdvect === undefined ? 0 : (P.airAdvect | 0))
@@ -588,13 +596,14 @@ Planet.prototype.stepOceanB = function () {
     .f('uNuVel', P.nuVelOcean).f('uNuT', P.nuTOcean)
     .f('uFricTop', P.fricOceanTop).f('uFricDeep', P.fricOceanDeep)
     .f('uCdBottom', P.cdBottom).f('uFricDepthRef', P.fricDepthRef)
-    .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
-    .f('uDrag', P.oceanDrag + P.mechanicalFric)
-    .f('uSteric', P.steric).f('uStericRate', P.stericRate)
-    .f('uMassSpring', P.massSpring)
-    .f('uHtot', P.hTotal).f('uHref', P.hTop)
-    .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
-    .f('uRhieChow', 0).f('uCoriCN', P.coriCN ? 1 : 0);
+      .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
+      .f('uGravity', P.gravity)
+      .f('uDrag', P.oceanDrag + P.mechanicalFric)
+      .f('uSteric', P.steric).f('uStericRate', P.stericRate)
+      .f('uMassSpring', P.massSpring)
+      .f('uHtot', P.hTotal).f('uHref', P.hTop)
+      .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
+      .f('uRhieChow', 0).f('uCoriCN', P.coriCN ? 1 : 0);
   this.fullscreen('P', W, H);
 
   // 2. RHS probe: R = eta_pred - dt*div(h*u*) from the predicted state. P -> etaA.
@@ -635,8 +644,9 @@ Planet.prototype.stepOceanB = function () {
     .tex('uDeepS', this.P[2]).tex('uDeepV', this.P[3])
     .tex('uEta', this[src])
     .f('uDt', P.dt).f('uNuT', P.nuTOcean)
-    .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
-    .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4);
+      .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
+      .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
+      .f('uGravity', P.gravity);
   this.fullscreen('dynO', W, H);
 };
 
@@ -665,7 +675,7 @@ Planet.prototype.stepParticles = function (dt) {
     p.tex('uPart', src).tex('uLookup', this.texLookup)
       .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH)
-      .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', PLANET_R)
+      .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', this.params.planetRadius)
       .f('uSeed', this.seedRand() * 1000)
       .i('uVelMode', s.velMode).f('uVelScale', s.velScale);
     this.fullscreen(dstFbo, this.PW, this.PH);
@@ -752,8 +762,8 @@ Planet.prototype.render = function () {
     this.gridUniforms(pp);
     pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
       .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
-      .iv2('uPDim', this.PW, this.PH).m4('uMVP', mvp).f('uEquirect', 0.0)
-      .f('uTrail', trail).f('uRadius', PLANET_R)
+      .iv2('uPDim', this.PW, this.PH)      .m4('uMVP', mvp).f('uEquirect', 0.0)
+      .f('uTrail', trail).f('uRadius', this.params.planetRadius)
       .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
       .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
@@ -816,7 +826,7 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
       .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
       .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
-      .f('uTrail', trail).f('uRadius', PLANET_R)
+      .f('uTrail', trail).f('uRadius', this.params.planetRadius)
       .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
       .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);

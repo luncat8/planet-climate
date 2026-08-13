@@ -14,6 +14,7 @@ function Grid(level, seed, opts) {
        flat slab, so the module keeps its pre-refactor standalone behaviour.
        The app never relies on this -- engine.js always passes params.bathyMode
        through, whose schema default in params.js is 1 (procedural). */
+    radius:     o.radius     === undefined ? PLANET_R : o.radius,
     bathyMode:  o.bathyMode  === undefined ? 0     : o.bathyMode,
     hTotal:     o.hTotal     === undefined ? 1000  : o.hTotal,
     hTop:       o.hTop       === undefined ? 60    : o.hTop,
@@ -50,6 +51,10 @@ Grid.sub = function (a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
 
 Grid.prototype.build = function () {
   var level = this.level, seed = this.seed;
+  /* Physical radius (m). Drives cell area / edge length / spacing, so a
+     different radius rescales every per-cell distance used by the dynamics.
+     Defaults to PLANET_R (Earth) so existing behaviour is unchanged. */
+  var R = this.opt.radius;
   var t = (1 + Math.sqrt(5)) / 2;
   var pos = [
     [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
@@ -184,7 +189,7 @@ Grid.prototype.build = function () {
       var c = Grid.cross(p, q);
       area += 0.5 * Math.hypot(c[0], c[1], c[2]);
     }
-    area *= PLANET_R * PLANET_R;
+    area *= R * R;
 
     cellA[i6 * 4 + 0] = nn[0];
     cellA[i6 * 4 + 1] = nn[1];
@@ -204,8 +209,8 @@ Grid.prototype.build = function () {
       var j = ringn[k3];
       var d0 = duals[(k3 - 1 + mm) % mm], d1 = duals[k3];
       var ev = Grid.sub(d1, d0);
-      var len = Math.hypot(ev[0], ev[1], ev[2]) * PLANET_R;
-      var dist = Math.acos(Math.max(-1, Math.min(1, Grid.dot(nn, pos[j])))) * PLANET_R;
+      var len = Math.hypot(ev[0], ev[1], ev[2]) * R;
+      var dist = Math.acos(Math.max(-1, Math.min(1, Grid.dot(nn, pos[j])))) * R;
 
       var pj = pos[j];
       var dp = Grid.dot(pj, nn);
@@ -303,7 +308,7 @@ Grid.prototype.build = function () {
     for (var ri = 0; ri < ringU.length; ri++) {
       var cv = ringU[ri];
       var dotUV = Math.min(1, Math.max(-1, Grid.dot(pos[cu], pos[cv])));
-      var w = PLANET_R * Math.acos(dotUV);
+      var w = R * Math.acos(dotUV);
       if (du + w < coastDist[cv] - 1e-3) {
         coastDist[cv] = du + w;
         if (!inQ[cv]) {
@@ -336,7 +341,7 @@ Grid.prototype.build = function () {
          more robust than one long smooth ramp;
        - floor the plateau at ~0.9 spacings so the first wet ring always lands
          on the shelf instead of being swallowed by the slope. */
-  var spacing = Math.sqrt(4 * Math.PI * PLANET_R * PLANET_R / V);
+  var spacing = Math.sqrt(4 * Math.PI * R * R / V);
   var shelfW = Math.max(opt.shelfWidth, 0.9 * spacing);   // flat shelf
   var slopeW = Math.max(opt.shelfWidth, 1.5 * spacing);   // shelf-break slope
   for (var i9 = 0; i9 < V; i9++) {
