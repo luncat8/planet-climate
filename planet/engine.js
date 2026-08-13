@@ -78,6 +78,7 @@ Prog.prototype.f = function (n, v) { this.gl.uniform1f(this._u(n), v); return th
 Prog.prototype.i = function (n, v) { this.gl.uniform1i(this._u(n), v); return this; };
 Prog.prototype.iv2 = function (n, a, b) { this.gl.uniform2i(this._u(n), a, b); return this; };
 Prog.prototype.v3 = function (n, a, b, c) { this.gl.uniform3f(this._u(n), a, b, c); return this; };
+Prog.prototype.v3arr = function (n, arr) { this.gl.uniform3fv(this._u(n), arr); return this; };
 Prog.prototype.m4 = function (n, m) { this.gl.uniformMatrix4fv(this._u(n), false, m); return this; };
 Prog.prototype.tex = function (n, t) {
   var gl = this.gl;
@@ -111,8 +112,15 @@ function Planet(canvas, level) {
   this.texCellA = null; this.texCellB = null;
   this.texNbrA = null; this.texNbrB = null;
   this.texLookup = null;
-  this.part = [];
-  this.PW = 160; this.PH = 160;
+  this.part = null;
+  this.PW = 320; this.PH = 320;
+  // Streamline layer colors (top->bottom: high-air, low-air, ocean, deep).
+  this.streamColsFlat = new Float32Array([
+    1.0, 0.231, 0.231,   // high-air  (red)
+    0.153, 0.890, 0.420, // low-air   (green)
+    0.231, 0.510, 0.965, // ocean     (blue)
+    1.0, 1.0, 1.0        // deep      (white)
+  ]);
 
   this.fbo = {};
   this.prog = {};
@@ -199,6 +207,7 @@ Planet.prototype.compile = function () {
   this.prog.part = new Prog(gl, QUAD_VS, PART_FS, 'part');
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
   this.prog.velSmooth = new Prog(gl, QUAD_VS, VELO_SMOOTH_FS, 'velSmooth');
+  this.prog.velVert = new Prog(gl, QUAD_VS, VEL_VERT_FS, 'velVert');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
   this.prog.equiCloud = new Prog(gl, EQUI_VS, EQUI_CLOUD_FS, 'equiCloud');
   // Render programs are compiled lazily per mode (see getGlobeProg/getEquiProg)
@@ -278,22 +287,21 @@ Planet.prototype.build = function (level) {
   for (var j = 0; j < this.PW * this.PH; j++) {
     var z = prnd() * 2 - 1, a = prnd() * 6.2831853, r = Math.sqrt(1 - z * z);
     pdata[j * 4] = r * Math.cos(a); pdata[j * 4 + 1] = z; pdata[j * 4 + 2] = r * Math.sin(a);
-    pdata[j * 4 + 3] = prnd();
+    // Continuous layer coordinate: 0 high-air, 1 low-air, 2 ocean, 3 deep.
+    // A single unified parcel population advects forever and crosses between
+    // layers via the vertical-velocity field (see VEL_VERT_FS / stepParticles).
+    pdata[j * 4 + 3] = j % 4;
   }
-  var self = this;
-  var streamLayers = [
-    { velMode:2, velScale:1,  color:[1,0,0] },
-    { velMode:0, velScale:1,  color:[0,1,0] },
-    { velMode:1, velScale:6,  color:[0,0,1] },
-    { velMode:3, velScale:60, color:[1,1,1] },
-  ];
-  this.part = streamLayers.map(function (L, i) {
-    var a = self.mkTex(self.PW, self.PH, pdata), b = self.mkTex(self.PW, self.PH, pdata);
-    var fa = self.mkFbo([a]), fb = self.mkFbo([b]);
-    self.fbo['part' + i + 'a'] = fa; self.fbo['part' + i + 'b'] = fb;
-    return { tex:[a,b], idx:0, fboA:'part' + i + 'a', fboB:'part' + i + 'b',
-             velMode:L.velMode, velScale:L.velScale, color:L.color };
-  });
+  // Two ping-pong copies of the one unified parcel texture.
+  var a = this.mkTex(this.PW, this.PH, pdata), b = this.mkTex(this.PW, this.PH, pdata);
+  this.part = { tex:[a, b], idx:0, fboA:'partA', fboB:'partB' };
+  this.fbo.partA = this.mkFbo([a]); this.fbo.partB = this.mkFbo([b]);
+
+  // Per-cell vertical-velocity map (4 layers, RGBA): computed each frame by
+  // VEL_VERT_FS. Consumed by the parcel advection (to move parcels between
+  // layers) and by the globe/equirect "W" view mode (to draw up/down flow).
+  this.texVert = this.mkTex(W, H, null);
+  this.fbo.velVert = this.mkFbo([this.texVert]);
 
   // Velocity-smoothing scratch (W x H, 4 attachments x 3 ping-pong sets). Lives
   // OUTSIDE this.A so it is never serialized. Modes 0/1 leave it unused.
@@ -322,8 +330,8 @@ Planet.prototype.build = function (level) {
 
 Planet.prototype.destroyGrid = function () {
   var gl = this.gl;
-  var partTexs = this.part.reduce(function (a, s) { return a.concat(s.tex); }, []);
-  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
+  var partTexs = this.part ? this.part.tex : [];
+  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup, this.texVert]);
   if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes]);
   if (this.velSmoothTex) this.velSmoothTex.forEach(function (s) { all = all.concat(s); });
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
@@ -332,7 +340,7 @@ Planet.prototype.destroyGrid = function () {
   if (this.ibo) gl.deleteBuffer(this.ibo);
   if (this.vaoGlobe) gl.deleteVertexArray(this.vaoGlobe);
   if (this.vaoEmpty) gl.deleteVertexArray(this.vaoEmpty);
-  this.A = []; this.B = []; this.part = [];
+  this.A = []; this.B = []; this.part = null;
 };
 
 Planet.prototype.gridUniforms = function (p) {
@@ -772,23 +780,35 @@ Planet.prototype.stepParticles = function (dt) {
   this.updateVelSmooth();
   var sm = this.velSmoothCur;
   var P = this.params;
-  for (var i = 0; i < this.part.length; i++) {
-    var s = this.part[i];
-    var src = s.tex[s.idx];
-    var dstFbo = s.idx === 0 ? s.fboB : s.fboA;
-    var p = this.prog.part.use();
-    this.gridUniforms(p);
-    p.tex('uPart', src).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
-      .iv2('uPDim', this.PW, this.PH)
-      .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', this.params.planetRadius)
-      .f('uSeed', this.seedRand() * 1000)
-      .i('uVelMode', s.velMode).f('uVelScale', s.velScale);
-    this._bindSmooth(p, sm, P);
-    p.f('uCoherence', P.visCoherence > 0.5 ? 1.0 : 0.0).f('uCoherenceThresh', P.visCoherenceThresh);
-    this.fullscreen(dstFbo, this.PW, this.PH);
-    s.idx = 1 - s.idx;
-  }
+  var W = this.grid.W, H = this.grid.H;
+
+  // 1) Build the per-cell vertical-velocity map ONCE at cell resolution. This is
+  //    far cheaper than recomputing divergence per-particle, and the same field
+  //    drives both parcel layer-crossing and the "W" view mode.
+  var vv = this.prog.velVert.use();
+  this.gridUniforms(vv);
+  vv.tex('uHiA', this.A[6]).tex('uLoA', this.A[4])
+    .tex('uTopV', this.A[1]).tex('uDeepV', this.A[3])
+    .tex('uTopS', this.A[0]);
+  this.fullscreen('velVert', W, H);
+
+  // 2) Advect the single unified parcel population, crossing layers by w.
+  var s = this.part;
+  var src = s.tex[s.idx];
+  var dstFbo = s.idx === 0 ? s.fboB : s.fboA;
+  var p = this.prog.part.use();
+  this.gridUniforms(p);
+  p.tex('uPart', src).tex('uLookup', this.texLookup)
+    .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
+    .tex('uVert', this.texVert)
+    .iv2('uPDim', this.PW, this.PH)
+    .f('uDt', dt).f('uRadius', this.params.planetRadius)
+    .f('uSeed', this.seedRand() * 1000)
+    .f('uVelScale', 1.0).f('uVertCouple', P.visVertCouple)
+    .f('uVertRefH', P.hTop);
+  this._bindSmooth(p, sm, P);
+  this.fullscreen(dstFbo, this.PW, this.PH);
+  s.idx = 1 - s.idx;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
 
@@ -836,9 +856,11 @@ Planet.prototype.render = function () {
     .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
     .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
-    .m4('uMVP', mvp)
-    .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
-    .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief);
+     .tex('uVert', this.texVert)
+     .m4('uMVP', mvp)
+     .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
+     .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief)
+     .f('uWScale', P.wScale);
   gl.bindVertexArray(this.vaoGlobe);
   gl.drawElements(gl.TRIANGLES, this.grid.indices.length, gl.UNSIGNED_INT, 0);
 
@@ -863,23 +885,22 @@ Planet.prototype.render = function () {
   gl.depthMask(false);
   gl.disable(gl.CULL_FACE);
   var sm = this.velSmoothCur;
-  for (var pi = 0; pi < this.part.length; pi++) {
-    if (((P.streamline >> pi) & 1) === 0) continue;
-    var ps = this.part[pi];
-    var trail = P.streamTrail * ((ps.velMode === 1 || ps.velMode === 3) ? 10 : 1);
-    var pp = this.prog.points.use();
-    this.gridUniforms(pp);
-    pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
-      .iv2('uPDim', this.PW, this.PH)      .m4('uMVP', mvp).f('uEquirect', 0.0)
-      .f('uTrail', trail).f('uRadius', this.params.planetRadius)
-      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
-      .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
-      .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
-    this._bindSmoothRender(pp, sm, P);
-    gl.bindVertexArray(this.vaoEmpty);
-    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
-  }
+  // One unified parcel population; each vertex's layer/color/visibility is chosen
+  // in the shader from its stored layer coordinate and the streamline bitmask.
+  var s = this.part;
+  var pp = this.prog.points.use();
+  this.gridUniforms(pp);
+  pp.tex('uPart', s.tex[s.idx]).tex('uLookup', this.texLookup)
+    .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
+    .iv2('uPDim', this.PW, this.PH)      .m4('uMVP', mvp).f('uEquirect', 0.0)
+    .f('uTrail', P.streamTrail).f('uRadius', this.params.planetRadius)
+    .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
+    .f('uVelScale', 1.0)
+    .i('uStreamMask', P.streamline)
+    .v3arr('uStreamCols', this.streamColsFlat);
+  this._bindSmoothRender(pp, sm, P);
+  gl.bindVertexArray(this.vaoEmpty);
+  gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
   gl.depthMask(true);
   gl.disable(gl.BLEND);
   gl.enable(gl.CULL_FACE);
@@ -901,9 +922,10 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
     .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
-    .tex('uLookup', this.texLookup)
-    .v3('uSun', sun[0], sun[1], sun[2])
-    .f('uShowLand', P.showLand).f('uNight', P.nightShading);
+     .tex('uLookup', this.texLookup).tex('uVert', this.texVert)
+     .v3('uSun', sun[0], sun[1], sun[2])
+     .f('uShowLand', P.showLand).f('uNight', P.nightShading)
+     .f('uWScale', P.wScale);
   gl.bindVertexArray(this.vaoEmpty);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -928,23 +950,20 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
   gl.depthMask(false);
   var sm = this.velSmoothCur;
-  for (var pi = 0; pi < this.part.length; pi++) {
-    if (((P.streamline >> pi) & 1) === 0) continue;
-    var ps = this.part[pi];
-    var trail = P.streamTrail * ((ps.velMode === 1 || ps.velMode === 3) ? 10 : 1);
-    var pp = this.prog.points.use();
-    this.gridUniforms(pp);
-    pp.tex('uPart', ps.tex[ps.idx]).tex('uLookup', this.texLookup)
-      .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
-      .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
-      .f('uTrail', trail).f('uRadius', this.params.planetRadius)
-      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
-      .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
-      .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
-    this._bindSmoothRender(pp, sm, P);
-    gl.bindVertexArray(this.vaoEmpty);
-    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
-  }
+  var s = this.part;
+  var pp = this.prog.points.use();
+  this.gridUniforms(pp);
+  pp.tex('uPart', s.tex[s.idx]).tex('uLookup', this.texLookup)
+    .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
+    .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
+    .f('uTrail', P.streamTrail).f('uRadius', this.params.planetRadius)
+    .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
+    .f('uVelScale', 1.0)
+    .i('uStreamMask', P.streamline)
+    .v3arr('uStreamCols', this.streamColsFlat);
+  this._bindSmoothRender(pp, sm, P);
+  gl.bindVertexArray(this.vaoEmpty);
+  gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
   gl.depthMask(true);
   gl.disable(gl.BLEND);
 };

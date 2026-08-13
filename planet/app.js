@@ -17,12 +17,13 @@ var LAYER_VIEW = {
     { id: 'thick', label: 'h', title: 'Top-layer thickness (m)' },
     { id: 'depth', label: 'D', title: 'Ocean depth / bathymetry (m)' },
     { id: 'eta', label: 'η', title: 'Interface displacement h_top - h_ref (m)' },
+    { id: 'w', label: 'W', title: 'Vertical velocity — up/down flow (m/s)' },
   ],
   map: {
-    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
-    lowAir: { T: 0, P: 2, humidity: 3, speed: 4 },
-    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17 },
-    deepOcean: { T: 8, speed: 13, salinity: 14 },
+    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6, w: 18 },
+    lowAir: { T: 0, P: 2, humidity: 3, speed: 4, w: 19 },
+    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17, w: 20 },
+    deepOcean: { T: 8, speed: 13, salinity: 14, w: 21 },
   },
 };
 
@@ -527,7 +528,6 @@ function buildUI() {
     ['dayNight', 'Day / night cycle'],
     ['nightShading', 'Night shading'],
     ['showLand', 'Show continents'],
-    ['visCoherence', 'Coherence seeding'],
     ['visTrailFade', 'Trail fade'],
   ];
   chkDefs.forEach(function (d) {

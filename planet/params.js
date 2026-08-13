@@ -239,10 +239,18 @@ var PARAMS = {
   velSmooth:   { label: 'Smooth strength', default: 0.85, min: 0, max: 1, step: 0.01 },
   velSmoothIters: { label: 'Smooth passes', default: 3, min: 1, max: 4, step: 1,
     tip: 'Jacobi passes for the texture/spatial blur. More = smoother but more spread.' },
-  visCoherence:    { default: 0 },
-  visCoherenceThresh: { label: 'Coherence threshold', default: 0.5, min: 0.0, max: 5.0, step: 0.05,
-    tip: 'Reseed particles that sit in locally-incoherent (noisy) velocity regions.' },
-  visTrailFade:    { default: 0 },
+  visTrailFade:    { default: 0,
+    tip: 'Dims the trailing end of each streak into a comet so a velocity-direction reversal flips only the faint end.' },
+  /* Vertical coupling that lets parcels move between the four visualization
+     layers following the flow's divergence (computed each frame in VEL_VERT_FS).
+     Higher = parcels subduct / upwell faster and escape closed gyres sooner. */
+  visVertCouple:  { label: 'Vertical coupling', default: 8, min: 0, max: 60, step: 1,
+    tip: 'How strongly parcels cross layers along the vertical-velocity field. 0 = stay in their layer.' },
+  /* W-view (vertical-velocity, modes 18-21) color-scale gain. Air divergence is
+     ~1e-5, ocean ~1e-8, deep ~1e-10, so a single linear "range" slider trades
+     air saturation for ocean/deep visibility. Raise to reveal ocean up/downwelling. */
+  wScale:         { label: 'W-view range', default: 1.0, min: 0.1, max: 50, step: 0.1,
+    tip: 'Vertical-velocity (W) color gain. Higher = more contrast; needed to see the tiny ocean/deep signal against the ~1000x larger air divergence.' },
   showLand:       { default: 1 },
   nightShading:   { default: 1 },
   relief:         { default: 0.004 },

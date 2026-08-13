@@ -9,7 +9,7 @@
  *   node loadsave_test.js --dir=/media/sf_1/planet242/planet \
  *        --save=/media/sf_1/planet242/harness/saves/equilibrium_L5.js
  */
-const puppeteer = require('/media/sf_1/planet242/harness/node_modules/puppeteer');
+const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
 
