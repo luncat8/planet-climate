@@ -151,6 +151,13 @@ var PARAMS = {
      not pay for all of them. Only meaningful when oceanScheme == 2. */
   implicitIters:{ label: 'Implicit iters (B)', default: 12, min: 1, max: 40, step: 1,
     tip: 'Jacobi iterations for the implicit free surface (scheme B). Greyed out for schemes 0/1.' },
+  /* Barotropic (rigid-lid) projection: enforces div(h_top u_top + h_deep u_deep)
+     = 0 each step so the two ocean layers mass-balance (deep = true return
+     flow). Off by default — it changes the tuned currents. Works with any
+     ocean scheme. baroIters = Jacobi sweeps of the barotropic pressure solve. */
+  rigidLid:   { label: 'Rigid-lid (deep return flow)', default: 0 },
+  baroIters:  { label: 'Barotropic iters', default: 8, min: 4, max: 100, step: 4,
+    tip: 'Jacobi sweeps for the barotropic projection (warm-started across substeps, so a few suffice). Cell-centred projection plateaus near corr -0.4; full closure needs a staggered face-flux solver.' },
   /* Maximum (abyssal) ocean depth. Reached far from any coastline. */
   depthMax:   { label: 'Max ocean depth',     default: 4000,  min: 500, max: 8000, step: 100,
                 fmt: function (v) { return (v / 1000).toFixed(1) + ' km'; } },
@@ -224,43 +231,23 @@ var PARAMS = {
   streamline:     { default: 2 },
   streamTrail:    { label: 'Streamline length', default: 6000, min: 0, max: 30000, step: 500,
                     fmt: function (v) { return v <= 0 ? 'dots' : (v / 60).toFixed(0) + ' min'; } },
-  // ---- STREAMLINE VELOCITY SMOOTHING (visualization only; no grid rebuild, no save change)
-  /* How to feed streamlines a denoised velocity. 0 = raw (legacy, bit-exact);
-     1 = in-shader 6-neighbour average; 2 = texture blur (W×H Jacobi);
-     3 = temporal EMA; 4 = spatial + temporal. Modes >=2 need the smooth textures. */
-  velSmoothMode: { label: 'Streamline smoothing', default: 0,
-    opts: [
-      { v: 0, label: 'None (raw)' },
-      { v: 1, label: 'Spatial (in-shader)' },
-      { v: 2, label: 'Texture blur' },
-      { v: 3, label: 'Temporal EMA' },
-      { v: 4, label: 'Spatial + Temporal' },
-    ] },
-  velSmooth:   { label: 'Smooth strength', default: 0.85, min: 0, max: 1, step: 0.01 },
-  velSmoothIters: { label: 'Smooth passes', default: 3, min: 1, max: 4, step: 1,
-    tip: 'Jacobi passes for the texture/spatial blur. More = smoother but more spread.' },
-  visTrailFade:    { default: 0,
-    tip: 'Dims the trailing end of each streak into a comet so a velocity-direction reversal flips only the faint end.' },
-  /* Vertical coupling that lets parcels move between the four visualization
-     layers following the flow's divergence (computed each frame in VEL_VERT_FS).
-     Higher = parcels subduct / upwell faster and escape closed gyres sooner. */
-  visVertCouple:  { label: 'Layer crossing', default: 14, min: 0, max: 120, step: 1,
-    tip: 'Per-step probability of crossing ONE layer, proportional to the local vertical flow. 0 = parcels stay in their layer forever.' },
-  /* Particle pool: a fixed set of slots, each with a finite lifespan. A particle
-     despawns at the end of its life; dead slots are respawned (proportionally to
-     the local vertical flow) so the pool keeps a roughly constant average number
-     of live particles. partTarget = desired live fraction of the pool. */
-  partTarget:     { label: 'Particle density', default: 0.5, min: 0.05, max: 1, step: 0.05,
-    tip: 'Average fraction of the particle pool kept alive. Spawns and deaths balance to hold this.' },
-  partLifeMin:    { label: 'Particle life (days)', default: 4, min: 1, max: 40, step: 1,
-    tip: 'Minimum particle lifespan in days (lifespan is sampled uniformly in [min,max]).' },
-  partLifeMax:    { label: 'Particle life max (days)', default: 16, min: 2, max: 80, step: 1,
-    tip: 'Maximum particle lifespan in days.' },
-  /* W-view (vertical-velocity, modes 18-21) color-scale gain. Air divergence is
-     ~1e-5, ocean ~1e-8, deep ~1e-10, so a single linear "range" slider trades
-     air saturation for ocean/deep visibility. Raise to reveal ocean up/downwelling. */
-  wScale:         { label: 'W-view range', default: 1.0, min: 0.1, max: 50, step: 0.1,
-    tip: 'Vertical-velocity (W) color gain. Higher = more contrast; needed to see the tiny ocean/deep signal against the ~1000x larger air divergence.' },
+  /* ---- Flow visualisation toolbox (combinable rendering methods) ----------
+     None of these touch the physics; they only change how the streamline /
+     particle layer is advected and drawn. */
+  flowAvg:        { label: 'Time-averaged flow', default: 1 },
+  flowSmooth:     { label: 'Averaging strength', default: 0.9, min: 0, max: 0.98, step: 0.01,
+                    fmt: function (v) { return Math.round(v * 100) + '%'; } },
+  flowLines:      { label: 'Continuous trails', default: 1 },
+  flowSegs:       { label: 'Trail length', default: 24, min: 2, max: 40, step: 1,
+                    fmt: function (v) { return String(v | 0); } },
+  flowRecycle:    { label: 'Move between layers', default: 1 },
+  flowMix:        { label: 'Layer-mixing rate', default: 1.0, min: 0, max: 3, step: 0.1,
+                    fmt: function (v) { return (+v).toFixed(1) + '×'; } },
+  flowLife:       { label: 'Lifetime (days)', default: 20, min: 1, max: 90, step: 1,
+                    fmt: function (v) { return (v | 0) + 'd'; } },
+  flowUniform:    { label: 'Even out speed', default: 0 },
+  flowGain:       { label: 'Flow gain', default: 1, min: 0.2, max: 8, step: 0.1,
+                    fmt: function (v) { return (+v).toFixed(1) + '×'; } },
   showLand:       { default: 1 },
   nightShading:   { default: 1 },
   relief:         { default: 0.004 },

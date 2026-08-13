@@ -78,7 +78,6 @@ Prog.prototype.f = function (n, v) { this.gl.uniform1f(this._u(n), v); return th
 Prog.prototype.i = function (n, v) { this.gl.uniform1i(this._u(n), v); return this; };
 Prog.prototype.iv2 = function (n, a, b) { this.gl.uniform2i(this._u(n), a, b); return this; };
 Prog.prototype.v3 = function (n, a, b, c) { this.gl.uniform3f(this._u(n), a, b, c); return this; };
-Prog.prototype.v3arr = function (n, arr) { this.gl.uniform3fv(this._u(n), arr); return this; };
 Prog.prototype.m4 = function (n, m) { this.gl.uniformMatrix4fv(this._u(n), false, m); return this; };
 Prog.prototype.tex = function (n, t) {
   var gl = this.gl;
@@ -112,15 +111,9 @@ function Planet(canvas, level) {
   this.texCellA = null; this.texCellB = null;
   this.texNbrA = null; this.texNbrB = null;
   this.texLookup = null;
-  this.part = null;
-  this.PW = 320; this.PH = 320;
-  // Streamline layer colors (top->bottom: high-air, low-air, ocean, deep).
-  this.streamColsFlat = new Float32Array([
-    1.0, 0.231, 0.231,   // high-air  (red)
-    0.153, 0.890, 0.420, // low-air   (green)
-    0.231, 0.510, 0.965, // ocean     (blue)
-    1.0, 1.0, 1.0        // deep      (white)
-  ]);
+  this.pools = [];
+  this.PW = 128; this.PH = 128;   // flow-viz particle grid (PW*PH tracers per pool)
+  this.PT = 40;                   // trail history length (slots per tracer)
 
   this.fbo = {};
   this.prog = {};
@@ -198,16 +191,21 @@ Planet.prototype.compile = function () {
   this.prog.oceanRhs = new Prog(gl, QUAD_VS, OCEAN_RHS_FS, 'oceanRhs');
   this.prog.oceanJacobi = new Prog(gl, QUAD_VS, OCEAN_JACOBI_FS, 'oceanJacobi');
   this.prog.oceanCorrect = new Prog(gl, QUAD_VS, OCEAN_CORRECT_FS, 'oceanCorrect');
+  this.prog.baroDiv = new Prog(gl, QUAD_VS, BARO_DIV_FS, 'baroDiv');
+  this.prog.baroJacobi = new Prog(gl, QUAD_VS, BARO_JACOBI_FS, 'baroJacobi');
+  this.prog.baroCorrect = new Prog(gl, QUAD_VS, BARO_CORRECT_FS, 'baroCorrect');
+  this.prog.baroCopy = new Prog(gl, QUAD_VS, BARO_COPY_FS, 'baroCopy');
   this.prog.maxRed = new Prog(gl, QUAD_VS, MAX_FS, 'maxRed');
   this.prog.air = new Prog(gl, QUAD_VS, AIR_FS, 'air');
   this.prog.cplO = new Prog(gl, QUAD_VS, COUPLE_FS('ocean'), 'coupleOcean');
   this.prog.cplA = new Prog(gl, QUAD_VS, COUPLE_FS('air'), 'coupleAir');
   this.prog.init = new Prog(gl, QUAD_VS, INIT_FS, 'init');
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
-  this.prog.part = new Prog(gl, QUAD_VS, PART_FS, 'part');
+  this.prog.vflow = new Prog(gl, QUAD_VS, VFLOW_FS, 'vflow');
+  this.prog.state = new Prog(gl, QUAD_VS, STATE_FS, 'state');
+  this.prog.trail = new Prog(gl, QUAD_VS, TRAIL_FS, 'trail');
+  this.prog.smooth = new Prog(gl, QUAD_VS, SMOOTH_FS, 'smooth');
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
-  this.prog.velSmooth = new Prog(gl, QUAD_VS, VELO_SMOOTH_FS, 'velSmooth');
-  this.prog.velVert = new Prog(gl, QUAD_VS, VEL_VERT_FS, 'velVert');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
   this.prog.equiCloud = new Prog(gl, EQUI_VS, EQUI_CLOUD_FS, 'equiCloud');
   // Render programs are compiled lazily per mode (see getGlobeProg/getEquiProg)
@@ -275,6 +273,13 @@ Planet.prototype.build = function (level) {
   this.P = [this.mkTex(W, H, null), this.mkTex(W, H, null),
             this.mkTex(W, H, null), this.mkTex(W, H, null)];
   this.fbo.P = this.mkFbo(this.P);
+  // Barotropic projection: MRT targets to correct the two ocean velocity
+  // fields (A[1]=topV, A[3]=deepV) plus a persistent barotropic potential phi
+  // (texPhi) that warm-starts the Jacobi solve across substeps. Scratch
+  // snapshot in P[1]/P[3].
+  this.texPhi = this.mkTex(W, H, null);
+  this.fbo.oceanV = this.mkFbo([this.A[1], this.A[3], this.texPhi]);
+  this.fbo.baroV  = this.mkFbo([this.P[1], this.P[3]]);
   this.texEtaA = this.mkTex(W, H, null);
   this.texEtaB = this.mkTex(W, H, null);
   this.fbo.etaA = this.mkFbo([this.texEtaA]);
@@ -282,49 +287,70 @@ Planet.prototype.build = function (level) {
   this.texMaxRes = this.mkTex(1, 1, null);
   this.fbo.maxRes = this.mkFbo([this.texMaxRes]);
 
-  // Particle pool: a fixed set of slots, each with a position (xyz + layer) and
-  // a meta record (life, maxLife, alive flag, seed). The two records live in two
-  // ping-pong RGBA32F textures written together by PART_FS. Slots are recycled:
-  // on death a slot is respawned (proportionally to vertical flow) so the pool
-  // keeps a roughly constant average number of live particles.
-  var pdata = new Float32Array(this.PW * this.PH * 4);
-  var mdata = new Float32Array(this.PW * this.PH * 4);
+  /* ---- Flow-visualisation particle pools -------------------------------
+     TWO pools — ocean {top,deep} and air {low,high}. Each particle carries a
+     sublayer (packed into state.w = sublayer + agePhase) and MOVES between the
+     two sublayers with probability proportional to the vertical mass flux, so
+     it traces the overturning circulation instead of being pinned to one layer.
+     Per pool:
+       * state A/B  (PW x PH)      : head .xyz + (sublayer + life phase) in .w
+       * trail A/B  (PW x PH*PT)   : last PT positions (.xyz) + sublayer (.w),
+                                     a conveyor shifted one slot per frame.
+     Double-buffered (a frame reads the whole trail while rewriting it). */
+  var self = this;
   var prnd = Grid.mulberry32(((this.params.seed === undefined ? 12345 : this.params.seed) ^ 0x9e37) >>> 0);
-  var lifeMin = (this.params.partLifeMin === undefined ? 4 : this.params.partLifeMin) * 86400;
-  var lifeMax = (this.params.partLifeMax === undefined ? 16 : this.params.partLifeMax) * 86400;
-  for (var j = 0; j < this.PW * this.PH; j++) {
-    var z = prnd() * 2 - 1, a = prnd() * 6.2831853, r = Math.sqrt(1 - z * z);
-    pdata[j * 4] = r * Math.cos(a); pdata[j * 4 + 1] = z; pdata[j * 4 + 2] = r * Math.sin(a);
-    // Continuous layer coordinate: 0 high-air, 1 low-air, 2 ocean, 3 deep.
-    pdata[j * 4 + 3] = j % 4;
-    var ml = lifeMin + prnd() * (lifeMax - lifeMin);
-    mdata[j * 4] = ml; mdata[j * 4 + 1] = ml; mdata[j * 4 + 2] = 1.0; mdata[j * 4 + 3] = prnd();
+  var Np = this.PW * this.PH, T = this.PT;
+  function seedPool() {
+    var sdata = new Float32Array(Np * 4);
+    var tdata = new Float32Array(Np * T * 4);
+    for (var j = 0; j < Np; j++) {
+      var z = prnd() * 2 - 1, a = prnd() * 6.2831853, r = Math.sqrt(1 - z * z);
+      var dx = r * Math.cos(a), dy = z, dz = r * Math.sin(a);
+      var layer = prnd() < 0.5 ? 0 : 1;
+      var wPacked = layer + Math.min(0.9999, prnd());   // sublayer + random life phase
+      sdata[j * 4] = dx; sdata[j * 4 + 1] = dy; sdata[j * 4 + 2] = dz; sdata[j * 4 + 3] = wPacked;
+      for (var s = 0; s < T; s++) {
+        var ti = (s * Np + j) * 4;
+        tdata[ti] = dx; tdata[ti + 1] = dy; tdata[ti + 2] = dz; tdata[ti + 3] = layer;
+      }
+    }
+    return { sdata: sdata, tdata: tdata };
   }
-  // Ping-pong copies of the position and meta textures (combined FBO writes both).
-  var pA = this.mkTex(this.PW, this.PH, pdata), pB = this.mkTex(this.PW, this.PH, pdata);
-  var mA = this.mkTex(this.PW, this.PH, mdata), mB = this.mkTex(this.PW, this.PH, mdata);
-  this.part = { posTex:[pA, pB], metaTex:[mA, mB], idx:0 };
-  this.fbo.partA = this.mkFbo([pA, mA]); this.fbo.partB = this.mkFbo([pB, mB]);
-
-  // Per-cell vertical-velocity map (4 layers, RGBA): computed each frame by
-  // VEL_VERT_FS. Consumed by the parcel advection (to move parcels between
-  // layers) and by the globe/equirect "W" view mode (to draw up/down flow).
-  this.texVert = this.mkTex(W, H, null);
-  this.fbo.velVert = this.mkFbo([this.texVert]);
-
-  // Velocity-smoothing scratch (W x H, 4 attachments x 3 ping-pong sets). Lives
-  // OUTSIDE this.A so it is never serialized. Modes 0/1 leave it unused.
-  this.velSmoothTex = [
-    [this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null)],
-    [this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null)],
-    [this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null)],
+  // Pool config. wChan: 0 = ocean (uVFlow.x), 1 = air (uVFlow.y).
+  // fluxSign chosen so f>0 favours sublayer 0->1: ocean top->deep = sinking =
+  // downwelling (vflow.x<0 => -x>0); air low->high = ascent (vflow.y>0).
+  // idx0/idx1 map the two sublayers to the LAYER_VIEW streamline bits
+  // (highAir=0, lowAir=1, ocean=2, deepOcean=3).
+  var poolCfg = [
+    { name:'ocean', vel:[1,3], mul:[6,60], smooth:[0,1], wChan:0, fluxSign:-1, wScale:1.5e-3,
+      col:[[0.23,0.51,0.96],[0.96,0.96,0.96]], idx:[2,3] },
+    { name:'air',   vel:[4,6], mul:[1,1],  smooth:[2,3], wChan:1, fluxSign:+1, wScale:4.4e-2,
+      col:[[0.15,0.89,0.42],[1.0,0.23,0.23]], idx:[1,0] },
   ];
-  this.fbo.velSmooth0 = this.mkFbo(this.velSmoothTex[0]);
-  this.fbo.velSmooth1 = this.mkFbo(this.velSmoothTex[1]);
-  this.fbo.velSmooth2 = this.mkFbo(this.velSmoothTex[2]);
-  this.velSmoothPrev = null;
-  this.velSmoothPrevIdx = -1;
-  this.velSmoothCur = null;
+  this.pools = poolCfg.map(function (P, i) {
+    var s = seedPool();
+    var sa = self.mkTex(self.PW, self.PH, s.sdata), sb = self.mkTex(self.PW, self.PH, s.sdata);
+    var ta = self.mkTex(self.PW, self.PH * T, s.tdata), tb = self.mkTex(self.PW, self.PH * T, s.tdata);
+    self.fbo['st' + i + 'a'] = self.mkFbo([sa]); self.fbo['st' + i + 'b'] = self.mkFbo([sb]);
+    self.fbo['tr' + i + 'a'] = self.mkFbo([ta]); self.fbo['tr' + i + 'b'] = self.mkFbo([tb]);
+    return { cfg: P, state:[sa, sb], trail:[ta, tb], idx:0 };
+  });
+
+  // Vertical-flow field: .x = ocean interface w, .y = air w (see VFLOW_FS).
+  this.texVFlow = this.mkTex(W, H, null);
+  this.fbo.vflow = this.mkFbo([this.texVFlow]);
+  this.vflowInit = false;
+
+  /* Temporally-averaged velocity (RG in .xy) for the 4 sources feeding the two
+     pools' sublayers: 0 = ocean top (A1), 1 = ocean deep (A3), 2 = low air
+     (A4), 3 = high air (A6). Updated once per frame by SMOOTH_FS. */
+  this.smoothSrc = [1, 3, 4, 6];
+  this.smooth = this.smoothSrc.map(function (srcIdx, i) {
+    var a = self.mkTex(W, H, null), b = self.mkTex(W, H, null);
+    self.fbo['smooth' + i + 'a'] = self.mkFbo([a]); self.fbo['smooth' + i + 'b'] = self.mkFbo([b]);
+    return { tex:[a, b], idx:0, fboA:'smooth' + i + 'a', fboB:'smooth' + i + 'b', srcIdx: srcIdx };
+  });
+  this.smoothInit = false;   // first pass copies the raw field (alpha=1)
 
   this.ibo = gl.createBuffer();
   this.vaoGlobe = gl.createVertexArray();
@@ -339,17 +365,43 @@ Planet.prototype.build = function (level) {
 
 Planet.prototype.destroyGrid = function () {
   var gl = this.gl;
-  var partTexs = this.part ? this.part.posTex.concat(this.part.metaTex) : [];
-  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup, this.texVert]);
-  if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes]);
-  if (this.velSmoothTex) this.velSmoothTex.forEach(function (s) { all = all.concat(s); });
+  var partTexs = (this.pools || []).reduce(function (a, s) { return a.concat(s.state, s.trail); }, []);
+  if (this.smooth) partTexs = this.smooth.reduce(function (a, s) { return a.concat(s.tex); }, partTexs);
+  if (this.texVFlow) partTexs.push(this.texVFlow);
+  var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
+  if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes, this.texPhi]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
   if (this.ibo) gl.deleteBuffer(this.ibo);
   if (this.vaoGlobe) gl.deleteVertexArray(this.vaoGlobe);
   if (this.vaoEmpty) gl.deleteVertexArray(this.vaoEmpty);
-  this.A = []; this.B = []; this.part = null;
+  this.A = []; this.B = []; this.pools = []; this.smooth = []; this.texVFlow = null;
+};
+
+/* Advance the smoothed-velocity EMA one frame for the 4 sublayer sources.
+   alpha = 1 - flowSmooth (higher "Averaging strength" = smaller alpha = longer
+   memory). The first pass after (re)build copies the raw field (warm start). */
+Planet.prototype.stepSmooth = function () {
+  var gl = this.gl;
+  var P = this.params;
+  var s = P.flowSmooth === undefined ? 0.9 : P.flowSmooth;
+  var alpha = this.smoothInit ? Math.max(0.0, Math.min(1.0, 1.0 - s)) : 1.0;
+  for (var i = 0; i < this.smooth.length; i++) {
+    var sm = this.smooth[i];
+    var src = sm.tex[sm.idx];
+    var dstFbo = sm.idx === 0 ? sm.fboB : sm.fboA;
+    var pr = this.prog.smooth.use();
+    pr.tex('uCur', this.A[sm.srcIdx]).tex('uPrev', src).f('uAlpha', alpha);
+    this.fullscreen(dstFbo, this.grid.W, this.grid.H);
+    sm.idx = 1 - sm.idx;
+  }
+  this.smoothInit = true;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+};
+Planet.prototype.smoothTex = function (i) {
+  var sm = this.smooth[i];
+  return sm.tex[sm.idx];
 };
 
 Planet.prototype.gridUniforms = function (p) {
@@ -451,6 +503,8 @@ Planet.prototype.applyState = function (st) {
   this.bounds = Object.assign({}, st.bounds || {});
   this.simTime = st.simTime || 0;
   this.stepCount = st.stepCount || 0;
+  this.vflowInit = false;    // recompute the vertical-flow field from loaded state
+  this.smoothInit = false;   // and re-seed the velocity EMA
   return this;
 };
 
@@ -609,8 +663,52 @@ Planet.prototype.step = function () {
   this.fullscreen('dynA', W, H);
 
   this.couple();
+  if (P.rigidLid > 0.5) this.projectBarotropic();
   this.simTime += P.dt;
   this.stepCount++;
+};
+
+/* Barotropic (rigid-lid) projection — see the BARO_* shaders. Removes the
+   divergent part of the depth-integrated transport so the two ocean layers
+   mass-balance (div(h_top u_top) = -div(h_deep u_deep)). Runs on the final
+   post-couple state in A[]; phi ping-pongs in the eta scratch textures, and the
+   source velocities are snapshotted into P[1]/P[3] to avoid a feedback loop. */
+Planet.prototype.projectBarotropic = function () {
+  var W = this.grid.W, H = this.grid.H;
+  var P = this.params;
+  var gl = this.gl;
+
+  // snapshot A[1],A[3] -> P[1],P[3]
+  var cpy = this.prog.baroCopy.use();
+  cpy.tex('uSrc0', this.A[1]).tex('uSrc1', this.A[3]);
+  this.fullscreen('baroV', W, H);
+
+  // b = div(U*) into eta.y; phi (.x) warm-started from texPhi
+  var dv = this.prog.baroDiv.use();
+  this.gridUniforms(dv);
+  dv.tex('uTopS', this.A[0]).tex('uTopV', this.A[1]).tex('uDeepV', this.A[3])
+    .tex('uPhiPrev', this.texPhi);
+  this.fullscreen('etaA', W, H);
+
+  // Jacobi sweeps: lap(phi) = b
+  var etaT = { etaA: this.texEtaA, etaB: this.texEtaB };
+  var iters = Math.max(1, (P.baroIters === undefined ? 40 : P.baroIters) | 0);
+  var src = 'etaA', dst = 'etaB';
+  for (var it = 0; it < iters; it++) {
+    var ji = this.prog.baroJacobi.use();
+    this.gridUniforms(ji);
+    ji.tex('uEtaIn', etaT[src]).f('uJacobiOmega', 0.8);
+    this.fullscreen(dst, W, H);
+    var t = src; src = dst; dst = t;
+  }
+
+  // correct: du = grad(phi)/D applied to both layers, P[1]/P[3] -> A[1]/A[3]
+  var cr = this.prog.baroCorrect.use();
+  this.gridUniforms(cr);
+  cr.tex('uTopS', this.A[0]).tex('uTopV', this.P[1]).tex('uDeepV', this.P[3])
+    .tex('uEta', etaT[src]);
+  this.fullscreen('oceanV', W, H);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
 
 /* Scheme B: implicit free surface via Jacobi iteration over eta.
@@ -648,6 +746,7 @@ Planet.prototype.stepOceanB = function () {
   this.fullscreen('etaA', W, H);
 
   // 3. Jacobi loop with convergence tracking and early-exit.
+  var etaT = { etaA: this.texEtaA, etaB: this.texEtaB };
   var iters = P.implicitIters | 0;
   var src = 'etaA', dst = 'etaB';
   this.residualHistory = [];
@@ -655,7 +754,7 @@ Planet.prototype.stepOceanB = function () {
   for (var it = 0; it < iters; it++) {
     var ji = this.prog.oceanJacobi.use();
     this.gridUniforms(ji);
-    ji.tex('uEtaIn', this[src])
+    ji.tex('uEtaIn', etaT[src])
       .tex('uCellC', this.texCellC)
       .f('uDt', P.dt).f('uPgfTop', P.pgfTop)
       .f('uJacobiOmega', 0.8);
@@ -675,7 +774,7 @@ Planet.prototype.stepOceanB = function () {
   this.gridUniforms(cp);
   cp.tex('uTopS', this.P[0]).tex('uTopV', this.P[1])
     .tex('uDeepS', this.P[2]).tex('uDeepV', this.P[3])
-    .tex('uEta', this[src])
+    .tex('uEta', etaT[src])
     .f('uDt', P.dt).f('uNuT', P.nuTOcean)
       .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
       .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
@@ -697,131 +796,67 @@ Planet.prototype._maxResidual = function (texName) {
   return buf[0];
 };
 
-/* Build the denoised velocity field for the current frame. Modes:
-   0/1 -> no-op (mode 1 is handled inside sampleVel, in-shader).
-   2    -> multi-pass spatial blur of the raw field.
-   3    -> temporal EMA of the raw field into a persistent smooth.
-   4    -> spatial blur, then a temporal EMA into the persistent smooth.
-   The result (or null for modes 0/1) is left in this.velSmoothCur and sampled
-   per-particle at its current cell. Runs once per stepParticles call, before the
-   advection loop. */
-Planet.prototype.updateVelSmooth = function () {
+/* Bind a pool's two-sublayer velocity uniforms onto the current program. The
+   advection pass (STATE_FS) uses layerVel(cell, layer) so each particle moves
+   with its current sublayer's field, honouring time-averaging / even-out-speed
+   / gain. */
+Planet.prototype.bindFlow = function (p, pool) {
   var P = this.params;
-  var mode = P.velSmoothMode | 0;
-  if (mode === 0 || mode === 1) {
-    this.velSmoothCur = null;
-    this.velSmoothPrev = null;
-    this.velSmoothPrevIdx = -1;
-    return;
-  }
-  var W = this.grid.W, H = this.grid.H;
-  var raw = [this.A[1], this.A[3], this.A[4], this.A[6]];
-  var self = this;
-  function pass(gSet, rSet, dstIdx, m) {
-    var p = self.prog.velSmooth.use();
-    self.gridUniforms(p);
-    p.tex('uRawTopV', rSet[0]).tex('uRawDeepV', rSet[1]).tex('uRawLoA', rSet[2]).tex('uRawHiA', rSet[3])
-      .tex('uGTopV', gSet[0]).tex('uGDeepV', gSet[1]).tex('uGLoA', gSet[2]).tex('uGHiA', gSet[3])
-      .i('uVelSmoothMode', m)
-      .f('uVelSmooth', P.velSmooth)
-      .f('uAlpha', Math.max(0.02, Math.min(0.98, 1.0 - P.velSmooth)));
-    self.fullscreen('velSmooth' + dstIdx, W, H);
-  }
-  if (mode === 3) {
-    var prev = this.velSmoothPrev || raw;
-    var prevIdx = this.velSmoothPrevIdx >= 0 ? this.velSmoothPrevIdx : 0;
-    var w = (prevIdx + 1) % 3;
-    pass(prev, raw, w, 3);
-    this.velSmoothCur = this.velSmoothTex[w];
-    this.velSmoothPrev = this.velSmoothTex[w];
-    this.velSmoothPrevIdx = w;
-    return;
-  }
-  // mode 2 or 4: spatial Jacobi loop over the ping-pong
-  var iters = P.velSmoothIters | 0; if (iters < 1) iters = 1; if (iters > 4) iters = 4;
-  pass(raw, raw, 0, 2);
-  var last = 0;
-  for (var k = 1; k < iters; k++) {
-    var nd = (last + 1) % 3;
-    pass(this.velSmoothTex[last], raw, nd, 2);
-    last = nd;
-  }
-  var spatial = this.velSmoothTex[last];
-  if (mode === 2) {
-    this.velSmoothCur = spatial;
-    this.velSmoothPrev = spatial;
-    this.velSmoothPrevIdx = last;
-    return;
-  }
-  // mode 4: temporal EMA of the spatial result into the persistent smooth
-  if (this.velSmoothPrev == null) {
-    this.velSmoothCur = spatial;
-    this.velSmoothPrev = spatial;
-    this.velSmoothPrevIdx = last;
-    return;
-  }
-  var pIdx = this.velSmoothPrevIdx;
-  var w2 = (last === pIdx) ? (pIdx + 1) % 3 : (3 - pIdx - last);
-  pass(this.velSmoothPrev, spatial, w2, 3);
-  this.velSmoothCur = this.velSmoothTex[w2];
-  this.velSmoothPrev = this.velSmoothTex[w2];
-  this.velSmoothPrevIdx = w2;
+  var c = pool.cfg;
+  var useSmooth = (P.flowAvg === undefined ? 1 : P.flowAvg) > 0.5 ? 1.0 : 0.0;
+  if (!this.smoothInit) useSmooth = 0.0;   // no EMA yet -> fall back to raw field
+  p.tex('uVel0', this.A[c.vel[0]]).tex('uVel1', this.A[c.vel[1]])
+    .tex('uSmooth0', this.smoothTex(c.smooth[0])).tex('uSmooth1', this.smoothTex(c.smooth[1]))
+    .f('uMul0', c.mul[0]).f('uMul1', c.mul[1])
+    .f('uUseSmooth', useSmooth)
+    .f('uNormalize', P.flowUniform ? 1.0 : 0.0)
+    .f('uBaseSpeed', 1.0)
+    .f('uGain', P.flowGain === undefined ? 1.0 : P.flowGain);
 };
 
-/* Bind the smooth-velocity samplers + mode uniforms onto a particle program.
-   When no smooth texture is active (modes 0/1) we still bind a valid texture to
-   each sampler (the raw source) so the (unused) samplers are never unbound. */
-Planet.prototype._bindSmooth = function (p, sm, P) {
-  if (sm) {
-    p.tex('uSmoothTopV', sm[0]).tex('uSmoothDeepV', sm[1]).tex('uSmoothLoA', sm[2]).tex('uSmoothHiA', sm[3]);
-  } else {
-    p.tex('uSmoothTopV', this.A[1]).tex('uSmoothDeepV', this.A[3]).tex('uSmoothLoA', this.A[4]).tex('uSmoothHiA', this.A[6]);
-  }
-  p.i('uVelSmoothMode', P.velSmoothMode | 0).f('uVelSmooth', P.velSmooth).i('uVelSmoothIters', P.velSmoothIters | 0);
-};
-Planet.prototype._bindSmoothRender = function (p, sm, P) {
-  this._bindSmooth(p, sm, P);
-  p.f('uTrailFade', P.visTrailFade > 0.5 ? 1.0 : 0.0);
-};
-
-Planet.prototype.stepParticles = function (dt) {
+/* Advance both particle pools one frame: STATE_FS moves each head, ages it, and
+   (when enabled) moves it between sublayers with probability proportional to
+   the vertical mass flux; TRAIL_FS shifts the history conveyor. */
+Planet.prototype.stepFlow = function (dt) {
   var gl = this.gl;
-  this.updateVelSmooth();
-  var sm = this.velSmoothCur;
   var P = this.params;
-  var W = this.grid.W, H = this.grid.H;
+  var life = (P.flowLife === undefined ? 20 : P.flowLife) * 86400;   // days -> sim seconds
+  var move = (P.flowRecycle === undefined ? 1 : P.flowRecycle) > 0.5 ? 1.0 : 0.0;
+  var transK = 2.0 * (P.flowMix === undefined ? 1.0 : P.flowMix);
+  for (var i = 0; i < this.pools.length; i++) {
+    var pool = this.pools[i], c = pool.cfg;
+    var cur = pool.idx, nxt = 1 - pool.idx;
+    // 1. STATE: head position, sublayer transitions, life phase.
+    var ps = this.prog.state.use();
+    this.gridUniforms(ps);
+    ps.tex('uTrail', pool.trail[cur]).tex('uState', pool.state[cur])
+      .tex('uLookup', this.texLookup).tex('uVFlow', this.texVFlow)
+      .iv2('uPDim', this.PW, this.PH)
+      .f('uDt', dt).f('uLife', life).f('uRadius', this.params.planetRadius)
+      .f('uSeed', this.seedRand() * 1000)
+      .f('uMove', move).f('uTransK', transK).f('uMaxP', 0.25)
+      .f('uVScale', c.wScale).f('uFluxSign', c.fluxSign).i('uWChan', c.wChan);
+    this.bindFlow(ps, pool);
+    this.fullscreen('st' + i + (nxt === 1 ? 'b' : 'a'), this.PW, this.PH);
+    // 2. TRAIL: shift the conveyor, writing the new head (+sublayer) into slot 0.
+    var pt = this.prog.trail.use();
+    pt.tex('uTrail', pool.trail[cur]).tex('uState', pool.state[nxt])
+      .iv2('uPDim', this.PW, this.PH).i('uSlots', this.PT);
+    this.fullscreen('tr' + i + (nxt === 1 ? 'b' : 'a'), this.PW, this.PH * this.PT);
+    pool.idx = nxt;
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+};
 
-  // 1) Build the per-cell vertical-velocity map ONCE at cell resolution. This is
-  //    far cheaper than recomputing divergence per-particle, and the same field
-  //    drives both parcel layer-crossing and the "W" view mode.
-  var vv = this.prog.velVert.use();
-  this.gridUniforms(vv);
-  vv.tex('uHiA', this.A[6]).tex('uLoA', this.A[4])
-    .tex('uTopV', this.A[1]).tex('uDeepV', this.A[3])
-    .tex('uTopS', this.A[0]);
-  this.fullscreen('velVert', W, H);
-
-  // 2) Advect the single unified parcel population, crossing layers by w.
-  var s = this.part;
-  var pi = s.idx, qi = 1 - s.idx;
-  var p = this.prog.part.use();
+/* Recompute the vertical-flow field (interface up/down mass flux) for both the
+   ocean and the air layers. Cheap: one FV divergence pass over the grid. */
+Planet.prototype.stepVFlow = function () {
+  var gl = this.gl;
+  var p = this.prog.vflow.use();
   this.gridUniforms(p);
-  p.tex('uPartPos', s.posTex[pi]).tex('uPartMeta', s.metaTex[pi])
-    .tex('uLookup', this.texLookup)
-    .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
-    .tex('uVert', this.texVert)
-    .iv2('uPDim', this.PW, this.PH)
-    .f('uDt', dt).f('uRadius', this.params.planetRadius)
-    .f('uSeed', this.seedRand() * 1000)
-    .f('uVelScale', 1.0).f('uVertCouple', P.visVertCouple)
-    .f('uVertRefH', P.hTop)
-    .f('uLifeMin', (P.partLifeMin === undefined ? 4 : P.partLifeMin) * 86400)
-    .f('uLifeMax', (P.partLifeMax === undefined ? 16 : P.partLifeMax) * 86400)
-    .f('uTarget', P.partTarget === undefined ? 0.5 : P.partTarget);
-  this._bindSmooth(p, sm, P);
-  var dstFbo = (pi === 0) ? 'partB' : 'partA';
-  this.fullscreen(dstFbo, this.PW, this.PH);
-  s.idx = qi;
+  p.tex('uTopS', this.A[0]).tex('uTopV', this.A[1]).tex('uDeepV', this.A[3]).tex('uLoA', this.A[4]);
+  this.fullscreen('vflow', this.grid.W, this.grid.H);
+  this.vflowInit = true;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
 
@@ -869,11 +904,10 @@ Planet.prototype.render = function () {
     .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
     .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
-     .tex('uVert', this.texVert)
-     .m4('uMVP', mvp)
-     .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
-     .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief)
-     .f('uWScale', P.wScale);
+    .tex('uVFlow', this.texVFlow)
+    .m4('uMVP', mvp)
+    .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
+    .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief);
   gl.bindVertexArray(this.vaoGlobe);
   gl.drawElements(gl.TRIANGLES, this.grid.indices.length, gl.UNSIGNED_INT, 0);
 
@@ -891,33 +925,45 @@ Planet.prototype.render = function () {
     gl.disable(gl.BLEND);
   }
 
-  var dots = P.streamTrail <= 0;
-  var psz = 2.0 * Math.min(2, dpr);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
   gl.depthMask(false);
   gl.disable(gl.CULL_FACE);
-  var sm = this.velSmoothCur;
-  // One unified parcel population; each vertex's layer/color/visibility is chosen
-  // in the shader from its stored layer coordinate and the streamline bitmask.
-  var s = this.part;
-  var pp = this.prog.points.use();
-  this.gridUniforms(pp);
-  pp.tex('uPartPos', s.posTex[s.idx]).tex('uPartMeta', s.metaTex[s.idx]).tex('uLookup', this.texLookup)
-    .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
-    .iv2('uPDim', this.PW, this.PH)      .m4('uMVP', mvp).f('uEquirect', 0.0)
-    .f('uTrail', P.streamTrail).f('uRadius', this.params.planetRadius)
-    .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
-    .f('uVelScale', 1.0)
-    .i('uStreamMask', P.streamline)
-    .v3arr('uStreamCols', this.streamColsFlat);
-  this._bindSmoothRender(pp, sm, P);
-  gl.bindVertexArray(this.vaoEmpty);
-  gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
+  this.drawTracers(mvp, 0.0, 2.0 * Math.min(2, dpr));
   gl.depthMask(true);
   gl.disable(gl.BLEND);
   gl.enable(gl.CULL_FACE);
   gl.bindVertexArray(null);
+};
+
+/* Draw both particle pools as history trails (or dots). Each particle is
+   coloured by its current sublayer and shown only if that sublayer's streamline
+   bit is set, so the existing per-layer checkboxes still select what's visible
+   while a single pool draws the descending/ascending overturning. */
+Planet.prototype.drawTracers = function (mvp, equirect, psz) {
+  var gl = this.gl;
+  var P = this.params;
+  var dots = (P.flowLines === undefined ? 1 : P.flowLines) < 0.5;
+  var K = Math.max(2, Math.min(this.PT, P.flowSegs | 0));
+  var n = this.PW * this.PH;
+  var mask = P.streamline | 0;
+  for (var pi = 0; pi < this.pools.length; pi++) {
+    var pool = this.pools[pi], c = pool.cfg;
+    // skip the whole pool if neither of its sublayers is enabled
+    if ((((mask >> c.idx[0]) & 1) | ((mask >> c.idx[1]) & 1)) === 0) continue;
+    var pp = this.prog.points.use();
+    this.gridUniforms(pp);
+    pp.tex('uTrail', pool.trail[pool.idx]).tex('uState', pool.state[pool.idx])
+      .iv2('uPDim', this.PW, this.PH).i('uSlots', this.PT).i('uDrawSlots', K)
+      .f('uEquirect', equirect).f('uRadius', this.params.planetRadius)
+      .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
+      .v3('uColor0', c.col[0][0], c.col[0][1], c.col[0][2])
+      .v3('uColor1', c.col[1][0], c.col[1][1], c.col[1][2])
+      .i('uMask', mask).i('uIdx0', c.idx[0]).i('uIdx1', c.idx[1]);
+    if (mvp) pp.m4('uMVP', mvp);
+    gl.bindVertexArray(this.vaoEmpty);
+    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, dots ? n : n * 2 * (K - 1));
+  }
 };
 
 Planet.prototype.renderEquirect = function (w, h, sun) {
@@ -935,10 +981,9 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
     .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
-     .tex('uLookup', this.texLookup).tex('uVert', this.texVert)
-     .v3('uSun', sun[0], sun[1], sun[2])
-     .f('uShowLand', P.showLand).f('uNight', P.nightShading)
-     .f('uWScale', P.wScale);
+    .tex('uLookup', this.texLookup).tex('uVFlow', this.texVFlow)
+    .v3('uSun', sun[0], sun[1], sun[2])
+    .f('uShowLand', P.showLand).f('uNight', P.nightShading);
   gl.bindVertexArray(this.vaoEmpty);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -957,26 +1002,10 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     gl.disable(gl.BLEND);
   }
 
-  var dots = P.streamTrail <= 0;
-  var psz = 2.0 * Math.min(2, window.devicePixelRatio || 1);
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
   gl.depthMask(false);
-  var sm = this.velSmoothCur;
-  var s = this.part;
-  var pp = this.prog.points.use();
-  this.gridUniforms(pp);
-  pp.tex('uPartPos', s.posTex[s.idx]).tex('uPartMeta', s.metaTex[s.idx]).tex('uLookup', this.texLookup)
-    .tex('uLoA', this.A[4]).tex('uTopV', this.A[1]).tex('uHiA', this.A[6]).tex('uDeepV', this.A[3])
-    .iv2('uPDim', this.PW, this.PH).f('uEquirect', 1.0)
-    .f('uTrail', P.streamTrail).f('uRadius', this.params.planetRadius)
-    .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
-    .f('uVelScale', 1.0)
-    .i('uStreamMask', P.streamline)
-    .v3arr('uStreamCols', this.streamColsFlat);
-  this._bindSmoothRender(pp, sm, P);
-  gl.bindVertexArray(this.vaoEmpty);
-  gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
+  this.drawTracers(null, 1.0, 2.0 * Math.min(2, window.devicePixelRatio || 1));
   gl.depthMask(true);
   gl.disable(gl.BLEND);
 };
@@ -987,7 +1016,11 @@ Planet.prototype.loop = function () {
   var P = this.params;
   if (P.running) {
     for (var i = 0; i < P.substeps; i++) this.step();
-    this.stepParticles(P.dt * P.substeps);
+    this.stepSmooth();
+    this.stepVFlow();
+    this.stepFlow(P.dt * P.substeps);
+  } else if (!this.vflowInit) {
+    this.stepVFlow();       // ensure the up/down map is populated when paused
   }
   this.render();
   this.frames++;

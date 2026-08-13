@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Geodesic Planet · GPU Climate Engine</title>
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:#05070f;color:#e2e8f0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  #app{position:relative;width:100vw;height:100vh}
+  canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;display:block}
+
+  .hdr{position:absolute;top:0;left:0;right:0;display:flex;align-items:flex-start;justify-content:space-between;padding:16px;pointer-events:none}
+  .box{pointer-events:auto;background:rgba(0,0,0,.45);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:12px 16px}
+  .title{font-size:14px;font-weight:600;letter-spacing:.05em;color:#67e8f9}
+  .sub{font-size:11px;color:#94a3b8;margin-top:2px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;display:flex;gap:16px;margin-top:8px}
+  .mono .g{color:#6ee7b7}
+  .mono .a{color:#fcd34d}
+  .mono .s{color:#94a3b8}
+  .btn{pointer-events:auto;background:rgba(0,0,0,.45);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px 12px;font-size:12px;color:#e2e8f0;cursor:pointer}
+  .btn:hover{background:rgba(0,0,0,.7)}
+  .btn.proj{position:absolute;top:0;left:50%;margin:0;padding:16px 24px;font-size:24px;line-height:1}
+  .vinfo{position:absolute;top:60px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:10px;padding:8px 16px;pointer-events:none;display:flex;flex-direction:column;align-items:center;gap:6px;max-width:90vw;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.35)}
+  .vinfo .vlabel{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:#94a3b8}
+  .vinfo .vlayer{font-size:13px;font-weight:600;color:#e2e8f0}
+  .vinfo .vstreams{display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
+  .vinfo .vtag{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;white-space:nowrap}
+
+  .panel{position:absolute;top:96px;right:16px;bottom:16px;width:300px;overflow-y:auto;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px;font-size:12px;display:flex;flex-direction:column;gap:16px}
+  .row{display:flex;gap:8px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+  .lab{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#94a3b8;margin-bottom:4px}
+  .mbtn{border-radius:6px;padding:4px 8px;text-align:left;font-size:11px;cursor:pointer;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.05);color:#e2e8f0}
+  .mbtn:hover{background:rgba(255,255,255,.1)}
+  .mbtn.on{background:rgba(34,211,238,.25);border-color:rgba(34,211,238,.4);color:#a5f3fc}
+  .lview{position:fixed;left:16px;bottom:16px;z-index:5;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:12px 16px}
+  .ltable-wrap{margin-bottom:6px}
+  .ltable{border-collapse:collapse;font-size:10px;color:#cbd5e1;white-space:nowrap}
+  .ltable th,.ltable td{padding:3px 2px;text-align:center;border-radius:4px}
+  .ltable th.lname{text-align:left;white-space:nowrap;padding-right:6px;color:#94a3b8;font-weight:500}
+  .ltable thead th{color:#94a3b8;font-weight:500}
+  .ltable input{accent-color:#22d3ee;margin:0;cursor:pointer}
+  .ltable td.sel{background:rgba(34,211,238,.25);box-shadow:inset 0 0 0 1px rgba(34,211,238,.4)}
+  .ltable td.na{visibility:hidden}
+  .ltable th.stream, .ltable td.stream{padding:3px 1px}
+  .ltable td.stream .swatch{display:inline-block;width:8px;height:8px;border-radius:50%;vertical-align:middle;margin-right:3px;box-shadow:0 0 0 1px rgba(0,0,0,.4)}
+  .ltable td.stream input{accent-color:#22d3ee;margin:0;vertical-align:middle;cursor:pointer}
+  .bar{height:8px;border-radius:9999px;background:linear-gradient(90deg,#0d0640,#0c59bf,#1abfa6,#d9d940,#e65a1a,#a60d1f)}
+  .barlab{display:flex;justify-content:space-between;font-size:10px;color:#94a3b8;margin-top:2px}
+  .chk{display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:2px 0}
+  .chk span{color:#cbd5e1}
+  .chk input{accent-color:#22d3ee}
+  input[type=range]{width:100%;accent-color:#22d3ee;height:4px}
+  .kv{display:flex;justify-content:space-between;font-size:10px;color:#94a3b8;margin-bottom:2px}
+  .kv .v{color:#cbd5e1;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .stline{display:flex;align-items:center;gap:8px}
+  .stline .slab{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#94a3b8;white-space:nowrap}
+  .stline input[type=range]{flex:1;height:4px}
+  .stline .v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:#cbd5e1;min-width:3ch;text-align:right}
+  .togbtn{width:100%;border-radius:6px;padding:6px 8px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:#e2e8f0;cursor:pointer;text-align:left}
+  .togbtn:hover{background:rgba(255,255,255,.1)}
+  .desc{font-size:10px;line-height:1.5;color:#64748b;border-top:1px solid rgba(255,255,255,.1);padding-top:12px}
+  .err{position:absolute;inset:0;display:grid;place-items:center;padding:32px}
+  .errbox{max-width:32rem;border-radius:12px;border:1px solid rgba(239,68,68,.4);background:rgba(127,29,29,.6);padding:24px}
+  .errbox h2{margin:0 0 8px;font-size:18px;font-weight:600;color:#fca5a5}
+  .errbox p{margin:0;font-size:14px;color:rgba(254,202,202,.8)}
+  .run.on{background:rgba(16,185,129,.2);color:#6ee7b7;border:1px solid rgba(52,211,153,.3)}
+  .run.off{background:rgba(245,158,11,.2);color:#fcd34d;border:1px solid rgba(251,191,36,.3)}
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="c"></canvas>
+</div>
+
+<!-- Load order matters: each file depends only on those above it. -->
+<script src="geodesics.js"></script>   <!-- Grid class + mesh math (no WebGL) -->
+<script src="shader.js"></script>      <!-- GLSL program sources -->
+<script src="params.js"></script>      <!-- PARAMS schema + pure preset/model helpers -->
+<script src="engine.js"></script>      <!-- m4, Prog, Planet renderer -->
+<!-- Default state. Loaded as a plain <script> so it works from file:// without
+     fetch/CORS; it sets window.PLANET_STATE. Missing / empty ({}) / broken just
+     leaves it undefined and the app starts from fresh initial conditions. -->
+<script src="planet_state.js"></script>
+<script src="app.js"></script>         <!-- UI + bootstrap; calls boot() -->
+<script src="screenshot.js"></script>   <!-- captureProjectionMap(): projection screenshot + save link -->
+</body>
+</html>
