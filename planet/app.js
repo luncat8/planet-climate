@@ -18,11 +18,13 @@ var LAYER_VIEW = {
     { id: 'thick', label: 'h', title: 'Top-layer thickness (m)' },
     { id: 'depth', label: 'D', title: 'Ocean depth / bathymetry (m)' },
     { id: 'eta', label: 'η', title: 'Interface displacement h_top - h_ref (m)' },
+    { id: 'iceThk', label: 'Ice h', title: 'Ice thickness (m) — sea ice + land snow/glaciers' },
+    { id: 'iceFrac', label: 'Ice %', title: 'Ice fractional coverage (0..1)' },
   ],
   map: {
     highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
     lowAir: { T: 0, P: 2, humidity: 3, speed: 4, vert: 20 },
-    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17, vert: 18 },
+    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17, vert: 18, iceThk: 22, iceFrac: 23 },
     deepOcean: { T: 8, speed: 13, salinity: 14 },
   },
 };
@@ -566,6 +568,8 @@ function buildUI() {
     ['nightShading', 'Night shading'],
     ['showLand', 'Show continents'],
     ['rigidLid', 'Rigid-lid (deep return flow)'],
+    ['iceOn', 'Sea ice & snow (cryosphere)'],
+    ['iceOverlay', 'Ice overlay on map'],
   ];
   chkDefs.forEach(function (d) {
     var lab = el('label', 'chk');

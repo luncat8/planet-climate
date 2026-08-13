@@ -45,9 +45,11 @@ var MODE_FIELDS = [
   '(-texelFetch(uVFlow,cTex(cell),0).x)/4.0e-3*0.5+0.5', // 19 (unused) deep = inverse of 18
   ' texelFetch(uVFlow,cTex(cell),0).y/1.0e-1*0.5+0.5',   // 20 air vertical mass flux
   '(-texelFetch(uVFlow,cTex(cell),0).y)/1.0e-1*0.5+0.5', // 21 (unused) high air = inverse of 20
+  'texelFetch(uIce,cTex(cell),0).x/4.0',                 // 22 ice thickness (m), 0..4
+  'texelFetch(uIce,cTex(cell),0).y',                     // 23 ice fractional coverage 0..1
 ];
 // modes that use magnitude (dark-background) coloring; palette-color fields excluded
-var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1, 16:1 };
+var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1, 16:1, 22:1, 23:1 };
 // modes that use the signed diverging (down=blue / up=warm) palette
 var MODE_DIV = { 18:1, 19:1, 20:1, 21:1 };
 function modeDivSrc(m) { return MODE_DIV[m] ? 'base = divPal(vVal);' : ''; }
@@ -103,7 +105,7 @@ function modeMagSrc(m) {
    rather than a lit surface field. Shading them with the day/night terminator
    hides half the map for no reason, so they render unlit with land as flat
    grey so the coastline still reads. */
-var MODE_GEOM = { 16: 1, 17: 1, 18: 1, 19: 1, 20: 1, 21: 1 };
+var MODE_GEOM = { 16: 1, 17: 1, 18: 1, 19: 1, 20: 1, 21: 1, 22: 1, 23: 1 };
 function modeLitSrc(m, expr) {
   return MODE_GEOM[m] ? 'lit = 1.0;' : '';
 }
@@ -200,9 +202,9 @@ void main(){
 
 function EQUI_FS(m) {
 return SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uLookup, uVFlow;
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uLookup, uVFlow, uIce;
 uniform vec3  uSun;
-uniform float uShowLand, uNight;
+uniform float uShowLand, uNight, uIceOn, uIceShow;
 in vec2 vUv;
 out vec4 o;
 vec3 pal(float t){
@@ -245,6 +247,8 @@ ${modeLandSrc(m)}
 ${modeLitSrc(m)}
 
   vec3 col = base * lit;
+  float vIce = uIceOn * clamp(texelFetch(uIce, cTex(cell),0).y, 0.0, 1.0);
+  col = mix(col, mix(vec3(0.72,0.85,1.0), vec3(0.97,0.98,1.0), vLand)*lit, vIce*uIceShow);
   o = vec4(col, 1.0);
 }`;
 }
@@ -1444,6 +1448,21 @@ uniform float uAirPRelax;  // 1/s nudge of prognostic P toward thermal P(T)
 uniform float uAirDpdT;    // Pa/K low-air thermal P
 uniform float uAirDpdTHi;  // Pa/K high-air thermal P
 
+/* ---- Cryosphere coupling (see CRYOSPHERE.md). Reads the ice field for the
+   albedo/insulation feedbacks and writes the per-step phase-change thickness
+   delta into oDeepS.zw for ICE_DYN_FS to apply. All energy/salt bookkeeping is
+   done HERE so it stays symmetric; the mass side is applied in the ice pass. */
+uniform sampler2D uIce;    // (iceThk[m], iceFrac[0..1], _, _)
+uniform float uIceOn;      // master enable (0 = legacy behaviour, ice inert)
+uniform float uAlbIce;     // sea-ice albedo
+uniform float uAlbSnow;    // land snow/ice albedo
+uniform float uIceInsul;   // max fractional damping of air-sea flux under ice
+uniform float uIceH0;      // e-folding thickness for insulation/coverage [m]
+uniform float uSice;       // bulk salinity of newly frozen ice [ppt]
+uniform float uFreezeRate; // freeze/melt relaxation rate of the skin [1/s]
+const float uLf     = 3.34e5;   // latent heat of fusion [J/kg]
+const float uRhoIce = 917.0;    // ice density [kg/m^3]
+
 const float Le   = 2.5e6;
 const float cpA  = 1004.0;
 const float cpW  = 4000.0;
@@ -1502,19 +1521,32 @@ void main(){
   float Cw  = mix(CwT, CwLd, land);
 
   float mu = mix(meanInsol(lat, uSeasonDecl), max(0.0, dot(n, uSun)), uDayNight);
-  float alb = mix(0.08, 0.28, land) + 0.35*clamp(cloud,0.0,1.0);
-  alb += 0.5*smoothstep(273.0, 258.0, Ts);
+  // ---- Cryosphere read + albedo feedback -----------------------------------
+  vec2  iceSt   = uIceOn > 0.5 ? texelFetch(uIce, cTex(cell), 0).xy : vec2(0.0);
+  float iceThk  = max(0.0, iceSt.x);
+  float iceFrac = clamp(iceSt.y, 0.0, 1.0);
+  float aOpen   = mix(0.08, 0.28, land) + 0.35*clamp(cloud,0.0,1.0);   // water/land + cloud
+  float aIce    = mix(uAlbIce, uAlbSnow, land);                        // sea ice vs land snow
+  float alb     = mix(aOpen, aIce, iceFrac);
   float S = uSolar*mu*(1.0 - clamp(alb,0.0,0.9));
+
+  // Insulation: thicker / more complete ice cover throttles air-sea exchange.
+  float insul = clamp(uIceInsul*iceFrac*(iceThk/(iceThk+uIceH0)), 0.0, 0.95);
 
   float spd = length(vl);
   float qs_s = qsat(Ts, uPlow);
-  float evap = (1.0 - 0.75*land)*uEvap*(0.6 + 0.08*spd)*max(0.0, qs_s - q);  // kg/m2/s
-  float precip = rain*0.001*(1.0-land);                                      // kg/m2/s
+  float evap = (1.0 - 0.75*land)*uEvap*(0.6 + 0.08*spd)*max(0.0, qs_s - q)*(1.0-insul);  // kg/m2/s
+  // Precipitation routing: below freezing, precip falls as snow onto the ice
+  // field (both domains) instead of freshening the ocean.
+  float coldP    = (uIceOn > 0.5) ? (1.0 - smoothstep(271.0, 275.0, Tl)) : 0.0;
+  float precipAll= rain*0.001;                          // kg/m2/s (all cells)
+  float snowfall = precipAll*coldP;                     // -> iceThk (kg/m2/s)
+  float precip   = precipAll*(1.0 - coldP)*(1.0-land);  // warm rain freshens ocean
   // Net freshwater loss from the ocean surface. Masked ONCE, here, so that the
   // salinity update and the thickness update below see exactly the same flux
   // (otherwise rho*h*S stops being conserved, and land cells drift in S).
   float EmP = (evap - precip)*(1.0-land);                                    // net loss
-  float Fsens = uKsurf*(Ts - Tl);
+  float Fsens = uKsurf*(Ts - Tl)*(1.0-insul);
   float Fsol_s = S*0.76;
 
   Ts += uDt*(Fsol_s - Fsens - Le*evap)/Cw;
@@ -1655,6 +1687,42 @@ void main(){
     Ph = mix(ha.w, PhTh, a);
   }
 
+  // ---- CRYOSPHERE PHASE CHANGE (energy + salt HERE; mass applied in ICE_DYN)
+  // Supercooling below the freezing point is converted to ice thickness and the
+  // latent heat pins the skin back at Tf (freezing warms, slowing itself); ice
+  // above Tf melts, the latent draw cooling the skin. Brine is rejected on
+  // freeze and released on melt in strict content form. The per-step thickness
+  // delta is handed to ICE_DYN_FS through oDeepS.zw.
+  float dThk = 0.0, dFracSrc = 0.0;
+  if(uIceOn > 0.5){
+    float Tf    = mix(273.15 - 0.054*St, 273.15, land);   // freezing point
+    float Cskin = mix(CwT, CwLd, land);                   // J/m^2/K of the skin
+    float below = Tf - Ts;                                // >0 supercooled
+    // Relax the skin toward Tf rather than snapping (the whole mixed layer does
+    // not freeze in one step). uFreezeRate [1/s] sets the timescale; the latent
+    // released/absorbed matches exactly the ice formed/melted, so energy is
+    // conserved and the deep-heat flux + insulation set the equilibrium thickness.
+    float relax = clamp(uFreezeRate*uDt, 0.0, 1.0);
+    if(below > 0.0){
+      // Conductive growth limit (Stefan): thick ice insulates its own base, so
+      // growth slows as 1/(1+thk/Hc). Gives a finite equilibrium thickness
+      // instead of drifting to the cap.
+      float grow = relax/(1.0 + iceThk/(4.0*uIceH0));
+      float dfz = grow*Cskin*below/(uLf*uRhoIce);         // m of ice formed
+      dThk += dfz;
+      Ts   += grow*below;                                 // latent release -> toward Tf
+      dFracSrc = clamp(dfz/uIceH0, 0.0, 1.0);
+    } else if(iceThk > 0.0){
+      float dmp = relax*Cskin*(-below)/(uLf*uRhoIce);     // m that could melt
+      float dm  = min(dmp, iceThk);
+      dThk -= dm;
+      Ts   -= dm*uLf*uRhoIce/Cskin;                       // latent absorbed cools skin
+    }
+    // brine rejection (freeze) / freshening (melt), ocean only, content form
+    St += (1.0-land)*dThk*uRhoIce*(St - uSice)/(rhoW*max(hT,1.0));
+    dThk += snowfall*uDt/uRhoIce;                         // fresh snow accretion
+  }
+
   Ts = clamp(Ts, 200.0, 360.0);  Td = clamp(Td, 200.0, 360.0);
   Tl = clamp(Tl, 150.0, 360.0);  Th = clamp(Th, 150.0, 360.0);
   St = clamp(St, 5.0, 60.0);     Sd = clamp(Sd, 5.0, 60.0);
@@ -1667,7 +1735,7 @@ ${mode === 'ocean'
      interpolation. The coupling pass must PRESERVE it -- zeroing it here would
      silently disable the checkerboard damping every other pass. */
   oTopV  = vec4(vt, tv.zw);
-  oDeepS = vec4(Td, Sd, 0.0, 0.0);
+  oDeepS = vec4(Td, Sd, dThk, dFracSrc);
   oDeepV = vec4(vd, 0.0, 0.0);`
     : `  oLoA = vec4(vl, Tl, Pl);
   oLoB = vec4(q , cloud, 0.0, 0.0);
@@ -1675,6 +1743,83 @@ ${mode === 'ocean'
   oHiB = vec4(qh, rain, 0.0, 0.0);`}
 }`;
 }
+
+/* ICE_DYN_FS — unified cryosphere transport (see CRYOSPHERE.md).
+   One pass, dedicated 2-channel output (iceThk, iceFrac). Applies the
+   phase-change mass handed over from COUPLE_FS (uDeepS.zw), then flux-form
+   (upwind, conservative) transport:
+     - ocean faces : free drift  v = driftW*wind + driftC*current
+     - land faces  : SIA / calving, diffusive on ice-surface elevation
+                     s = land*(bed + thk)  (ocean surface treated as 0), so a
+                     land->ocean gradient carries glacial ice to sea = calving.
+   Coastal no-flux is automatic (invalid neighbours contribute nothing); drift
+   and SIA speeds are CFL-limited per face. */
+var ICE_DYN_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oIce;
+uniform sampler2D uIce, uDeepS, uLoA, uTopV;
+uniform float uDt, uDriftW, uDriftC, uDsia, uThkMax, uIceH0;
+
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oIce = vec4(0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell), 0).w;
+  float area = max(texelFetch(uCellA, cTex(cell),0).w, 1.0);
+  vec2  ice0 = texelFetch(uIce,   cTex(cell), 0).xy;
+  vec4  ds0  = texelFetch(uDeepS, cTex(cell), 0);      // .z=dThk, .w=dFracSrc
+
+  float thk  = max(0.0, ice0.x) + ds0.z;               // + phase-change mass
+  float frac = clamp(ice0.y, 0.0, 1.0);
+  float dFracSrc = ds0.w;
+
+  float bed0 = texelFetch(uCellC, cTex(cell),0).z;
+  vec2  drift0 = uDriftW*texelFetch(uLoA, cTex(cell),0).xy
+               + uDriftC*texelFetch(uTopV, cTex(cell),0).xy;
+  float s0 = land*(bed0 + thk);
+
+  float Fthk = 0.0, Ffrac = 0.0;                        // net OUTWARD flux (m^3/s)
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+    if(na.w < 0.5) continue;
+    int   j = int(na.x);
+    float L = na.y, d = max(na.z, 1.0);
+    vec4  nb = texelFetch(uNbrB, nTex(cell,k), 0);
+    vec2  nrm = nb.xy;
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    vec2  icej  = texelFetch(uIce,   cTex(j),0).xy;
+    float thkj  = max(0.0, icej.x + texelFetch(uDeepS, cTex(j),0).z);
+    float fracj = clamp(icej.y, 0.0, 1.0);
+    float bedj  = texelFetch(uCellC, cTex(j),0).z;
+
+    float oceanFace = (1.0-land)*(1.0-landj);
+    float vmax = 0.45*d/max(uDt,1e-3);                  // CFL limit
+
+    vec2 driftj = uDriftW*xfer(texelFetch(uLoA, cTex(j),0).xy, nb.z, nb.w)
+                + uDriftC*xfer(texelFetch(uTopV, cTex(j),0).xy, nb.z, nb.w);
+    float un = clamp(dot(0.5*(drift0+driftj), nrm), -vmax, vmax);
+
+    float sj  = landj*(bedj + thkj);
+    float vsia= clamp(uDsia*max(thk,thkj)*(s0 - sj)/d, -vmax, vmax);
+
+    float vface = (oceanFace > 0.5) ? un : vsia;
+    float thkUp = vface >= 0.0 ? thk  : thkj;
+    float fUp   = vface >= 0.0 ? frac : fracj;
+    Fthk  += L*vface*thkUp;
+    Ffrac += L*vface*fUp;
+  }
+
+  thk  -= uDt*Fthk /area;
+  frac -= uDt*Ffrac/area;
+  frac += dFracSrc;
+
+  thk  = clamp(thk, 0.0, uThkMax);
+  frac = clamp(frac, 0.0, 1.0);
+  if(thk <= 1.0e-4){ thk = 0.0; frac = 0.0; }
+  else { frac = clamp(max(frac, min(1.0, thk/uIceH0)), 0.0, 1.0); }
+  if(isnan(thk) || isinf(thk)) thk = 0.0;
+  if(isnan(frac) || isinf(frac)) frac = 0.0;
+  oIce = vec4(thk, frac, 0.0, 0.0);
+}`;
+
 
 var INIT_FS = SHADER_HEAD + SHADER_COMMON + `
 layout(location=0) out vec4 oTopS;    // (h_top, T_top, S_top, _)
@@ -2028,10 +2173,11 @@ void main(){
 
 function GLOBE_VS(m) {
 return SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uVFlow;
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uVFlow, uIce;
 uniform mat4 uMVP;
 uniform float uRelief;
-out vec3 vN; out float vVal; out float vLand; out float vCloud; out vec3 vPos;
+uniform float uIceOn;
+out vec3 vN; out float vVal; out float vLand; out float vCloud; out vec3 vPos; out float vIce;
 ${modeSampleFnSrc(m)}
 void main(){
   int cell = gl_VertexID;
@@ -2061,6 +2207,7 @@ void main(){
   vLand = cb.w;
   vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
   vN = n;
+  vIce = uIceOn * clamp(texelFetch(uIce, cTex(cell),0).y, 0.0, 1.0);
   vPos = n*(1.0 + uRelief*cb.w);
   gl_Position = uMVP*vec4(vPos, 1.0);
 }`;
@@ -2068,9 +2215,9 @@ void main(){
 
 function GLOBE_FS(m) {
 return SHADER_HEAD + `
-in vec3 vN; in float vVal; in float vLand; in float vCloud; in vec3 vPos;
+in vec3 vN; in float vVal; in float vLand; in float vCloud; in vec3 vPos; in float vIce;
 uniform vec3 uSun; uniform vec3 uEye;
-uniform float uShowLand, uNight;
+uniform float uShowLand, uNight, uIceShow;
 out vec4 o;
 vec3 pal(float t){
   t = clamp(t,0.0,1.0);
@@ -2095,6 +2242,8 @@ ${modeLitSrc(m)}
   vec3 V = normalize(uEye - vPos);
   float rim = pow(1.0 - max(0.0,dot(N,V)), 3.0);
   vec3 col = base*lit + vec3(0.20,0.42,0.85)*rim*0.55;
+  // sea ice (light blue) / land snow (white) overlay
+  col = mix(col, mix(vec3(0.72,0.85,1.0), vec3(0.97,0.98,1.0), vLand)*lit, clamp(vIce,0.0,1.0)*uIceShow);
   o = vec4(col, 1.0);
 }`;
 }

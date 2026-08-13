@@ -52,7 +52,7 @@ const PATCH = JSON.parse(arg('params', '{}'));
     const pix = new Uint8Array(512 * 384 * 4);
 
     const modes = [];
-    for (let m = 0; m <= 17; m++) modes.push(m);
+    for (let m = 0; m <= 23; m++) modes.push(m);
 
     for (const equi of [false, true]) {
       for (const m of modes) {

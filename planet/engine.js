@@ -202,6 +202,7 @@ Planet.prototype.compile = function () {
   this.prog.init = new Prog(gl, QUAD_VS, INIT_FS, 'init');
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
   this.prog.vflow = new Prog(gl, QUAD_VS, VFLOW_FS, 'vflow');
+  this.prog.iceDyn = new Prog(gl, QUAD_VS, ICE_DYN_FS, 'iceDyn');
   this.prog.state = new Prog(gl, QUAD_VS, STATE_FS, 'state');
   this.prog.trail = new Prog(gl, QUAD_VS, TRAIL_FS, 'trail');
   this.prog.smooth = new Prog(gl, QUAD_VS, SMOOTH_FS, 'smooth');
@@ -286,6 +287,16 @@ Planet.prototype.build = function (level) {
   this.fbo.etaB = this.mkFbo([this.texEtaB]);
   this.texMaxRes = this.mkTex(1, 1, null);
   this.fbo.maxRes = this.mkFbo([this.texMaxRes]);
+
+  /* ---- Cryosphere ice field (see CRYOSPHERE.md) -------------------------
+     Dedicated ping-pong texture (iceThk, iceFrac, _, _). Kept OUT of the 8
+     saved ocean/air textures so the tuned ocean-dynamics shaders are untouched;
+     persisted by packing into free channels of A[3] at (de)serialize time. */
+  this.ice = [this.mkTex(W, H, new Float32Array(W * H * 4)),
+              this.mkTex(W, H, new Float32Array(W * H * 4))];
+  this.fbo.ice0 = this.mkFbo([this.ice[0]]);
+  this.fbo.ice1 = this.mkFbo([this.ice[1]]);
+  this.iceIdx = 0;
 
   /* ---- Flow-visualisation particle pools -------------------------------
      TWO pools — ocean {top,deep} and air {low,high}. Each particle carries a
@@ -404,6 +415,7 @@ Planet.prototype.destroyGrid = function () {
   var partTexs = (this.pools || []).reduce(function (a, s) { return a.concat(s.state, s.trail); }, []);
   if (this.smooth) partTexs = this.smooth.reduce(function (a, s) { return a.concat(s.tex); }, partTexs);
   if (this.texVFlow) partTexs.push(this.texVFlow);
+  if (this.ice) partTexs = partTexs.concat(this.ice);
   var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
   if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes, this.texPhi]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
@@ -412,7 +424,7 @@ Planet.prototype.destroyGrid = function () {
   if (this.ibo) gl.deleteBuffer(this.ibo);
   if (this.vaoGlobe) gl.deleteVertexArray(this.vaoGlobe);
   if (this.vaoEmpty) gl.deleteVertexArray(this.vaoEmpty);
-  this.A = []; this.B = []; this.pools = []; this.smooth = []; this.texVFlow = null;
+  this.A = []; this.B = []; this.pools = []; this.smooth = []; this.texVFlow = null; this.ice = null;
 };
 
 /* Advance the smoothed-velocity EMA one frame for the 4 sublayer sources.
@@ -486,6 +498,11 @@ Planet.prototype.reset = function () {
   p2.f('uSeed', this.seedRand() * 1000)
     .f('uGravity', this.params.gravity).f('uRhoLo', this.params.atmosDensity);
   this.fullscreen('init2', W, H);
+  // cryosphere spins up from zero
+  if (this.ice) {
+    var zero = new Float32Array(W * H * 4);
+    this.writeTex(this.ice[0], zero); this.writeTex(this.ice[1], zero); this.iceIdx = 0;
+  }
 };
 
 /* ============ state save / load ============
@@ -520,13 +537,19 @@ Planet.prototype.writeTex = function (tex, data) {
 
 Planet.prototype.serializeState = function () {
   var g = this.grid;
+  var A = [0, 1, 2, 3, 4, 5, 6, 7].map(function (i) { return this.readTex(this.A[i]); }, this);
+  /* Pack the cryosphere field into free channels of A[3] (oDeepV.zw), which the
+     ocean dynamics overwrite every step so the live sim never reads them. This
+     keeps the 8-texture codec, mksave.js and baselines untouched. */
+  var ice = this.readTex(this.iceTex());
+  for (var i = 0; i < g.W * g.H; i++) { A[3][i * 4 + 2] = ice[i * 4 + 0]; A[3][i * 4 + 3] = ice[i * 4 + 1]; }
   return {
     version: 1,
     level: g.level, W: g.W, H: g.H,
     simTime: this.simTime, stepCount: this.stepCount,
     params: Object.assign({}, this.params),
     bounds: Object.assign({}, this.bounds),
-    A: [0, 1, 2, 3, 4, 5, 6, 7].map(function (i) { return this.readTex(this.A[i]); }, this),
+    A: A,
   };
 };
 
@@ -535,6 +558,14 @@ Planet.prototype.applyState = function (st) {
   if (st.level !== this.grid.level)
     throw new Error('save is level ' + st.level + ', current grid is level ' + this.grid.level);
   for (var i = 0; i < 8; i++) this.writeTex(this.A[i], st.A[i]);
+  /* Extract the packed cryosphere field from A[3].zw into the ice ping-pong
+     (older saves without ice simply carry zeros here). */
+  var g = this.grid, n = g.W * g.H, ice = new Float32Array(n * 4);
+  var a3 = st.A[3];
+  if (a3 && a3.length >= n * 4) {
+    for (var k = 0; k < n; k++) { ice[k * 4] = a3[k * 4 + 2] || 0; ice[k * 4 + 1] = a3[k * 4 + 3] || 0; }
+  }
+  this.writeTex(this.ice[0], ice); this.writeTex(this.ice[1], ice); this.iceIdx = 0;
   this.params = Object.assign(defaultParams(), st.params);
   this.bounds = Object.assign({}, st.bounds || {});
   this.simTime = st.simTime || 0;
@@ -627,6 +658,14 @@ Planet.prototype.couple = function () {
       .f('uAirDpdTHi', P.airDpdTHi === undefined ? 200 : P.airDpdTHi)
       .f('uGravity', P.gravity)
       .f('uRhoLo', P.atmosDensity);
+    pr.tex('uIce', self.iceTex())
+      .f('uIceOn', P.iceOn === undefined ? 0 : P.iceOn)
+      .f('uAlbIce', P.iceAlbedo === undefined ? 0.62 : P.iceAlbedo)
+      .f('uAlbSnow', P.snowAlbedo === undefined ? 0.78 : P.snowAlbedo)
+      .f('uIceInsul', P.iceInsul === undefined ? 0.85 : P.iceInsul)
+      .f('uIceH0', P.iceH0 === undefined ? 0.5 : P.iceH0)
+      .f('uSice', P.iceSalinity === undefined ? 4 : P.iceSalinity)
+      .f('uFreezeRate', P.iceFreezeRate === undefined ? 5e-5 : P.iceFreezeRate);
     self.fullscreen(pair[0], W, H);
   });
 };
@@ -700,8 +739,34 @@ Planet.prototype.step = function () {
 
   this.couple();
   if (P.rigidLid > 0.5) this.projectBarotropic();
+  if (P.iceOn > 0.5) this.stepIce();
   this.simTime += P.dt;
   this.stepCount++;
+};
+
+/* Current (readable) ice texture. */
+Planet.prototype.iceTex = function () { return this.ice[this.iceIdx]; };
+
+/* Cryosphere transport pass (ICE_DYN_FS). Reads the current ice field + the
+   per-step phase-change delta COUPLE_FS wrote into A[2] (uDeepS.zw), the surface
+   wind (A[4]) and current (A[1]), and the static bed elevation; writes the
+   next ice field (drift + SIA + calving, flux-form). Ping-pongs iceIdx. */
+Planet.prototype.stepIce = function () {
+  var W = this.grid.W, H = this.grid.H, P = this.params;
+  var cur = this.iceIdx, nxt = 1 - cur;
+  var pr = this.prog.iceDyn.use();
+  this.gridUniforms(pr);
+  pr.tex('uIce', this.ice[cur])
+    .tex('uDeepS', this.A[2]).tex('uLoA', this.A[4]).tex('uTopV', this.A[1])
+    .f('uDt', P.dt)
+    .f('uDriftW', P.iceDriftWind === undefined ? 0.02 : P.iceDriftWind)
+    .f('uDriftC', P.iceDriftCurrent === undefined ? 1.0 : P.iceDriftCurrent)
+    .f('uDsia', P.iceSia === undefined ? 3e-8 : P.iceSia)
+    .f('uThkMax', P.iceThkMax === undefined ? 60 : P.iceThkMax)
+    .f('uIceH0', P.iceH0 === undefined ? 0.5 : P.iceH0);
+  this.fullscreen(nxt === 1 ? 'ice1' : 'ice0', W, H);
+  this.iceIdx = nxt;
+  this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
 };
 
 /* Barotropic (rigid-lid) projection — see the BARO_* shaders. Removes the
@@ -941,9 +1006,12 @@ Planet.prototype.render = function () {
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
     .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
     .tex('uVFlow', this.texVFlow)
+    .tex('uIce', this.iceTex())
     .m4('uMVP', mvp)
     .v3('uSun', sun[0], sun[1], sun[2]).v3('uEye', eye[0], eye[1], eye[2])
-    .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief);
+    .f('uShowLand', P.showLand).f('uNight', P.nightShading).f('uRelief', P.relief)
+    .f('uIceOn', P.iceOn === undefined ? 0 : P.iceOn)
+    .f('uIceShow', (P.iceOverlay === undefined ? 1 : P.iceOverlay) * (P.iceOn === undefined ? 0 : P.iceOn));
   gl.bindVertexArray(this.vaoGlobe);
   gl.drawElements(gl.TRIANGLES, this.grid.indices.length, gl.UNSIGNED_INT, 0);
 
@@ -1018,8 +1086,11 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
     .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
     .tex('uLookup', this.texLookup).tex('uVFlow', this.texVFlow)
+    .tex('uIce', this.iceTex())
     .v3('uSun', sun[0], sun[1], sun[2])
-    .f('uShowLand', P.showLand).f('uNight', P.nightShading);
+    .f('uShowLand', P.showLand).f('uNight', P.nightShading)
+    .f('uIceOn', P.iceOn === undefined ? 0 : P.iceOn)
+    .f('uIceShow', (P.iceOverlay === undefined ? 1 : P.iceOverlay) * (P.iceOn === undefined ? 0 : P.iceOn));
   gl.bindVertexArray(this.vaoEmpty);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
