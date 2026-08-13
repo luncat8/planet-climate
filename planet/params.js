@@ -324,8 +324,11 @@ var BUILTIN_PRESETS = {
     atmosDensity:   { v: 0.8 },
     planetRadius:   { v: 1737e3 },
     greenhouse:     { v: 0.0 },
-    omegaSpin:      { v: 2.66e-6 },
-    omegaOrbit:     { v: 2 * Math.PI / (27.3 * 86400) },
+    /* omegaSpin is the sidereal rotation rate (~27.3 d) that drives Coriolis.
+       omegaOrbit is the SUN's apparent sweep = the synodic lunar day (~29.53 d),
+       i.e. the real day/night cycle on the Moon, not the sidereal spin period. */
+    omegaSpin:      { v: 2 * Math.PI / (27.3 * 86400) },
+    omegaOrbit:     { v: 2 * Math.PI / (29.53 * 86400) },
     solar:          { v: 1361 },
     depthMax:       { v: 200 },
   },
