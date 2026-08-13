@@ -42,48 +42,53 @@ density ≈ uniform — i.e. it honours incompressibility — and makes particle
 trace the overturning circulation. Off ⇒ plain long life + uniform random
 rebirth.
 
-## Vertical flow (up/down) field + view
+## Vertical mass-flux (up/down) field + view
 
 Because the fluid is ~incompressible, horizontal convergence must be balanced by
-vertical motion. The interface vertical velocity is one well-defined quantity per
-column, computed once per frame by `VFLOW_FS` (one FV divergence pass):
+vertical transport. The right diagnostic is **vertical MASS flux**, not vertical
+velocity: velocity is not conserved across the density jump between layers (the
+solver's layer speeds are not proportional to mass), but mass is — what sinks
+out of one layer enters the other. `VFLOW_FS` computes it once per frame as
+`rho * div(horizontal transport)`:
 
 ```
-w_ocean = div(h_top · u_top)      (+ = upwelling, deep water rising into the top)
-w_air   = -div(u_low)             (+ = ascent from low-level convergence)
+ocean:  m = rho_water * div(h_top · u_top)          rho_water = 1027
+air:    m = -(rho_lo·Hlo) * div(u_low)              rho_lo·Hlo = 1.1·5000 = 5500
+        (+ = upwelling / rising ; kg/m^2/s)
 ```
 
-New **"↕" (up/down)** column in the layer/view table shows it with a diverging
-palette (blue = sinking, warm = rising). The two ocean layers share it with
-**opposite sign by construction** (`ocean = +w`, `deep = -w`); likewise low/high
-air — exactly the "just inverted, up to a multiplier" relation requested. The
-recycling above reads this same field, so viz and recycling never disagree.
+A single **"↕" view** per fluid (on the **Ocean** and **Low air** rows) shows it
+with a diverging palette: **red = mass upwelling, blue = mass moving down**. The
+deep/high layers are just the exact inverse of the same field, so their separate
+maps were redundant and removed. The divergence-based recycling reads this same
+mass-flux field, so viz and recycling never disagree.
 
-### Verification of the "equal and opposite" question (a real finding)
+### Mass in == mass out, by design (verified)
 
-`VFLOW_FS` also outputs `div(h_deep · u_deep)` (channel `.z`) purely as a
-diagnostic. Measured on the bundled equilibrium (L5, wet ocean cells):
+The integral of a divergence over a closed layer is zero, so **total upwelling
+mass equals total downwelling mass by construction**. Measured on the bundled
+equilibrium (L5, area-weighted over wet cells):
 
 ```
-rms( div(h_top u_top) )                     = 1.08e-6
-rms( div(h_top u_top) + div(h_deep u_deep)) = 2.06e-6   (ratio 1.92)
-corr( div(h_top u_top), div(h_deep u_deep)) = -0.03
+ocean:  up = +1.532e11 kg/s,  down = -1.532e11 kg/s,  imbalance = 1e-5 (0.001%)
+air:    up = +5.88e12  kg/s,  down = -5.88e12  kg/s,  imbalance ~ 0
 ```
 
-If the deep layer were the exact return flow of the top (rigid-lid, column
-non-divergent) we would see `corr ≈ -1` and the sum `≈ 0`. Instead the two
-layers' horizontal divergences are essentially **uncorrelated** — the deep
-dynamics do *not* mass-balance the top. So the suspicion was correct: nothing in
-the current solver enforces barotropic non-divergence (the free surface `eta` +
-steric / mass-spring terms absorb it).
+Per column the two layers carry the exact-inverse mass flux, so what leaves one
+enters the other identically.
 
-For visualization and recycling this is handled the correct way: the interface
-vertical velocity is taken from the single well-posed quantity (top-layer
-continuity) and shared **inverted** between the layers, so what leaves the top
-enters the deep exactly — mass-consistent by construction. Making the *dynamics*
-themselves column-non-divergent (a rigid-lid / barotropic-divergence constraint)
-is a separate, larger physics change that risks the tuned equilibrium; it is
-intentionally **not** done here. Flag if you want that pursued.
+### The deep-flow suspicion (a real finding, left as physics)
+
+`VFLOW_FS` also outputs the deep layer's own transport divergence (`.z`, mass
+units) as a diagnostic. Its correlation with the top layer's is ≈ **-0.03** (not
+-1), i.e. the deep dynamics do **not** independently return the top-layer
+transport — nothing in the current solver enforces barotropic (column)
+non-divergence; the free surface `eta` + steric / mass-spring terms absorb it.
+The map/recycling sidestep this by defining the interface mass flux from the
+single well-posed quantity and sharing it inverted, which is mass-consistent by
+construction. Making the *dynamics themselves* column-non-divergent (a rigid-lid
+constraint) is a larger physics change that risks the tuned equilibrium and is
+intentionally not done here.
 
 ## Buffers / cost
 

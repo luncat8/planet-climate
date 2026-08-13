@@ -41,10 +41,10 @@ var MODE_FIELDS = [
   '(ht-50.0)/20.0',                        // 15 top-layer thickness h_top (m)
   'Dc/5000.0',                             // 16 ocean depth D (m)
   '(ht-hRc)/8.0*0.5+0.5',                  // 17 interface displacement eta (m)
-  ' texelFetch(uVFlow,cTex(cell),0).x/4.0e-6*0.5+0.5',   // 18 ocean up/down
-  '(-texelFetch(uVFlow,cTex(cell),0).x)/4.0e-6*0.5+0.5', // 19 deep ocean up/down (inverse of 18)
-  ' texelFetch(uVFlow,cTex(cell),0).y/1.8e-5*0.5+0.5',   // 20 low-air up/down
-  '(-texelFetch(uVFlow,cTex(cell),0).y)/1.8e-5*0.5+0.5', // 21 high-air up/down (inverse of 20)
+  ' texelFetch(uVFlow,cTex(cell),0).x/4.0e-3*0.5+0.5',   // 18 ocean vertical mass flux
+  '(-texelFetch(uVFlow,cTex(cell),0).x)/4.0e-3*0.5+0.5', // 19 (unused) deep = inverse of 18
+  ' texelFetch(uVFlow,cTex(cell),0).y/1.0e-1*0.5+0.5',   // 20 air vertical mass flux
+  '(-texelFetch(uVFlow,cTex(cell),0).y)/1.0e-1*0.5+0.5', // 21 (unused) high air = inverse of 20
 ];
 // modes that use magnitude (dark-background) coloring; palette-color fields excluded
 var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1, 16:1 };
@@ -52,14 +52,14 @@ var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1, 16:1 };
 var MODE_DIV = { 18:1, 19:1, 20:1, 21:1 };
 function modeDivSrc(m) { return MODE_DIV[m] ? 'base = divPal(vVal);' : ''; }
 
-/* Signed diverging palette for the up/down modes. Input t in [0,1] with 0.5 =
-   no vertical motion; below = sinking (cool blue), above = rising (warm), on a
-   dark background so both signs read against the near-zero interior. */
+/* Signed diverging palette for the vertical mass-flux modes. Input t in [0,1]
+   with 0.5 = no vertical mass transfer; below = sinking (blue), above = rising
+   (red), on a dark background so both signs read against the near-zero interior. */
 var DIVPAL_GLSL = `vec3 divPal(float t){
   float d = clamp(t,0.0,1.0) - 0.5;
   vec3 dark = vec3(0.02,0.03,0.06);
-  vec3 down = vec3(0.16,0.45,0.95);
-  vec3 up   = vec3(1.00,0.55,0.18);
+  vec3 down = vec3(0.15,0.42,0.95);   // mass moving down
+  vec3 up   = vec3(0.95,0.18,0.12);   // mass upwelling (red)
   float a = clamp(abs(d)*2.0, 0.0, 1.0);
   a = pow(a, 0.75);
   return mix(dark, d < 0.0 ? down : up, a);
@@ -1682,11 +1682,17 @@ void main(){
     divAir  += L*0.5*dot(vl0+vlj, nrm);                   // div(u_low)
   }
   divOc /= area; divDeep /= area; divAir /= area;
-  // .x = ocean interface upwelling (= div(h_top u_top); + = deep water rising)
-  // .y = air upwelling (= -div(u_low); + = ascent from low-level convergence)
-  // .z = deep-layer divergence, for the mass-balance diagnostic (see harness);
-  //      the DEEP render mode uses -.x so the two layers are inverse by design.
-  o = vec4(divOc, -divAir, divDeep, 0.0);
+  // VERTICAL MASS FLUX (kg/m^2/s). Velocity is not conserved across the density
+  // jump between layers, but MASS is: what sinks out of one layer enters the
+  // other. Each channel is rho * (horizontal transport divergence), and the
+  // integral of a divergence over a closed layer is zero, so globally
+  // upwelling mass == downwelling mass BY CONSTRUCTION.
+  //   rho_water = 1027 ; low-air column mass = rho_lo(1.1) * Hlo(5000) = 5500.
+  // .x = ocean interface mass flux (+ = upwelling: deep water rising into top)
+  // .y = air interface mass flux   (+ = ascent from low-level convergence)
+  // .z = deep-layer transport-divergence mass flux (diagnostic only; the deep
+  //      render/recycle uses -.x so the two layers are exact-inverse by design).
+  o = vec4(1027.0*divOc, -5500.0*divAir, 1027.0*divDeep, 0.0);
 }`;
 
 /* ---------------------------------------------------------------------------

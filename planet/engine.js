@@ -299,10 +299,10 @@ Planet.prototype.build = function (level) {
     }
   }
   var streamLayers = [
-    { velMode:2, velScale:1,  color:[1,0,0], wChan:1, wSign:-1, wScale:8.0e-6 }, // high air
-    { velMode:0, velScale:1,  color:[0,1,0], wChan:1, wSign:+1, wScale:8.0e-6 }, // low air
-    { velMode:1, velScale:6,  color:[0,0,1], wChan:0, wSign:+1, wScale:1.5e-6 }, // ocean top
-    { velMode:3, velScale:60, color:[1,1,1], wChan:0, wSign:-1, wScale:1.5e-6 }, // deep ocean
+    { velMode:2, velScale:1,  color:[1,0,0], wChan:1, wSign:-1, wScale:4.4e-2 }, // high air
+    { velMode:0, velScale:1,  color:[0,1,0], wChan:1, wSign:+1, wScale:4.4e-2 }, // low air
+    { velMode:1, velScale:6,  color:[0,0,1], wChan:0, wSign:+1, wScale:1.5e-3 }, // ocean top
+    { velMode:3, velScale:60, color:[1,1,1], wChan:0, wSign:-1, wScale:1.5e-3 }, // deep ocean
   ];
   this.part = streamLayers.map(function (L, i) {
     var sa = self.mkTex(self.PW, self.PH, sdata), sb = self.mkTex(self.PW, self.PH, sdata);

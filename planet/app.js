@@ -11,7 +11,7 @@ var LAYER_VIEW = {
     { id: 'T', label: 'T', title: 'Temperature' },
     { id: 'P', label: 'P', title: 'Pressure' },
     { id: 'speed', label: 'Spd', title: 'Speed' },
-    { id: 'vert', label: '↕', title: 'Vertical velocity (up / down)' },
+    { id: 'vert', label: '↕', title: 'Vertical mass flux (red = up, blue = down)' },
     { id: 'humidity', label: 'Hum', title: 'Humidity' },
     { id: 'salinity', label: 'Sal', title: 'Salinity' },
     { id: 'rain', label: 'Rain', title: 'Rain' },
@@ -20,10 +20,10 @@ var LAYER_VIEW = {
     { id: 'eta', label: 'η', title: 'Interface displacement h_top - h_ref (m)' },
   ],
   map: {
-    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6, vert: 21 },
+    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
     lowAir: { T: 0, P: 2, humidity: 3, speed: 4, vert: 20 },
     ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17, vert: 18 },
-    deepOcean: { T: 8, speed: 13, salinity: 14, vert: 19 },
+    deepOcean: { T: 8, speed: 13, salinity: 14 },
   },
 };
 
