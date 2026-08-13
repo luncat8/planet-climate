@@ -68,6 +68,20 @@ function applyPreset(src) {
   refreshDynamic();
 }
 
+/* Restore the live planet to default parameters and clear all per-instance
+   slider-bound overrides. Returns true if a grid-rebuilding geometry param
+   changed value (so the caller can rebuild the static grid texture). */
+function resetToDefaults() {
+  var p = ui.planet;
+  if (!p) return false;
+  p.bounds = {};
+  var before = {};
+  GRID_PARAMS.forEach(function (k) { before[k] = p.params[k]; });
+  var def = defaultParams();
+  Object.keys(def).forEach(function (key) { p.params[key] = def[key]; });
+  return GRID_PARAMS.some(function (k) { return p.params[k] !== before[k]; });
+}
+
 /* Re-sync every tuning slider to the current v and (possibly overridden) bounds. */
 function syncSliders() {
   if (!ui.planet) return;
@@ -616,6 +630,17 @@ function buildUI() {
 
   // presets
   panel.appendChild(el('div', 'lab', 'Presets'));
+
+  var presetOnTopLab = el('label', 'chk');
+  var presetOnTopSpan = el('span', null, 'Apply on top of current');
+  presetOnTopSpan.title = 'When checked, merge the preset over the existing parameters instead of resetting to defaults first.';
+  presetOnTopLab.appendChild(presetOnTopSpan);
+  var presetOnTop = document.createElement('input');
+  presetOnTop.type = 'checkbox';
+  presetOnTop.className = 'accent-cyan-400';
+  presetOnTopLab.appendChild(presetOnTop);
+  panel.appendChild(presetOnTopLab);
+
   var presetRow = el('div', 'row');
   var sel = document.createElement('select');
   sel.className = 'btn';
@@ -627,17 +652,12 @@ function buildUI() {
   sel.onchange = function () {
     var name = sel.value;
     if (name === 'Default') {
-      ui.planet.bounds = {};
-      var before = {};
-      GRID_PARAMS.forEach(function (k) { before[k] = ui.planet.params[k]; });
-      var def = defaultParams();
-      Object.keys(def).forEach(function (key) { ui.planet.params[key] = def[key]; });
-      /* A planet-scale geometry param (radius) may have changed, so rebuild the
-         grid the same way a real preset would. */
-      var gridChanged = GRID_PARAMS.some(function (k) { return ui.planet.params[k] !== before[k]; });
-      if (gridChanged) rebuild(ui.level);
+      if (resetToDefaults()) rebuild(ui.level);
       syncSliders(); refreshDynamic();
     } else {
+      if (!presetOnTop.checked) {
+        if (resetToDefaults()) rebuild(ui.level);
+      }
       applyPreset(BUILTIN_PRESETS[name]);
     }
   };
@@ -653,6 +673,9 @@ function buildUI() {
     var r = new FileReader();
     r.onload = function () {
       try {
+        if (!presetOnTop.checked) {
+          if (resetToDefaults()) rebuild(ui.level);
+        }
         applyPreset(JSON.parse(r.result));
       } catch (e) {
         showError('Invalid preset JSON: ' + (e && e.message ? e.message : e));
