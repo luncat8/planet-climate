@@ -11,6 +11,7 @@ var LAYER_VIEW = {
     { id: 'T', label: 'T', title: 'Temperature' },
     { id: 'P', label: 'P', title: 'Pressure' },
     { id: 'speed', label: 'Spd', title: 'Speed' },
+    { id: 'vert', label: '↕', title: 'Vertical velocity (up / down)' },
     { id: 'humidity', label: 'Hum', title: 'Humidity' },
     { id: 'salinity', label: 'Sal', title: 'Salinity' },
     { id: 'rain', label: 'Rain', title: 'Rain' },
@@ -19,10 +20,10 @@ var LAYER_VIEW = {
     { id: 'eta', label: 'η', title: 'Interface displacement h_top - h_ref (m)' },
   ],
   map: {
-    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6 },
-    lowAir: { T: 0, P: 2, humidity: 3, speed: 4 },
-    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17 },
-    deepOcean: { T: 8, speed: 13, salinity: 14 },
+    highAir: { T: 9, P: 10, humidity: 11, speed: 12, rain: 6, vert: 21 },
+    lowAir: { T: 0, P: 2, humidity: 3, speed: 4, vert: 20 },
+    ocean: { T: 1, speed: 5, salinity: 7, thick: 15, depth: 16, eta: 17, vert: 18 },
+    deepOcean: { T: 8, speed: 13, salinity: 14, vert: 19 },
   },
 };
 
@@ -481,21 +482,6 @@ function buildUI() {
   wrap.appendChild(table);
   lviewBox.appendChild(wrap);
   app.appendChild(lviewBox);
-  // streamlines control: 0 = dots, >0 = streak length (kept visible, not in collapsed tuning)
-  var stWrap = el('div', 'stline');
-  stWrap.appendChild(el('span', 'slab', 'streamline streak'));
-  var stInp = document.createElement('input');
-  stInp.type = 'range';
-  var stb = boundsOf(ui.planet, 'streamTrail');
-  stInp.min = stb.min; stInp.max = stb.max; stInp.step = stb.step;
-  stInp.value = ui.planet ? ui.planet.params.streamTrail : 6000;
-  stInp.oninput = function () { setParam('streamTrail', parseFloat(stInp.value)); };
-  stWrap.appendChild(stInp);
-  var stVal = el('span', 'v', '');
-  stWrap.appendChild(stVal);
-  panel.appendChild(stWrap);
-  ui.knobVals['streamTrail'] = stVal;
-  ui.knobInputs['streamTrail'] = stInp;
   var bar = el('div', 'bar');
   panel.appendChild(bar);
   var barlab = el('div', 'barlab');
@@ -548,9 +534,12 @@ function buildUI() {
   addFlowCheck('flowAvg', 'Time-averaged flow',
     'Advect on a running average of the velocity field so turbulent noise cancels and the mean current stands out.');
   addFlowSlider('flowSmooth');
-  addFlowCheck('flowLines', 'Continuous lines',
-    'Draw smooth multi-segment streamlines that follow the field, instead of dots / single short streaks.');
+  addFlowCheck('flowLines', 'Continuous trails',
+    'Draw each tracer as its swept path (a smooth trail), instead of just a moving dot.');
   addFlowSlider('flowSegs');
+  addFlowCheck('flowRecycle', 'Physical recycling (up/down)',
+    'Tracers are born at upwelling and sink at downwelling (mass-consistent), instead of dying at random. Off = long life, random rebirth.');
+  addFlowSlider('flowLife');
   addFlowCheck('flowUniform', 'Even out speed',
     'Move particles at a steady visible pace regardless of true speed, so even the slow bottom water animates.');
   addFlowSlider('flowGain');

@@ -41,9 +41,29 @@ var MODE_FIELDS = [
   '(ht-50.0)/20.0',                        // 15 top-layer thickness h_top (m)
   'Dc/5000.0',                             // 16 ocean depth D (m)
   '(ht-hRc)/8.0*0.5+0.5',                  // 17 interface displacement eta (m)
+  ' texelFetch(uVFlow,cTex(cell),0).x/4.0e-6*0.5+0.5',   // 18 ocean up/down
+  '(-texelFetch(uVFlow,cTex(cell),0).x)/4.0e-6*0.5+0.5', // 19 deep ocean up/down (inverse of 18)
+  ' texelFetch(uVFlow,cTex(cell),0).y/1.8e-5*0.5+0.5',   // 20 low-air up/down
+  '(-texelFetch(uVFlow,cTex(cell),0).y)/1.8e-5*0.5+0.5', // 21 high-air up/down (inverse of 20)
 ];
 // modes that use magnitude (dark-background) coloring; palette-color fields excluded
 var MODE_MAG = { 3:1, 4:1, 5:1, 6:1, 11:1, 12:1, 13:1, 16:1 };
+// modes that use the signed diverging (down=blue / up=warm) palette
+var MODE_DIV = { 18:1, 19:1, 20:1, 21:1 };
+function modeDivSrc(m) { return MODE_DIV[m] ? 'base = divPal(vVal);' : ''; }
+
+/* Signed diverging palette for the up/down modes. Input t in [0,1] with 0.5 =
+   no vertical motion; below = sinking (cool blue), above = rising (warm), on a
+   dark background so both signs read against the near-zero interior. */
+var DIVPAL_GLSL = `vec3 divPal(float t){
+  float d = clamp(t,0.0,1.0) - 0.5;
+  vec3 dark = vec3(0.02,0.03,0.06);
+  vec3 down = vec3(0.16,0.45,0.95);
+  vec3 up   = vec3(1.00,0.55,0.18);
+  float a = clamp(abs(d)*2.0, 0.0, 1.0);
+  a = pow(a, 0.75);
+  return mix(dark, d < 0.0 ? down : up, a);
+}`;
 function modeValueSrc(m) {
   return 'float v = ' + (MODE_FIELDS[m] != null ? MODE_FIELDS[m] : MODE_FIELDS[9]) + ';';
 }
@@ -83,7 +103,7 @@ function modeMagSrc(m) {
    rather than a lit surface field. Shading them with the day/night terminator
    hides half the map for no reason, so they render unlit with land as flat
    grey so the coastline still reads. */
-var MODE_GEOM = { 16: 1, 17: 1 };
+var MODE_GEOM = { 16: 1, 17: 1, 18: 1, 19: 1, 20: 1, 21: 1 };
 function modeLitSrc(m, expr) {
   return MODE_GEOM[m] ? 'lit = 1.0;' : '';
 }
@@ -180,7 +200,7 @@ void main(){
 
 function EQUI_FS(m) {
 return SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uLookup;
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uLookup, uVFlow;
 uniform vec3  uSun;
 uniform float uShowLand, uNight;
 in vec2 vUv;
@@ -195,6 +215,7 @@ vec3 pal(float t){
   if(t<0.8) return mix(c3,c4,(t-0.6)/0.2);
   return mix(c4,c5,(t-0.8)/0.2);
 }
+${DIVPAL_GLSL}
 void main(){
   vec2 uv = vUv;
   int cell = int(texture(uLookup, uv).r + 0.5);
@@ -213,6 +234,7 @@ ${modeValueSrc(m)}
   float vLand = cb.w;
 
   vec3 base = pal(vVal);
+${modeDivSrc(m)}
 ${modeMagSrc(m)}
 ${modeLandSrc(m)}
 
@@ -1611,10 +1633,83 @@ int cellOf(vec3 pos, sampler2D lut){
   return int(texture(lut, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).r + 0.5);
 }`;
 
-var PART_FS = SHADER_HEAD + SHADER_COMMON + PART_VEL_GLSL + `
-out vec4 oPart;
-uniform sampler2D uPart, uLookup;
-uniform float uDt, uLife, uRadius, uSeed;
+/* ---------------------------------------------------------------------------
+   VERTICAL FLOW FIELD.
+
+   Water is (nearly) incompressible and air only weakly compressible here, so
+   where a layer's horizontal transport CONVERGES the fluid must go down, and
+   where it DIVERGES fluid rises to replace it. The interface vertical velocity
+   is therefore a single, well-defined quantity per column:
+
+       w_interface  =  div( h_top * u_top )            (ocean)
+       w_air        = -div( u_low )                    (air, sign so +=rising)
+
+   By construction the two OCEAN layers share it with opposite sign (what sinks
+   out of the top enters the deep) and likewise the two AIR layers -- exactly
+   the "just inverted, up to a multiplier" relation. We compute it ONCE per
+   frame here (fast, one FV divergence pass, same 1-ring stencil the dynamics
+   use) into .x (ocean) / .y (air), then reuse it for both the up/down render
+   modes and the mass-consistent particle recycling. */
+var VFLOW_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 o;
+uniform sampler2D uTopS, uTopV, uDeepV, uLoA;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ o = vec4(0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell),0).w;
+  float h0  = texelFetch(uTopS, cTex(cell),0).x;
+  float Dep = cellD(cell);
+  vec2  vt0 = texelFetch(uTopV, cTex(cell),0).xy;
+  vec2  vd0 = texelFetch(uDeepV,cTex(cell),0).xy;
+  vec2  vl0 = texelFetch(uLoA,  cTex(cell),0).xy;
+  float area = texelFetch(uCellA, cTex(cell),0).w;
+  float divOc = 0.0, divDeep = 0.0, divAir = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x); float L = na.y;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    vec2 nrm = nb.xy;
+    float hj  = texelFetch(uTopS, cTex(j),0).x;
+    vec2  vtj = xfer(texelFetch(uTopV, cTex(j),0).xy, nb.z, nb.w);
+    vec2  vdj = xfer(texelFetch(uDeepV,cTex(j),0).xy, nb.z, nb.w);
+    vec2  vlj = xfer(texelFetch(uLoA,  cTex(j),0).xy, nb.z, nb.w);
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    float hdF = 0.5*((Dep-h0) + (cellD(j)-hj));
+    divOc   += L*0.5*(h0+hj)*0.5*dot(vt0+vtj, nrm)*wet;   // div(h_top u_top)
+    divDeep += L*hdF*0.5*dot(vd0+vdj, nrm)*wet;           // div(h_deep u_deep)
+    divAir  += L*0.5*dot(vl0+vlj, nrm);                   // div(u_low)
+  }
+  divOc /= area; divDeep /= area; divAir /= area;
+  // .x = ocean interface upwelling (= div(h_top u_top); + = deep water rising)
+  // .y = air upwelling (= -div(u_low); + = ascent from low-level convergence)
+  // .z = deep-layer divergence, for the mass-balance diagnostic (see harness);
+  //      the DEEP render mode uses -.x so the two layers are inverse by design.
+  o = vec4(divOc, -divAir, divDeep, 0.0);
+}`;
+
+/* ---------------------------------------------------------------------------
+   PERSISTENT PARTICLE STATE (advection + recycling).
+
+   Particles are long-lived tracers, not per-frame confetti. This pass advances
+   ONLY the head position of each particle and its life phase; the swept trail
+   is maintained separately by TRAIL_FS (a history conveyor) so the tail is a
+   real path, not an instantaneously re-integrated streak that flickers when
+   the field turns.
+
+   Recycling is mass-consistent (uRecycle): a particle ages faster where the
+   flow converges (it is being carried DOWN out of its layer), and when it is
+   reborn it is placed where the flow DIVERGES (upwelling). Deaths at sinks +
+   births at sources keeps the particle density ~uniform, i.e. it honours
+   incompressibility, and makes particles trace the overturning circulation
+   instead of blinking at random. uRecycle=0 falls back to plain long life with
+   uniform random rebirth. */
+var STATE_FS = SHADER_HEAD + SHADER_COMMON + PART_VEL_GLSL + `
+out vec4 oState;
+uniform sampler2D uTrail, uState, uLookup, uVFlow;
+uniform float uDt, uLife, uRadius, uSeed, uRecycle, uSinkK, uVScale, uWSign;
+uniform int   uWChan;         // 0 = read uVFlow.x (ocean), 1 = .y (air)
 uniform ivec2 uPDim;
 
 vec3 randDir(float s){
@@ -1623,14 +1718,19 @@ vec3 randDir(float s){
   float r = sqrt(max(0.0,1.0-z*z));
   return vec3(r*cos(a), z, r*sin(a));
 }
+// signed vertical velocity as felt by THIS layer (+ = fluid entering the layer
+// from the neighbouring layer = a good place to be born; - = being carried out).
+float wSigned(int cell){
+  vec2 wv = texelFetch(uVFlow, cTex(cell),0).xy;
+  return uWSign * (uWChan==0 ? wv.x : wv.y);
+}
 
 void main(){
   ivec2 t = ivec2(gl_FragCoord.xy);
   int pid = t.x + t.y*uPDim.x;
-  vec4 p = texelFetch(uPart, t, 0);
-  vec3 pos = p.xyz;
-  float age = p.w;
-  if(dot(pos,pos) < 0.1) pos = randDir(float(pid)+uSeed);
+  vec3 pos = texelFetch(uTrail, t, 0).xyz;      // slot 0 of the trail = head
+  float age = texelFetch(uState, t, 0).x;
+  if(dot(pos,pos) < 0.1){ pos = randDir(float(pid)+uSeed); age = hash11(float(pid)*3.1+uSeed); }
   pos = normalize(pos);
 
   int cell = cellOf(pos, uLookup);
@@ -1638,19 +1738,63 @@ void main(){
   vec3 e1 = cb.xyz, e2 = cross(e1, pos);
   vec2 vel = layerVel(cell);
   vec3 v3 = vel.x*e1 + vel.y*e2;
-  // clamp the per-step angular hop so an amplified spike can't teleport a
-  // particle across the globe in one substep.
   vec3 step3 = v3*uDt/uRadius;
   float sm = length(step3);
-  if(sm > 0.08) step3 *= 0.08/sm;
+  if(sm > 0.08) step3 *= 0.08/sm;               // cap per-step angular hop
   pos = normalize(pos + step3);
 
-  age -= uDt/uLife;
-  if(age <= 0.0){
-    pos = randDir(float(pid)*1.7 + uSeed*13.0);
-    age = 1.0 + hash11(float(pid)+uSeed)*0.5;
+  // life phase 0 (born) -> 1 (recycle). Convergence (w<0) ages faster so the
+  // particle "sinks out" of its layer sooner where the physics carries it down.
+  float w = wSigned(cell);
+  float sink = max(0.0, -w) / max(uVScale, 1e-9);
+  float rate = uDt / uLife;
+  if(uRecycle > 0.5) rate *= (1.0 + uSinkK * clamp(sink, 0.0, 8.0));
+  age += rate;
+
+  if(age >= 1.0){
+    // Rebirth. With recycling on, sample a few candidate cells and keep the
+    // one with the strongest UPWELLING (w>0) so births track the sources; the
+    // death-at-sinks / birth-at-sources balance holds the density uniform.
+    vec3 best = randDir(float(pid)*1.7 + uSeed*13.0);
+    if(uRecycle > 0.5){
+      float bestW = wSigned(cellOf(best, uLookup));
+      for(int i=1;i<4;i++){
+        vec3 cand = randDir(float(pid)*1.7 + uSeed*13.0 + float(i)*57.3);
+        float cw = wSigned(cellOf(cand, uLookup));
+        if(cw > bestW){ bestW = cw; best = cand; }
+      }
+    }
+    pos = best;
+    age = 0.0;
   }
-  oPart = vec4(pos, age);
+  oState = vec4(pos, age);
+}`;
+
+/* History conveyor. One texel per (particle, slot); slot 0 is the newest point.
+   Each frame every slot shifts one step toward the tail and the fresh head is
+   written to slot 0, so the stored trail IS the swept path. A rebirth (head
+   jumps far from last frame's head) collapses every slot onto the new head so
+   the trail restarts as a zero-length point and then grows -- no long tail
+   pops into existence. Double-buffered (A read, B write) to avoid a feedback
+   loop, which is why the whole buffer is rewritten each frame. */
+var TRAIL_FS = SHADER_HEAD + `
+precision highp float;
+out vec4 o;
+uniform sampler2D uTrail, uState;
+uniform ivec2 uPDim;      // particles are PW x PH
+uniform int   uSlots;     // trail length T (texture is PW x PH*T)
+void main(){
+  ivec2 f = ivec2(gl_FragCoord.xy);
+  int px = f.x;
+  int slot = f.y / uPDim.y;
+  int py = f.y - slot*uPDim.y;
+  vec3 head = texelFetch(uState, ivec2(px, py), 0).xyz;                 // new head
+  vec3 prevHead = texelFetch(uTrail, ivec2(px, py), 0).xyz;            // slot 0 (old head)
+  bool respawn = dot(normalize(head), normalize(prevHead)) < 0.98;      // ~11 deg jump
+  vec3 outp;
+  if(respawn || slot == 0) outp = head;
+  else outp = texelFetch(uTrail, ivec2(px, py + (slot-1)*uPDim.y), 0).xyz;   // shift
+  o = vec4(outp, 0.0);
 }`;
 
 /* Temporal averaging pass. Maintains a per-layer running exponential moving
@@ -1674,64 +1818,46 @@ void main(){
   o = vec4(mix(prev, cur, clamp(uAlpha,0.0,1.0)), 0.0, 0.0);
 }`;
 
-var PART_VS = SHADER_HEAD + SHADER_COMMON + PART_VEL_GLSL + `
-uniform sampler2D uPart, uLookup;
+var PART_VS = SHADER_HEAD + SHADER_COMMON + `
+uniform sampler2D uTrail, uState;
 uniform mat4 uMVP;
 uniform ivec2 uPDim;
-uniform float uTrail, uRadius, uEquirect, uAsPoints, uPointSize;
-uniform int   uLineSteps;   // segments per streamline (1 = legacy single streak)
+uniform int   uSlots;      // texture holds PW x PH*uSlots
+uniform float uRadius, uEquirect, uAsPoints, uPointSize;
+uniform int   uDrawSlots;  // how many trail slots to draw (<= uSlots)
 out float vA;
 
-// One RK1 back-integration step of the (smoothed) field, returning the
-// previous point along the flow.
-vec3 backStep(vec3 pos, float segArc){
-  int cell = cellOf(pos, uLookup);
-  vec3 e1 = texelFetch(uCellB, cTex(cell), 0).xyz;
-  vec3 e2 = cross(e1, pos);
-  vec2 vel = layerVel(cell);
-  vec3 v3 = vel.x*e1 + vel.y*e2;
-  float m = length(v3);
-  if(m < 1e-9) return pos;
-  float dang = min(m*segArc, 0.06);            // per-segment angular cap
-  return normalize(pos - (v3/m)*dang);
+vec3 slotPos(int px, int py, int slot){
+  return texelFetch(uTrail, ivec2(px, py + slot*uPDim.y), 0).xyz;
 }
 
 void main(){
-  int K = max(uLineSteps, 1);
-  int pid, n;
-  if(uAsPoints > 0.5){ pid = gl_VertexID; n = 0; }
+  int K = max(uDrawSlots, 2);
+  int pid, slot;
+  if(uAsPoints > 0.5){ pid = gl_VertexID; slot = 0; }
   else {
-    int perp = 2*K;                            // 2 verts per LINES segment
+    int perp = 2*(K-1);                 // 2 verts per LINES segment, K-1 segments
     pid = gl_VertexID / perp;
     int loc = gl_VertexID - pid*perp;
-    int seg = loc >> 1;                         // segment index 0..K-1
-    n = seg + (loc & 1);                        // back-index 0..K of this vertex
+    int seg = loc >> 1;                 // segment 0..K-2 (0 = nearest head)
+    slot = seg + (loc & 1);             // slot 0..K-1 along the trail
   }
-  ivec2 t = ivec2(pid % uPDim.x, pid / uPDim.x);
-  vec4 p = texelFetch(uPart, t, 0);
-  vec3 head = normalize(p.xyz);
+  int px = pid % uPDim.x, py = pid / uPDim.x;
+  vec3 pos = normalize(slotPos(px, py, slot));
 
-  // March back n integration steps along the field to this vertex's position.
-  // segArc is the per-segment share of the total trail budget.
-  float segArc = (uTrail / uRadius) / float(K);
-  vec3 pos = head;
-  for(int i=0;i<64;i++){
-    if(i >= n) break;
-    pos = backStep(pos, segArc);
-  }
-
-  // alpha: particle age envelope * fade toward the tail of the line.
-  float ageFade = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
-  float lineFade = (K > 1) ? (1.0 - float(n)/float(K)*0.85) : 1.0;
-  vA = ageFade * lineFade;
+  float age = texelFetch(uState, ivec2(px, py), 0).x;   // 0 born -> 1 recycle
+  // Smooth life envelope: fade in over the first slice of life, hold, fade out
+  // near the end -- no pop on birth, no snap on death.
+  float env = smoothstep(0.0, 0.07, age) * (1.0 - smoothstep(0.82, 1.0, age));
+  float tailFade = 1.0 - float(slot)/float(K) * 0.85;   // dimmer toward the tail
+  vA = env * tailFade;
 
   if(uEquirect > 0.5){
-    vec2 uvHead = vec2(atan(head.z,head.x)/6.2831853+0.5, asin(clamp(head.y,-1.0,1.0))/3.14159265+0.5);
-    vec2 uv     = vec2(atan(pos.z ,pos.x )/6.2831853+0.5, asin(clamp(pos.y ,-1.0,1.0))/3.14159265+0.5);
-    // Streaks straddling the date line or a pole would otherwise draw as a
-    // segment spanning the whole viewport; clamp the wrapped end to the edge.
-    if(abs(uvHead.x - uv.x) > 0.5) uv.x = uvHead.x > 0.5 ? 1.0 : 0.0;
-    if(abs(uvHead.y - uv.y) > 0.5) uv.y = uvHead.y > 0.5 ? 1.0 : 0.0;
+    vec3 h = normalize(slotPos(px, py, 0));
+    vec2 uvH = vec2(atan(h.z,h.x)/6.2831853+0.5, asin(clamp(h.y,-1.0,1.0))/3.14159265+0.5);
+    vec2 uv  = vec2(atan(pos.z,pos.x)/6.2831853+0.5, asin(clamp(pos.y,-1.0,1.0))/3.14159265+0.5);
+    if(abs(uvH.x - uv.x) > 0.5) uv.x = uvH.x > 0.5 ? 1.0 : 0.0;   // clamp seam/pole wrap
+    if(abs(uvH.y - uv.y) > 0.5) uv.y = uvH.y > 0.5 ? 1.0 : 0.0;
     gl_Position = vec4(uv*2.0 - 1.0, 0.0, 1.0);
   } else {
     gl_Position = uMVP * vec4(pos*1.012, 1.0);
@@ -1752,7 +1878,7 @@ void main(){
 
 function GLOBE_VS(m) {
 return SHADER_HEAD + SHADER_COMMON + `
-uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB;
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uVFlow;
 uniform mat4 uMVP;
 uniform float uRelief;
 out vec3 vN; out float vVal; out float vLand; out float vCloud; out vec3 vPos;
@@ -1806,8 +1932,10 @@ vec3 pal(float t){
   if(t<0.8) return mix(c3,c4,(t-0.6)/0.2);
   return mix(c4,c5,(t-0.8)/0.2);
 }
+${DIVPAL_GLSL}
 void main(){
   vec3 base = pal(vVal);
+${modeDivSrc(m)}
 ${modeMagSrc(m)}
 ${modeLandSrc(m)}
   vec3 N = normalize(vN);
