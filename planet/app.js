@@ -203,6 +203,7 @@ function refreshDynamic() {
     ui.knobVals[key].textContent = def && def.fmt ? def.fmt(v) : String(v);
   });
   if (ui.oceanSchemeSel) ui.oceanSchemeSel.value = String(P.oceanScheme);
+  if (ui.velSmoothModeSel) ui.velSmoothModeSel.value = String(P.velSmoothMode);
   if (ui.implicitItersWrap) {
     var greyed = (P.oceanScheme !== 2);
     ui.implicitItersWrap.style.opacity = greyed ? '0.4' : '1';
@@ -496,6 +497,23 @@ function buildUI() {
   panel.appendChild(stWrap);
   ui.knobVals['streamTrail'] = stVal;
   ui.knobInputs['streamTrail'] = stInp;
+
+  // Streamline velocity smoothing selector (modes 0..4). Uniform-only, so no
+  // grid rebuild — mirrors the oceanScheme <select> above.
+  var vsmWrap = el('div');
+  vsmWrap.appendChild(el('div', 'lab', 'Streamline smoothing'));
+  var vsmSel = document.createElement('select');
+  vsmSel.className = 'btn';
+  (PARAMS.velSmoothMode.opts || []).forEach(function (o) {
+    var op = document.createElement('option');
+    op.value = String(o.v); op.textContent = o.label;
+    vsmSel.appendChild(op);
+  });
+  vsmSel.onchange = function () { setParam('velSmoothMode', parseInt(vsmSel.value, 10)); };
+  vsmWrap.appendChild(vsmSel);
+  panel.appendChild(vsmWrap);
+  ui.velSmoothModeSel = vsmSel;
+
   var bar = el('div', 'bar');
   panel.appendChild(bar);
   var barlab = el('div', 'barlab');
@@ -509,6 +527,8 @@ function buildUI() {
     ['dayNight', 'Day / night cycle'],
     ['nightShading', 'Night shading'],
     ['showLand', 'Show continents'],
+    ['visCoherence', 'Coherence seeding'],
+    ['visTrailFade', 'Trail fade'],
   ];
   chkDefs.forEach(function (d) {
     var lab = el('label', 'chk');
@@ -597,6 +617,7 @@ function buildUI() {
     if (spec.step === undefined) return;
     if (key === 'streamTrail') return;
     if (key === 'oceanScheme') return;   // rendered as a <select> above
+    if (key === 'velSmoothMode') return; // rendered as a <select> (streamline smoothing)
     var wrap = el('div');
     wrap.style.marginBottom = '10px';
     var kv = el('div', 'kv');

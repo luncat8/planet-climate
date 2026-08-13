@@ -198,6 +198,7 @@ Planet.prototype.compile = function () {
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
   this.prog.part = new Prog(gl, QUAD_VS, PART_FS, 'part');
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
+  this.prog.velSmooth = new Prog(gl, QUAD_VS, VELO_SMOOTH_FS, 'velSmooth');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
   this.prog.equiCloud = new Prog(gl, EQUI_VS, EQUI_CLOUD_FS, 'equiCloud');
   // Render programs are compiled lazily per mode (see getGlobeProg/getEquiProg)
@@ -294,6 +295,20 @@ Planet.prototype.build = function (level) {
              velMode:L.velMode, velScale:L.velScale, color:L.color };
   });
 
+  // Velocity-smoothing scratch (W x H, 4 attachments x 3 ping-pong sets). Lives
+  // OUTSIDE this.A so it is never serialized. Modes 0/1 leave it unused.
+  this.velSmoothTex = [
+    [this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null)],
+    [this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null)],
+    [this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null), this.mkTex(W, H, null)],
+  ];
+  this.fbo.velSmooth0 = this.mkFbo(this.velSmoothTex[0]);
+  this.fbo.velSmooth1 = this.mkFbo(this.velSmoothTex[1]);
+  this.fbo.velSmooth2 = this.mkFbo(this.velSmoothTex[2]);
+  this.velSmoothPrev = null;
+  this.velSmoothPrevIdx = -1;
+  this.velSmoothCur = null;
+
   this.ibo = gl.createBuffer();
   this.vaoGlobe = gl.createVertexArray();
   gl.bindVertexArray(this.vaoGlobe);
@@ -310,6 +325,7 @@ Planet.prototype.destroyGrid = function () {
   var partTexs = this.part.reduce(function (a, s) { return a.concat(s.tex); }, []);
   var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
   if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes]);
+  if (this.velSmoothTex) this.velSmoothTex.forEach(function (s) { all = all.concat(s); });
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
@@ -664,8 +680,98 @@ Planet.prototype._maxResidual = function (texName) {
   return buf[0];
 };
 
+/* Build the denoised velocity field for the current frame. Modes:
+   0/1 -> no-op (mode 1 is handled inside sampleVel, in-shader).
+   2    -> multi-pass spatial blur of the raw field.
+   3    -> temporal EMA of the raw field into a persistent smooth.
+   4    -> spatial blur, then a temporal EMA into the persistent smooth.
+   The result (or null for modes 0/1) is left in this.velSmoothCur and sampled
+   per-particle at its current cell. Runs once per stepParticles call, before the
+   advection loop. */
+Planet.prototype.updateVelSmooth = function () {
+  var P = this.params;
+  var mode = P.velSmoothMode | 0;
+  if (mode === 0 || mode === 1) {
+    this.velSmoothCur = null;
+    this.velSmoothPrev = null;
+    this.velSmoothPrevIdx = -1;
+    return;
+  }
+  var W = this.grid.W, H = this.grid.H;
+  var raw = [this.A[1], this.A[3], this.A[4], this.A[6]];
+  var self = this;
+  function pass(gSet, rSet, dstIdx, m) {
+    var p = self.prog.velSmooth.use();
+    self.gridUniforms(p);
+    p.tex('uRawTopV', rSet[0]).tex('uRawDeepV', rSet[1]).tex('uRawLoA', rSet[2]).tex('uRawHiA', rSet[3])
+      .tex('uGTopV', gSet[0]).tex('uGDeepV', gSet[1]).tex('uGLoA', gSet[2]).tex('uGHiA', gSet[3])
+      .i('uVelSmoothMode', m)
+      .f('uVelSmooth', P.velSmooth)
+      .f('uAlpha', Math.max(0.02, Math.min(0.98, 1.0 - P.velSmooth)));
+    self.fullscreen('velSmooth' + dstIdx, W, H);
+  }
+  if (mode === 3) {
+    var prev = this.velSmoothPrev || raw;
+    var prevIdx = this.velSmoothPrevIdx >= 0 ? this.velSmoothPrevIdx : 0;
+    var w = (prevIdx + 1) % 3;
+    pass(prev, raw, w, 3);
+    this.velSmoothCur = this.velSmoothTex[w];
+    this.velSmoothPrev = this.velSmoothTex[w];
+    this.velSmoothPrevIdx = w;
+    return;
+  }
+  // mode 2 or 4: spatial Jacobi loop over the ping-pong
+  var iters = P.velSmoothIters | 0; if (iters < 1) iters = 1; if (iters > 4) iters = 4;
+  pass(raw, raw, 0, 2);
+  var last = 0;
+  for (var k = 1; k < iters; k++) {
+    var nd = (last + 1) % 3;
+    pass(this.velSmoothTex[last], raw, nd, 2);
+    last = nd;
+  }
+  var spatial = this.velSmoothTex[last];
+  if (mode === 2) {
+    this.velSmoothCur = spatial;
+    this.velSmoothPrev = spatial;
+    this.velSmoothPrevIdx = last;
+    return;
+  }
+  // mode 4: temporal EMA of the spatial result into the persistent smooth
+  if (this.velSmoothPrev == null) {
+    this.velSmoothCur = spatial;
+    this.velSmoothPrev = spatial;
+    this.velSmoothPrevIdx = last;
+    return;
+  }
+  var pIdx = this.velSmoothPrevIdx;
+  var w2 = (last === pIdx) ? (pIdx + 1) % 3 : (3 - pIdx - last);
+  pass(this.velSmoothPrev, spatial, w2, 3);
+  this.velSmoothCur = this.velSmoothTex[w2];
+  this.velSmoothPrev = this.velSmoothTex[w2];
+  this.velSmoothPrevIdx = w2;
+};
+
+/* Bind the smooth-velocity samplers + mode uniforms onto a particle program.
+   When no smooth texture is active (modes 0/1) we still bind a valid texture to
+   each sampler (the raw source) so the (unused) samplers are never unbound. */
+Planet.prototype._bindSmooth = function (p, sm, P) {
+  if (sm) {
+    p.tex('uSmoothTopV', sm[0]).tex('uSmoothDeepV', sm[1]).tex('uSmoothLoA', sm[2]).tex('uSmoothHiA', sm[3]);
+  } else {
+    p.tex('uSmoothTopV', this.A[1]).tex('uSmoothDeepV', this.A[3]).tex('uSmoothLoA', this.A[4]).tex('uSmoothHiA', this.A[6]);
+  }
+  p.i('uVelSmoothMode', P.velSmoothMode | 0).f('uVelSmooth', P.velSmooth).i('uVelSmoothIters', P.velSmoothIters | 0);
+};
+Planet.prototype._bindSmoothRender = function (p, sm, P) {
+  this._bindSmooth(p, sm, P);
+  p.f('uTrailFade', P.visTrailFade > 0.5 ? 1.0 : 0.0);
+};
+
 Planet.prototype.stepParticles = function (dt) {
   var gl = this.gl;
+  this.updateVelSmooth();
+  var sm = this.velSmoothCur;
+  var P = this.params;
   for (var i = 0; i < this.part.length; i++) {
     var s = this.part[i];
     var src = s.tex[s.idx];
@@ -678,6 +784,8 @@ Planet.prototype.stepParticles = function (dt) {
       .f('uDt', dt).f('uLife', 60 * 3600).f('uRadius', this.params.planetRadius)
       .f('uSeed', this.seedRand() * 1000)
       .i('uVelMode', s.velMode).f('uVelScale', s.velScale);
+    this._bindSmooth(p, sm, P);
+    p.f('uCoherence', P.visCoherence > 0.5 ? 1.0 : 0.0).f('uCoherenceThresh', P.visCoherenceThresh);
     this.fullscreen(dstFbo, this.PW, this.PH);
     s.idx = 1 - s.idx;
   }
@@ -754,6 +862,7 @@ Planet.prototype.render = function () {
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
   gl.depthMask(false);
   gl.disable(gl.CULL_FACE);
+  var sm = this.velSmoothCur;
   for (var pi = 0; pi < this.part.length; pi++) {
     if (((P.streamline >> pi) & 1) === 0) continue;
     var ps = this.part[pi];
@@ -767,6 +876,7 @@ Planet.prototype.render = function () {
       .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
       .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
+    this._bindSmoothRender(pp, sm, P);
     gl.bindVertexArray(this.vaoEmpty);
     gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
   }
@@ -817,6 +927,7 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
   gl.depthMask(false);
+  var sm = this.velSmoothCur;
   for (var pi = 0; pi < this.part.length; pi++) {
     if (((P.streamline >> pi) & 1) === 0) continue;
     var ps = this.part[pi];
@@ -830,6 +941,7 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
       .f('uAsPoints', dots ? 1 : 0).f('uPointSize', psz)
       .i('uVelMode', ps.velMode).f('uVelScale', ps.velScale)
       .v3('uColor', ps.color[0], ps.color[1], ps.color[2]);
+    this._bindSmoothRender(pp, sm, P);
     gl.bindVertexArray(this.vaoEmpty);
     gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, this.PW * this.PH * (dots ? 1 : 2));
   }

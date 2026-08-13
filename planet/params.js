@@ -224,6 +224,25 @@ var PARAMS = {
   streamline:     { default: 2 },
   streamTrail:    { label: 'Streamline length', default: 6000, min: 0, max: 30000, step: 500,
                     fmt: function (v) { return v <= 0 ? 'dots' : (v / 60).toFixed(0) + ' min'; } },
+  // ---- STREAMLINE VELOCITY SMOOTHING (visualization only; no grid rebuild, no save change)
+  /* How to feed streamlines a denoised velocity. 0 = raw (legacy, bit-exact);
+     1 = in-shader 6-neighbour average; 2 = texture blur (W×H Jacobi);
+     3 = temporal EMA; 4 = spatial + temporal. Modes >=2 need the smooth textures. */
+  velSmoothMode: { label: 'Streamline smoothing', default: 0,
+    opts: [
+      { v: 0, label: 'None (raw)' },
+      { v: 1, label: 'Spatial (in-shader)' },
+      { v: 2, label: 'Texture blur' },
+      { v: 3, label: 'Temporal EMA' },
+      { v: 4, label: 'Spatial + Temporal' },
+    ] },
+  velSmooth:   { label: 'Smooth strength', default: 0.85, min: 0, max: 1, step: 0.01 },
+  velSmoothIters: { label: 'Smooth passes', default: 3, min: 1, max: 4, step: 1,
+    tip: 'Jacobi passes for the texture/spatial blur. More = smoother but more spread.' },
+  visCoherence:    { default: 0 },
+  visCoherenceThresh: { label: 'Coherence threshold', default: 0.5, min: 0.0, max: 5.0, step: 0.05,
+    tip: 'Reseed particles that sit in locally-incoherent (noisy) velocity regions.' },
+  visTrailFade:    { default: 0 },
   showLand:       { default: 1 },
   nightShading:   { default: 1 },
   relief:         { default: 0.004 },

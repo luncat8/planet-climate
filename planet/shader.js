@@ -1564,13 +1564,128 @@ void main(){
   oHiB = vec4(0.0008*c2, 0.0, 0.0, 0.0);
 }`;
 
+/* Shared velocity sampling for the streamline particle programs. Lets the SAME
+   denoised velocity feed BOTH advection (PART_FS) and streak direction
+   (PART_VS) so the two can never disagree. Modes:
+     0 = raw (legacy, bit-exact)
+     1 = in-shader 6-neighbour average, basis-rotated into the central cell
+     2..4 = read the pre-computed smooth texture (this.velSmoothCur) */
+var SAMPLE_VEL_GLSL = `
+vec2 sVelRaw(int cell, int vmode){
+  if(vmode==0) return texelFetch(uLoA, cTex(cell),0).xy;
+  if(vmode==1) return texelFetch(uTopV, cTex(cell),0).xy;
+  if(vmode==2) return texelFetch(uHiA, cTex(cell),0).xy;
+  return texelFetch(uDeepV, cTex(cell),0).xy;
+}
+/* Average the 1-ring neighbour velocities (rotated into the central cell basis
+   and land-masked) of field f at cell. */
+vec2 sNbrAvg(sampler2D f, int cell){
+  vec2 s = vec2(0.0); float w = 0.0;
+  float landC = texelFetch(uCellB, cTex(cell),0).w;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x);
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    vec2 vj = texelFetch(f, cTex(j),0).xy*(1.0-landj);
+    vj = xfer(vj, nb.z, nb.w);
+    s += vj; w += (1.0-landj);
+  }
+  if(w < 0.5) return texelFetch(f, cTex(cell),0).xy*(1.0-landC);
+  return s/w;
+}
+vec2 sampleVel(int cell, int vmode){
+  vec2 raw = sVelRaw(cell, vmode);
+  if(vmode==1 || vmode==3) raw *= uVelScale;
+  if(uVelSmoothMode==0) return raw;
+  if(uVelSmoothMode==1){
+    vec2 avg;
+    if(vmode==0) avg = sNbrAvg(uLoA, cell);
+    else if(vmode==1) avg = sNbrAvg(uTopV, cell);
+    else if(vmode==2) avg = sNbrAvg(uHiA, cell);
+    else avg = sNbrAvg(uDeepV, cell);
+    if(vmode==1 || vmode==3) avg *= uVelScale;
+    return mix(raw, avg, uVelSmooth);
+  }
+  vec2 sm;
+  if(vmode==0) sm = texelFetch(uSmoothLoA, cTex(cell),0).xy;
+  else if(vmode==1) sm = texelFetch(uSmoothTopV, cTex(cell),0).xy*uVelScale;
+  else if(vmode==2) sm = texelFetch(uSmoothHiA, cTex(cell),0).xy;
+  else sm = texelFetch(uSmoothDeepV, cTex(cell),0).xy*uVelScale;
+  return sm;
+}`;
+
+/* Velocity-field smoothing pass. Runs at cell resolution (W×H) on the four
+   velocity sources (topV/deepV/loA/hiA). Writes the smoothed .xy to four
+   attachments, copying the raw .zw scalars through. Two sub-modes selected by
+   uVelSmoothMode:
+     2 = spatial Jacobi step:  out = mix(raw, neighbourAvg(g), uVelSmooth)
+     3 = temporal EMA:         out = mix(g, raw, uAlpha)
+   Iterating mode 2 over the ping-pong (engine.updateVelSmooth) builds up a
+   multi-pass blur; mode 4 = spatial loop then a mode-3 EMA into the persistent
+   smooth. This is the corrected replacement for the wrong-grid 29_orn buffer. */
+var VELO_SMOOTH_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oTopV;
+layout(location=1) out vec4 oDeepV;
+layout(location=2) out vec4 oLoA;
+layout(location=3) out vec4 oHiA;
+uniform sampler2D uRawTopV, uRawDeepV, uRawLoA, uRawHiA;
+uniform sampler2D uGTopV, uGDeepV, uGLoA, uGHiA;
+uniform int uVelSmoothMode;          // 2 = spatial step, 3 = temporal EMA
+uniform float uVelSmooth, uAlpha;
+
+vec2 sNbrAvg(sampler2D f, int cell){
+  vec2 s = vec2(0.0); float w = 0.0;
+  float landC = texelFetch(uCellB, cTex(cell),0).w;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x);
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    vec2 vj = texelFetch(f, cTex(j),0).xy*(1.0-landj);
+    vj = xfer(vj, nb.z, nb.w);
+    s += vj; w += (1.0-landj);
+  }
+  if(w < 0.5) return texelFetch(f, cTex(cell),0).xy*(1.0-landC);
+  return s/w;
+}
+
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oTopV=vec4(0.0); oDeepV=vec4(0.0); oLoA=vec4(0.0); oHiA=vec4(0.0); return; }
+  vec4 rT = texelFetch(uRawTopV, cTex(cell),0);
+  vec4 rD = texelFetch(uRawDeepV, cTex(cell),0);
+  vec4 rL = texelFetch(uRawLoA,  cTex(cell),0);
+  vec4 rH = texelFetch(uRawHiA,  cTex(cell),0);
+  if(uVelSmoothMode==2){
+    oTopV  = vec4(mix(rT.xy, sNbrAvg(uGTopV, cell), uVelSmooth), rT.zw);
+    oDeepV = vec4(mix(rD.xy, sNbrAvg(uGDeepV,cell), uVelSmooth), rD.zw);
+    oLoA   = vec4(mix(rL.xy, sNbrAvg(uGLoA,  cell), uVelSmooth), rL.zw);
+    oHiA   = vec4(mix(rH.xy, sNbrAvg(uGHiA,  cell), uVelSmooth), rH.zw);
+  } else {
+    vec2 gT = texelFetch(uGTopV, cTex(cell),0).xy;
+    vec2 gD = texelFetch(uGDeepV,cTex(cell),0).xy;
+    vec2 gL = texelFetch(uGLoA,  cTex(cell),0).xy;
+    vec2 gH = texelFetch(uGHiA,  cTex(cell),0).xy;
+    oTopV  = vec4(mix(gT, rT.xy, uAlpha), rT.zw);
+    oDeepV = vec4(mix(gD, rD.xy, uAlpha), rD.zw);
+    oLoA   = vec4(mix(gL, rL.xy, uAlpha), rL.zw);
+    oHiA   = vec4(mix(gH, rH.xy, uAlpha), rH.zw);
+  }
+}`;
+
 var PART_FS = SHADER_HEAD + SHADER_COMMON + `
 out vec4 oPart;
 uniform sampler2D uPart, uLookup, uLoA, uTopV, uHiA, uDeepV;
+uniform sampler2D uSmoothTopV, uSmoothDeepV, uSmoothLoA, uSmoothHiA;
 uniform float uDt, uLife, uRadius, uSeed, uVelScale;
-uniform int uVelMode;
+uniform int uVelMode, uVelSmoothMode;
+uniform float uVelSmooth;
+uniform float uCoherence, uCoherenceThresh;
 uniform ivec2 uPDim;
-
+` + SAMPLE_VEL_GLSL + `
 vec3 randDir(float s){
   float a = hash11(s)*6.2831853;
   float z = hash11(s+91.7)*2.0-1.0;
@@ -1594,18 +1709,38 @@ void main(){
 
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 e1 = cb.xyz, e2 = cross(e1, pos);
-  vec2 vel;
-  if(uVelMode==0)      vel = texelFetch(uLoA, cTex(cell),0).xy;
-  else if(uVelMode==1) vel = texelFetch(uTopV, cTex(cell),0).xy*uVelScale;
-  else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
-  else                 vel = texelFetch(uDeepV, cTex(cell),0).xy*uVelScale;
+  vec2 vel = sampleVel(cell, uVelMode);
   vec2 uvw = vel;
   vec3 v3 = uvw.x*e1 + uvw.y*e2;
   pos = normalize(pos + v3*uDt/uRadius);
 
   age -= uDt/uLife;
+  // Optional coherence gate: particles that respawn inside a locally-incoherent
+  // (grid-scale noisy) velocity region are re-randomised, so they do not trace
+  // the noise. Coherent regions keep the particle (reset age only) so the
+  // streamline keeps flowing instead of flickering.
+  bool reseed = true;
+  if(uCoherence > 0.5){
+    vec2 v0r = sVelRaw(cell, uVelMode);
+    float met = 0.0, cnt = 0.0;
+    for(int k=0;k<6;k++){
+      vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+      if(na.w < 0.5) continue;
+      int j = int(na.x);
+      vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+      vec2 vjr = sVelRaw(j, uVelMode);
+      vjr = xfer(vjr, nb.z, nb.w);
+      met += length(vjr - v0r);
+      cnt += 1.0;
+    }
+    met = cnt > 0.0 ? met/cnt : 0.0;
+    met *= uVelScale;                 // scale so deep (x60) is comparable to surface
+    reseed = (met > uCoherenceThresh);
+  }
   if(age <= 0.0){
-    pos = randDir(float(pid)*1.7 + uSeed*13.0);
+    if(reseed){
+      pos = randDir(float(pid)*1.7 + uSeed*13.0);
+    }
     age = 1.0 + hash11(float(pid)+uSeed)*0.5;
   }
   oPart = vec4(pos, age);
@@ -1613,11 +1748,14 @@ void main(){
 
 var PART_VS = SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uPart, uLoA, uTopV, uHiA, uDeepV, uLookup;
+uniform sampler2D uSmoothTopV, uSmoothDeepV, uSmoothLoA, uSmoothHiA;
 uniform mat4 uMVP;
 uniform ivec2 uPDim;
 uniform float uTrail, uRadius, uEquirect, uVelScale, uAsPoints, uPointSize;
-uniform int uVelMode;
+uniform int uVelMode, uVelSmoothMode;
+uniform float uVelSmooth, uTrailFade;
 out float vA;
+` + SAMPLE_VEL_GLSL + `
 void main(){
   int pid = (uAsPoints > 0.5) ? gl_VertexID : (gl_VertexID >> 1);
   int isTail = (uAsPoints > 0.5) ? 0 : (gl_VertexID & 1);
@@ -1628,11 +1766,7 @@ void main(){
   int cell = int(texture(uLookup, vec2(lon/6.2831853+0.5, lat/3.14159265+0.5)).r + 0.5);
   vec4 cb = texelFetch(uCellB, cTex(cell), 0);
   vec3 e1 = cb.xyz, e2 = cross(e1, pos);
-  vec2 vel;
-  if(uVelMode==0)      vel = texelFetch(uLoA, cTex(cell),0).xy;
-  else if(uVelMode==1) vel = texelFetch(uTopV, cTex(cell),0).xy*uVelScale;
-  else if(uVelMode==2) vel = texelFetch(uHiA, cTex(cell),0).xy;
-  else                 vel = texelFetch(uDeepV, cTex(cell),0).xy*uVelScale;
+  vec2 vel = sampleVel(cell, uVelMode);
   vec3 v3 = vel.x*e1 + vel.y*e2;                              // tangent velocity (m/s)
   // Back-step along the flow to draw a streak.  Clamp the angular extent so a
   // velocity spike (e.g. near coasts) or an oversized trail cannot fling the
@@ -1642,7 +1776,7 @@ void main(){
   vec3 tdir = (length(v3) > 1e-6) ? v3 / length(v3) : vec3(0.0);
   vec3 tail = normalize(pos - tdir * s);                      // arc back along flow
   vec3 outp = isTail == 1 ? tail : pos;
-  vA = clamp(p.w,0.0,1.0) * clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0);
+  vA = clamp(p.w,0.0,1.0) * ((uTrailFade > 0.5) ? clamp(1.5 - abs(p.w-0.5)*2.0, 0.0, 1.0) : 1.0);
   if(uEquirect > 0.5){
     vec2 uvHead = vec2(lon/6.2831853+0.5, lat/3.14159265+0.5);
     vec2 uvTail = vec2(atan(tail.z,tail.x)/6.2831853+0.5, asin(clamp(tail.y,-1.0,1.0))/3.14159265+0.5);
