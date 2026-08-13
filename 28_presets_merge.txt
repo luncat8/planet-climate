@@ -1,0 +1,1 @@
+Add a checkbox “Apply on top of current” to presets: when checked, merge the preset over existing parameters instead of resetting to defaults first.
