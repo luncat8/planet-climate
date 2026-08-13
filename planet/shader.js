@@ -1090,6 +1090,150 @@ void main(){
   o = vec4(m, 0.0, 0.0, 1.0);
 }`;
 
+/* ===========================================================================
+   BAROTROPIC (RIGID-LID) PROJECTION  —  fixes the deep-layer mass bug.
+
+   The two-layer solver assumes the column depth D is fixed (h_deep = D - h_top),
+   which is a rigid-lid kinematic constraint: the depth-integrated (barotropic)
+   transport U = h_top*u_top + h_deep*u_deep must be NON-DIVERGENT. But nothing
+   in the momentum update enforces it — the top feels a huge -9.81*grad(eta)
+   (a stand-in for the surface pressure the model never carries) while the deep
+   feels only +g'*grad(eta) with g' ~ 1e-3*9.81, so the return flow is ~1000x
+   too weak and div(U) != 0. Measured: corr(div(h_top u), div(h_deep u)) ~ 0
+   instead of -1, i.e. the layers do not mass-balance.
+
+   Standard cure: a Chorin pressure projection. Find a barotropic potential phi
+   with  lap(phi) = div(U*)  (U* = provisional transport) and correct BOTH
+   layers by the SAME depth-independent velocity  du = grad(phi)/D. Then
+   U_new = U* - D*du = U* - grad(phi) is divergence-free, so
+   div(h_top u_top) = -div(h_deep u_deep) EXACTLY (mass in == mass out), while
+   the shear u_top - u_deep (the baroclinic/overturning mode) is untouched.
+   phi is the surface pressure the model was faking; solving it makes the deep
+   layer the genuine return limb. Neumann BC at coasts (wet mask) since no
+   transport crosses land. =========================================================================== */
+
+/* 1. Divergence of the provisional depth-integrated transport. Writes
+   (phi0=0, b=div(U*)) so the Jacobi below can carry the RHS in .y. */
+var BARO_DIV_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 oEta;
+uniform sampler2D uTopS, uTopV, uDeepV, uPhiPrev;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oEta = vec4(0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell),0).w;
+  float h0 = texelFetch(uTopS, cTex(cell),0).x;
+  float D0 = cellD(cell);
+  vec2 U0 = h0*texelFetch(uTopV, cTex(cell),0).xy + (D0-h0)*texelFetch(uDeepV, cTex(cell),0).xy;
+  float area = texelFetch(uCellA, cTex(cell),0).w;
+  float divU = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x); float L = na.y;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    vec2 nrm = nb.xy;
+    float hj = texelFetch(uTopS, cTex(j),0).x;
+    float Dj = cellD(j);
+    vec2 vtj = xfer(texelFetch(uTopV, cTex(j),0).xy, nb.z, nb.w);
+    vec2 vdj = xfer(texelFetch(uDeepV,cTex(j),0).xy, nb.z, nb.w);
+    vec2 Uj = hj*vtj + (Dj-hj)*vdj;
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    divU += L*0.5*dot(U0+Uj, nrm)*wet;
+  }
+  divU /= area;
+  // warm start: carry last frame's phi in .x so the Jacobi solve amortises to
+  // convergence across the many substeps per frame; b (=div U*) in .y.
+  float phiPrev = texelFetch(uPhiPrev, cTex(cell),0).x;
+  if(isnan(phiPrev)) phiPrev = 0.0;
+  oEta = vec4(phiPrev, divU, 0.0, 0.0);
+}`;
+
+/* 2. Damped Jacobi sweep of  lap(phi) = b  on the FV stencil. Reads
+   (phi,b) and writes (phi_new,b,_,|residual|). */
+var BARO_JACOBI_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 oEta;
+uniform sampler2D uEtaIn;
+uniform float uJacobiOmega;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if(cell >= uCount){ oEta = vec4(0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell),0).w;
+  vec2 me = texelFetch(uEtaIn, cTex(cell),0).xy;   // (phi, b)
+  float area = texelFetch(uCellA, cTex(cell),0).w;
+  float num = 0.0, den = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x); float L = na.y, d = na.z;
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    float w = (L/d)*wet;
+    num += w*texelFetch(uEtaIn, cTex(j),0).x;
+    den += w;
+  }
+  if(den < 1e-20){ oEta = vec4(0.0, me.y, 0.0, 0.0); return; }
+  float target = (num - area*me.y)/den;            // lap(phi)=b  =>  phi
+  float phi = mix(me.x, target, uJacobiOmega);
+  if(isnan(phi)) phi = 0.0;
+  oEta = vec4(phi, me.y, 0.0, abs(target - me.x));
+}`;
+
+/* 3. Correct both layers by the shared barotropic velocity du = grad(phi)/D.
+   Reads the SOURCE velocities from the scratch copy (uTopV/uDeepV = P[1]/P[3])
+   and writes the corrected fields back to A[1]/A[3]. Preserves topV.zw (the
+   lagged grad(eta) used by Rhie-Chow). */
+var BARO_CORRECT_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oTopV;
+layout(location=1) out vec4 oDeepV;
+layout(location=2) out vec4 oPhi;
+uniform sampler2D uTopS, uTopV, uDeepV, uEta;
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  vec4 tv = texelFetch(uTopV, cTex(cell),0);
+  vec2 vd = texelFetch(uDeepV, cTex(cell),0).xy;
+  float phi0 = texelFetch(uEta, cTex(cell),0).x;
+  if(cell >= uCount){ oTopV = tv; oDeepV = vec4(vd,0.0,0.0); oPhi = vec4(phi0,0.0,0.0,0.0); return; }
+  float land = texelFetch(uCellB, cTex(cell),0).w;
+  float D0 = max(cellD(cell), 1.0);
+  float area = texelFetch(uCellA, cTex(cell),0).w;
+  vec2 grad = vec2(0.0);
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k),0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x); float L = na.y;
+    vec4 nb = texelFetch(uNbrB, nTex(cell,k),0);
+    float landj = texelFetch(uCellB, cTex(j),0).w;
+    float wet = (1.0-landj)*(1.0-land);
+    float phij = texelFetch(uEta, cTex(j),0).x;
+    grad += L*0.5*(phij - phi0)*nb.xy*wet;
+  }
+  grad /= area;
+  vec2 du = (grad/D0)*(1.0-land);
+  vec2 vt1 = tv.xy - du;
+  vec2 vd1 = vd    - du;
+  vt1 = clamp(vt1, vec2(-3.0), vec2(3.0));
+  vd1 = clamp(vd1, vec2(-3.0), vec2(3.0));
+  if(any(isnan(vt1))) vt1 = tv.xy;
+  if(any(isnan(vd1))) vd1 = vd;
+  oTopV  = vec4(vt1, tv.zw);
+  oDeepV = vec4(vd1, 0.0, 0.0);
+  oPhi   = vec4(phi0, 0.0, 0.0, 0.0);   // persist for next frame's warm start
+}`;
+
+/* Tiny MRT passthrough: copy two velocity textures (used to snapshot A[1]/A[3]
+   into scratch before the in-place correction). */
+var BARO_COPY_FS = SHADER_HEAD + `
+precision highp float;
+layout(location=0) out vec4 o0;
+layout(location=1) out vec4 o1;
+uniform sampler2D uSrc0, uSrc1;
+void main(){
+  ivec2 t = ivec2(gl_FragCoord.xy);
+  o0 = texelFetch(uSrc0, t, 0);
+  o1 = texelFetch(uSrc1, t, 0);
+}`;
+
 var AIR_FS = SHADER_HEAD + SHADER_COMMON + `
 layout(location=0) out vec4 oLoA;
 layout(location=1) out vec4 oLoB;

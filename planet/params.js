@@ -151,6 +151,13 @@ var PARAMS = {
      not pay for all of them. Only meaningful when oceanScheme == 2. */
   implicitIters:{ label: 'Implicit iters (B)', default: 12, min: 1, max: 40, step: 1,
     tip: 'Jacobi iterations for the implicit free surface (scheme B). Greyed out for schemes 0/1.' },
+  /* Barotropic (rigid-lid) projection: enforces div(h_top u_top + h_deep u_deep)
+     = 0 each step so the two ocean layers mass-balance (deep = true return
+     flow). Off by default — it changes the tuned currents. Works with any
+     ocean scheme. baroIters = Jacobi sweeps of the barotropic pressure solve. */
+  rigidLid:   { label: 'Rigid-lid (deep return flow)', default: 0 },
+  baroIters:  { label: 'Barotropic iters', default: 24, min: 4, max: 100, step: 4,
+    tip: 'Jacobi sweeps for the barotropic projection. More = closer to column mass balance (diminishing returns on the collocated grid).' },
   /* Maximum (abyssal) ocean depth. Reached far from any coastline. */
   depthMax:   { label: 'Max ocean depth',     default: 4000,  min: 500, max: 8000, step: 100,
                 fmt: function (v) { return (v / 1000).toFixed(1) + ' km'; } },

@@ -191,6 +191,10 @@ Planet.prototype.compile = function () {
   this.prog.oceanRhs = new Prog(gl, QUAD_VS, OCEAN_RHS_FS, 'oceanRhs');
   this.prog.oceanJacobi = new Prog(gl, QUAD_VS, OCEAN_JACOBI_FS, 'oceanJacobi');
   this.prog.oceanCorrect = new Prog(gl, QUAD_VS, OCEAN_CORRECT_FS, 'oceanCorrect');
+  this.prog.baroDiv = new Prog(gl, QUAD_VS, BARO_DIV_FS, 'baroDiv');
+  this.prog.baroJacobi = new Prog(gl, QUAD_VS, BARO_JACOBI_FS, 'baroJacobi');
+  this.prog.baroCorrect = new Prog(gl, QUAD_VS, BARO_CORRECT_FS, 'baroCorrect');
+  this.prog.baroCopy = new Prog(gl, QUAD_VS, BARO_COPY_FS, 'baroCopy');
   this.prog.maxRed = new Prog(gl, QUAD_VS, MAX_FS, 'maxRed');
   this.prog.air = new Prog(gl, QUAD_VS, AIR_FS, 'air');
   this.prog.cplO = new Prog(gl, QUAD_VS, COUPLE_FS('ocean'), 'coupleOcean');
@@ -269,6 +273,13 @@ Planet.prototype.build = function (level) {
   this.P = [this.mkTex(W, H, null), this.mkTex(W, H, null),
             this.mkTex(W, H, null), this.mkTex(W, H, null)];
   this.fbo.P = this.mkFbo(this.P);
+  // Barotropic projection: MRT targets to correct the two ocean velocity
+  // fields (A[1]=topV, A[3]=deepV) plus a persistent barotropic potential phi
+  // (texPhi) that warm-starts the Jacobi solve across substeps. Scratch
+  // snapshot in P[1]/P[3].
+  this.texPhi = this.mkTex(W, H, null);
+  this.fbo.oceanV = this.mkFbo([this.A[1], this.A[3], this.texPhi]);
+  this.fbo.baroV  = this.mkFbo([this.P[1], this.P[3]]);
   this.texEtaA = this.mkTex(W, H, null);
   this.texEtaB = this.mkTex(W, H, null);
   this.fbo.etaA = this.mkFbo([this.texEtaA]);
@@ -348,7 +359,7 @@ Planet.prototype.destroyGrid = function () {
   if (this.smooth) partTexs = this.smooth.reduce(function (a, s) { return a.concat(s.tex); }, partTexs);
   if (this.texVFlow) partTexs.push(this.texVFlow);
   var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
-  if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes]);
+  if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes, this.texPhi]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
@@ -660,8 +671,52 @@ Planet.prototype.step = function () {
   this.fullscreen('dynA', W, H);
 
   this.couple();
+  if (P.rigidLid > 0.5) this.projectBarotropic();
   this.simTime += P.dt;
   this.stepCount++;
+};
+
+/* Barotropic (rigid-lid) projection — see the BARO_* shaders. Removes the
+   divergent part of the depth-integrated transport so the two ocean layers
+   mass-balance (div(h_top u_top) = -div(h_deep u_deep)). Runs on the final
+   post-couple state in A[]; phi ping-pongs in the eta scratch textures, and the
+   source velocities are snapshotted into P[1]/P[3] to avoid a feedback loop. */
+Planet.prototype.projectBarotropic = function () {
+  var W = this.grid.W, H = this.grid.H;
+  var P = this.params;
+  var gl = this.gl;
+
+  // snapshot A[1],A[3] -> P[1],P[3]
+  var cpy = this.prog.baroCopy.use();
+  cpy.tex('uSrc0', this.A[1]).tex('uSrc1', this.A[3]);
+  this.fullscreen('baroV', W, H);
+
+  // b = div(U*) into eta.y; phi (.x) warm-started from texPhi
+  var dv = this.prog.baroDiv.use();
+  this.gridUniforms(dv);
+  dv.tex('uTopS', this.A[0]).tex('uTopV', this.A[1]).tex('uDeepV', this.A[3])
+    .tex('uPhiPrev', this.texPhi);
+  this.fullscreen('etaA', W, H);
+
+  // Jacobi sweeps: lap(phi) = b
+  var etaT = { etaA: this.texEtaA, etaB: this.texEtaB };
+  var iters = Math.max(1, (P.baroIters === undefined ? 40 : P.baroIters) | 0);
+  var src = 'etaA', dst = 'etaB';
+  for (var it = 0; it < iters; it++) {
+    var ji = this.prog.baroJacobi.use();
+    this.gridUniforms(ji);
+    ji.tex('uEtaIn', etaT[src]).f('uJacobiOmega', 0.8);
+    this.fullscreen(dst, W, H);
+    var t = src; src = dst; dst = t;
+  }
+
+  // correct: du = grad(phi)/D applied to both layers, P[1]/P[3] -> A[1]/A[3]
+  var cr = this.prog.baroCorrect.use();
+  this.gridUniforms(cr);
+  cr.tex('uTopS', this.A[0]).tex('uTopV', this.P[1]).tex('uDeepV', this.P[3])
+    .tex('uEta', etaT[src]);
+  this.fullscreen('oceanV', W, H);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
 
 /* Scheme B: implicit free surface via Jacobi iteration over eta.
@@ -699,6 +754,7 @@ Planet.prototype.stepOceanB = function () {
   this.fullscreen('etaA', W, H);
 
   // 3. Jacobi loop with convergence tracking and early-exit.
+  var etaT = { etaA: this.texEtaA, etaB: this.texEtaB };
   var iters = P.implicitIters | 0;
   var src = 'etaA', dst = 'etaB';
   this.residualHistory = [];
@@ -706,7 +762,7 @@ Planet.prototype.stepOceanB = function () {
   for (var it = 0; it < iters; it++) {
     var ji = this.prog.oceanJacobi.use();
     this.gridUniforms(ji);
-    ji.tex('uEtaIn', this[src])
+    ji.tex('uEtaIn', etaT[src])
       .tex('uCellC', this.texCellC)
       .f('uDt', P.dt).f('uPgfTop', P.pgfTop)
       .f('uJacobiOmega', 0.8);
@@ -726,7 +782,7 @@ Planet.prototype.stepOceanB = function () {
   this.gridUniforms(cp);
   cp.tex('uTopS', this.P[0]).tex('uTopV', this.P[1])
     .tex('uDeepS', this.P[2]).tex('uDeepV', this.P[3])
-    .tex('uEta', this[src])
+    .tex('uEta', etaT[src])
     .f('uDt', P.dt).f('uNuT', P.nuTOcean)
       .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
       .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)

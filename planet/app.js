@@ -550,6 +550,7 @@ function buildUI() {
     ['dayNight', 'Day / night cycle'],
     ['nightShading', 'Night shading'],
     ['showLand', 'Show continents'],
+    ['rigidLid', 'Rigid-lid (deep return flow)'],
   ];
   chkDefs.forEach(function (d) {
     var lab = el('label', 'chk');
