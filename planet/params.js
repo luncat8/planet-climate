@@ -271,6 +271,46 @@ var PARAMS = {
                   fmt: function (v) { return (+v).toExponential(1); } },
   iceThkMax:    { label: 'Max ice thickness', default: 60, min: 5, max: 500, step: 5,
                   fmt: function (v) { return (v | 0) + ' m'; } },
+  // ---- Global CO2 / carbon cycle. See CO2.md. Rates are per geological year;
+  //      co2Speed sets how many such years pass per physics step. ----
+  co2On:        { label: 'CO₂ carbon cycle', default: 0 },
+  bioOnLand:    { label: 'Biosphere on land', default: 1 },
+  bioOnWater:   { label: 'Biosphere on water', default: 1 },
+  co2:          { label: 'Atmospheric CO₂', default: 280, min: 5, max: 2000, step: 5,
+                  fmt: function (v) { return (v | 0) + ' ppm'; } },
+  biomass:      { label: 'Biomass', default: 250, min: 0, max: 2000, step: 10,
+                  fmt: function (v) { return (v | 0); } },
+  co2Ref:       { label: 'CO₂ reference', default: 280, min: 100, max: 1000, step: 5,
+                  fmt: function (v) { return (v | 0) + ' ppm'; } },
+  co2Green0:    { default: 0.55 },
+  co2Tref:      { default: 288 },
+  co2Sens:      { label: 'CO₂ climate sensitivity', default: 0.09, min: 0, max: 0.3, step: 0.005,
+                  fmt: function (v) { return (+v).toFixed(3); } },
+  co2Speed:     { label: 'CO₂ time speed', default: 20, min: 0, max: 500, step: 5,
+                  fmt: function (v) { return (v | 0) + ' yr/step'; } },
+  volcRate:     { label: 'Volcanism rate', default: 0.056, min: 0, max: 0.5, step: 0.002,
+                  fmt: function (v) { return (+v).toFixed(3) + ' ppm/yr'; } },
+  volcVar:      { label: 'Volcanism variability', default: 0.5, min: 0, max: 2, step: 0.05,
+                  fmt: function (v) { return Math.round(v * 100) + '%'; } },
+  weatherRate:  { label: 'Silicate weathering', default: 0.09, min: 0, max: 0.5, step: 0.002,
+                  fmt: function (v) { return (+v).toFixed(3); } },
+  weatherTsens: { label: 'Weathering T-sens', default: 0.055, min: 0, max: 0.2, step: 0.005,
+                  fmt: function (v) { return (+v).toFixed(3) + '/K'; } },
+  oceanCO2K:    { label: 'Ocean CO₂ exchange', default: 8e-4, min: 0, max: 0.02, step: 5e-4,
+                  fmt: function (v) { return (+v).toExponential(1); } },
+  oceanCO2Tsens:{ label: 'Ocean solubility T-sens', default: 0.03, min: 0, max: 0.1, step: 0.005,
+                  fmt: function (v) { return (+v).toFixed(3) + '/K'; } },
+  bioRate:      { label: 'Biosphere growth', default: 8, min: 0, max: 40, step: 0.5,
+                  fmt: function (v) { return (+v).toFixed(1); } },
+  bioResp:      { label: 'Biosphere respiration', default: 0.005, min: 0, max: 0.05, step: 0.001,
+                  fmt: function (v) { return (+v).toFixed(3) + '/yr'; } },
+  bioHalf:      { default: 150 },
+  bioCap:       { label: 'Biosphere capacity', default: 1000, min: 100, max: 5000, step: 100,
+                  fmt: function (v) { return (v | 0); } },
+  bioOptT:      { label: 'Biosphere optimal T', default: 290, min: 260, max: 320, step: 1,
+                  fmt: function (v) { return (v - 273.15).toFixed(0) + ' °C'; } },
+  bioTwidth:    { label: 'Biosphere T tolerance', default: 12, min: 2, max: 40, step: 1,
+                  fmt: function (v) { return (v | 0) + ' K'; } },
   showLand:       { default: 1 },
   nightShading:   { default: 1 },
   relief:         { default: 0.004 },
@@ -281,6 +321,15 @@ var PARAMS = {
    Applying one only touches the listed keys; all other params stay intact. */
 var BUILTIN_PRESETS = {
   'Default': null, // sentinel: means "restore defaults"
+  'CO₂ carbon cycle': {
+    /* Turns on the global carbon cycle with a lively geological clock so the
+       volcanism / biosphere / weathering / ocean balance is visible. Greenhouse
+       becomes CO2-derived. Sea ice on so the ice-gated weathering feedback runs. */
+    co2On: { v: 1 }, iceOn: { v: 1 }, co2Speed: { v: 40 },
+    volcRate: { v: 0.056 }, volcVar: { v: 0.8 },
+    weatherRate: { v: 0.09 }, oceanCO2K: { v: 4e-3 }, co2Sens: { v: 0.11 },
+    bioRate: { v: 10 }, bioOptT: { v: 292 },
+  },
   'Earth-like': {
     dt: { v: 300 }, solar: { v: 1361 }, greenhouse: { v: 0.55 },
     omegaSpin: { v: 7.292e-5 }, omegaOrbit: { v: 6.2831853 / 86400 },

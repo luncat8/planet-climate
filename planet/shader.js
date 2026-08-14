@@ -1078,6 +1078,51 @@ void main(){
 /* 1-fragment max-reduction over the .w channel (|residual|). Used by the engine
    to track Jacobi convergence per iteration and early-exit. Reads the whole grid
    in one fragment; cheap enough given scheme B is the slow path by design. */
+
+/* REDUCE_FS — global carbon-cycle reduction (see CO2.md). One draw, 2x1 output;
+   a single fragment loops over all V cells (like MAX_FS) and, branching on
+   gl_FragCoord.x, accumulates area-weighted global sums used by the CPU CO2 ODE.
+   No atomics, one 2-pixel readback per frame.
+     px0 = (SUM A*T, SUM A, SUM A*T over ocean, SUM A over ocean)
+     px1 = (SUM A*T over ice-free land, SUM A over ice-free land,
+            SUM suitability over ocean, SUM suitability over land)
+   suitability = A*exp(-((T-Topt)/Twidth)^2) drives the temperature-optimal
+   biosphere on water and/or land. */
+var REDUCE_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 o;
+uniform sampler2D uTopS, uIce;
+uniform float uTopt, uTwidth;
+uniform int uWhich;   // 0 -> (SUM A*T, SUM A, SUM A*T|ocean, SUM A|ocean)
+                      // 1 -> (SUM A*T|iceFreeLand, SUM A|iceFreeLand, suit|ocean, suit|land)
+void main(){
+  int W = uDim.x;
+  vec4 acc = vec4(0.0);
+  for(int i=0;i<200000;i++){
+    if(i >= uCount) break;
+    int x = i - (i/W)*W, y = i/W;
+    float A    = texelFetch(uCellA, ivec2(x,y),0).w;
+    float land = texelFetch(uCellB, ivec2(x,y),0).w;
+    float T    = texelFetch(uTopS,  ivec2(x,y),0).y;
+    if(uWhich == 0){
+      acc.x += A*T;
+      acc.y += A;
+      acc.z += (1.0-land)*A*T;
+      acc.w += (1.0-land)*A;
+    } else {
+      float icef = texelFetch(uIce, ivec2(x,y),0).y;
+      float iceFree = 1.0 - step(0.5, icef);
+      float dtt = (T - uTopt)/max(uTwidth, 1.0);
+      float suit = A*exp(-dtt*dtt);
+      float ifl = land*iceFree;
+      acc.x += ifl*A*T;
+      acc.y += ifl*A;
+      acc.z += (1.0-land)*suit;
+      acc.w += land*suit;
+    }
+  }
+  o = acc;
+}`;
+
 var MAX_FS = SHADER_HEAD + SHADER_COMMON + `
 out vec4 o;
 uniform sampler2D uSrc;

@@ -347,7 +347,15 @@ function buildUI() {
   var yrEl = el('span', 's', '0.00 yr');
   mono.appendChild(fpsEl); mono.appendChild(dayEl); mono.appendChild(yrEl);
   box.appendChild(mono);
-  ui.fpsEls = { cellSpan: cellSpan, lvlSpan: lvlSpan, fps: fpsEl, day: dayEl, yr: yrEl };
+  var co2Mono = el('div', 'mono');
+  var co2El = el('span', 'a', 'CO₂ —');
+  var greenEl = el('span', 'g', 'GH —');
+  var bioEl = el('span', 's', 'bio —');
+  var tEl = el('span', 'a', 'T̄ —');
+  co2Mono.appendChild(co2El); co2Mono.appendChild(greenEl); co2Mono.appendChild(bioEl); co2Mono.appendChild(tEl);
+  box.appendChild(co2Mono);
+  ui.fpsEls = { cellSpan: cellSpan, lvlSpan: lvlSpan, fps: fpsEl, day: dayEl, yr: yrEl,
+                co2: co2El, green: greenEl, bio: bioEl, meanT: tEl };
 
   hdr.appendChild(box);
   var projBtn = el('button', 'btn proj', '🌐 globe');
@@ -570,6 +578,9 @@ function buildUI() {
     ['rigidLid', 'Rigid-lid (deep return flow)'],
     ['iceOn', 'Sea ice & snow (cryosphere)'],
     ['iceOverlay', 'Ice overlay on map'],
+    ['co2On', 'CO₂ carbon cycle'],
+    ['bioOnLand', 'Biosphere on land'],
+    ['bioOnWater', 'Biosphere on water'],
   ];
   chkDefs.forEach(function (d) {
     var lab = el('label', 'chk');
@@ -817,6 +828,12 @@ function boot() {
       ui.fpsEls.yr.textContent = (s.days / 365).toFixed(2) + ' yr';
       ui.fpsEls.cellSpan.textContent = s.cells.toLocaleString();
       ui.fpsEls.lvlSpan.textContent = String(s.level);
+      if (ui.fpsEls.co2) {
+        ui.fpsEls.co2.textContent = 'CO₂ ' + (s.co2 != null ? Math.round(s.co2) + ' ppm' : '—') + (s.co2On ? '' : ' (off)');
+        ui.fpsEls.green.textContent = 'GH ' + (s.greenhouse != null ? s.greenhouse.toFixed(2) : '—');
+        ui.fpsEls.bio.textContent = 'bio ' + (s.biomass != null ? Math.round(s.biomass) : '—');
+        ui.fpsEls.meanT.textContent = 'T̄ ' + (s.meanT != null ? (s.meanT - 273.15).toFixed(1) + '°C' : '—');
+      }
     };
     ui.planet = p;
     if (st && st.level && Array.isArray(st.A) && st.A.length === 8) {

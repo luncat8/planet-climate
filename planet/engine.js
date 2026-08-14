@@ -203,6 +203,7 @@ Planet.prototype.compile = function () {
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
   this.prog.vflow = new Prog(gl, QUAD_VS, VFLOW_FS, 'vflow');
   this.prog.iceDyn = new Prog(gl, QUAD_VS, ICE_DYN_FS, 'iceDyn');
+  this.prog.reduce = new Prog(gl, QUAD_VS, REDUCE_FS, 'reduce');
   this.prog.state = new Prog(gl, QUAD_VS, STATE_FS, 'state');
   this.prog.trail = new Prog(gl, QUAD_VS, TRAIL_FS, 'trail');
   this.prog.smooth = new Prog(gl, QUAD_VS, SMOOTH_FS, 'smooth');
@@ -297,6 +298,12 @@ Planet.prototype.build = function (level) {
   this.fbo.ice0 = this.mkFbo([this.ice[0]]);
   this.fbo.ice1 = this.mkFbo([this.ice[1]]);
   this.iceIdx = 0;
+
+  /* Carbon-cycle global reduction target: a single 1x1 float attachment (the
+     exact pattern proven by fbo.maxRes). Filled by two REDUCE_FS draws. */
+  this.texReduce0 = this.mkTex(1, 1, new Float32Array(4));
+  this.fbo.reduce = this.mkFbo([this.texReduce0]);
+  this.globals = null;
 
   /* ---- Flow-visualisation particle pools -------------------------------
      TWO pools — ocean {top,deep} and air {low,high}. Each particle carries a
@@ -416,6 +423,7 @@ Planet.prototype.destroyGrid = function () {
   if (this.smooth) partTexs = this.smooth.reduce(function (a, s) { return a.concat(s.tex); }, partTexs);
   if (this.texVFlow) partTexs.push(this.texVFlow);
   if (this.ice) partTexs = partTexs.concat(this.ice);
+  if (this.texReduce0) partTexs.push(this.texReduce0);
   var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
   if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes, this.texPhi]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
@@ -424,7 +432,7 @@ Planet.prototype.destroyGrid = function () {
   if (this.ibo) gl.deleteBuffer(this.ibo);
   if (this.vaoGlobe) gl.deleteVertexArray(this.vaoGlobe);
   if (this.vaoEmpty) gl.deleteVertexArray(this.vaoEmpty);
-  this.A = []; this.B = []; this.pools = []; this.smooth = []; this.texVFlow = null; this.ice = null;
+  this.A = []; this.B = []; this.pools = []; this.smooth = []; this.texVFlow = null; this.ice = null; this.texReduce0 = null;
 };
 
 /* Advance the smoothed-velocity EMA one frame for the 4 sublayer sources.
@@ -767,6 +775,80 @@ Planet.prototype.stepIce = function () {
   this.fullscreen(nxt === 1 ? 'ice1' : 'ice0', W, H);
   this.iceIdx = nxt;
   this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+};
+
+/* Area-weighted global means for the carbon cycle (one REDUCE_FS draw + a
+   2-pixel readback). Returns temperatures in K and area fractions. */
+Planet.prototype.computeGlobals = function () {
+  var gl = this.gl, P = this.params;
+  var pr = this.prog.reduce.use();
+  this.gridUniforms(pr);
+  pr.tex('uTopS', this.A[0]).tex('uIce', this.iceTex())
+    .f('uTopt', P.bioOptT === undefined ? 290 : P.bioOptT)
+    .f('uTwidth', P.bioTwidth === undefined ? 12 : P.bioTwidth);
+  var b0 = new Float32Array(4), b1 = new Float32Array(4);
+  pr.i('uWhich', 0); this.fullscreen('reduce', 1, 1);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, b0);
+  pr.i('uWhich', 1); this.fullscreen('reduce', 1, 1);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, b1);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  var Aall = b0[1] || 1, Aoc = b0[3] || 1, Aifl = b1[1];
+  return {
+    meanT:   b0[0] / Aall,
+    sstMean: b0[2] / Aoc,
+    landT:   Aifl > 1 ? b1[0] / Aifl : b0[0] / Aall,
+    areaTotal: Aall, areaOcean: Aoc,
+    iceFreeLandFrac: b1[1] / Aall,
+    suitOcean: b1[2], suitLand: b1[3],
+  };
+};
+
+/* Atmospheric CO2 -> greenhouse factor, logarithmic radiative forcing. */
+Planet.prototype.greenhouseFromCO2 = function () {
+  var P = this.params;
+  var ref = P.co2Ref === undefined ? 280 : P.co2Ref;
+  var g0 = P.co2Green0 === undefined ? 0.55 : P.co2Green0;
+  var s = P.co2Sens === undefined ? 0.09 : P.co2Sens;
+  var c = Math.max(1, P.co2 === undefined ? ref : P.co2);
+  return Math.max(0, Math.min(1, g0 + s * Math.log(c / ref)));
+};
+
+/* Global carbon cycle (see CO2.md): CPU ODE for atmospheric CO2 + biomass,
+   advanced on a geological clock (co2Speed years per physics step). Reads the
+   live climate via computeGlobals(), writes back the greenhouse factor. Runs
+   once per frame from loop(); the harness calls it explicitly. */
+Planet.prototype.stepCO2 = function () {
+  var P = this.params;
+  var g = this.computeGlobals();
+  this.globals = g;
+  var Tref = P.co2Tref === undefined ? 288 : P.co2Tref;
+  var ref  = P.co2Ref === undefined ? 280 : P.co2Ref;
+  var years = (P.co2Speed === undefined ? 20 : P.co2Speed) * Math.max(1, P.substeps | 0);
+  var n = Math.max(1, Math.ceil(years / 50));   // ODE sub-steps, <=50 yr each
+  var h = years / n;
+  var Ca = P.co2 === undefined ? ref : P.co2;
+  var Cb = P.biomass === undefined ? 400 : P.biomass;
+  var landFrac = Math.max(1e-3, (g.areaTotal - g.areaOcean) / g.areaTotal);
+  var suitFrac = (g.suitOcean * (P.bioOnWater === undefined ? 1 : P.bioOnWater)
+                + g.suitLand  * (P.bioOnLand  === undefined ? 1 : P.bioOnLand)) / g.areaTotal;
+  for (var k = 0; k < n; k++) {
+    var xi = (this.seedRand() - 0.5) * 2;                              // deterministic noise
+    var volc = (P.volcRate) * (1 + (P.volcVar === undefined ? 0.5 : P.volcVar) * xi);
+    var weather = P.weatherRate * g.iceFreeLandFrac
+                * Math.exp(P.weatherTsens * (g.landT - Tref)) * (Ca / ref);
+    var ceq = ref * Math.exp((P.oceanCO2Tsens) * (g.sstMean - Tref));
+    var ocean = P.oceanCO2K * (ceq - Ca);                             // + = ocean releases to air
+    var npp = P.bioRate * suitFrac * (Ca / (Ca + P.bioHalf)) * Math.max(0, 1 - Cb / P.bioCap);
+    var resp = P.bioResp * Cb;
+    Ca += h * (volc - weather + ocean - npp + resp);
+    Cb += h * (npp - resp);
+    if (!(Ca > 0)) Ca = 0.1; if (Ca > 1e5) Ca = 1e5;
+    if (!(Cb >= 0)) Cb = 0; if (Cb > 10 * P.bioCap) Cb = 10 * P.bioCap;
+  }
+  P.co2 = Ca; P.biomass = Cb;
+  P.greenhouse = this.greenhouseFromCO2();
 };
 
 /* Barotropic (rigid-lid) projection — see the BARO_* shaders. Removes the
@@ -1122,6 +1204,7 @@ Planet.prototype.loop = function () {
   this.raf = requestAnimationFrame(this._loop);
   var P = this.params;
   if (P.running) {
+    if (P.co2On > 0.5) this.stepCO2();
     for (var i = 0; i < P.substeps; i++) this.step();
     this.stepSmooth();
     this.stepVFlow();
@@ -1138,6 +1221,8 @@ Planet.prototype.loop = function () {
     if (this.onStats) this.onStats({
       fps: this.fps, days: this.simTime / 86400,
       cells: this.grid.V, level: this.grid.level,
+      co2On: P.co2On > 0.5, co2: P.co2, biomass: P.biomass, greenhouse: P.greenhouse,
+      meanT: this.globals ? this.globals.meanT : null,
     });
   }
 };
