@@ -311,6 +311,22 @@ var PARAMS = {
                   fmt: function (v) { return (v - 273.15).toFixed(0) + ' °C'; } },
   bioTwidth:    { label: 'Biosphere T tolerance', default: 12, min: 2, max: 40, step: 1,
                   fmt: function (v) { return (v | 0) + ' K'; } },
+  // ---- Ice-age climate forcing (makes CO2/orbit actually move temperature) ----
+  climCO2Sens:  { label: 'Climate CO₂ sensitivity', default: 7, min: 0, max: 20, step: 0.5,
+                  fmt: function (v) { return (+v).toFixed(1) + ' K/×2'; } },
+  climAlbedo:   { label: 'Ice-albedo strength', default: 10, min: 0, max: 60, step: 1,
+                  fmt: function (v) { return (v | 0) + ' K'; } },
+  climBaseT:    { label: 'Climate baseline T', default: 272, min: 240, max: 300, step: 0.5,
+                  fmt: function (v) { return (v - 273.15).toFixed(1) + ' °C'; } },
+  climForceFrac:{ label: 'Climate response speed', default: 0.5, min: 0.02, max: 1, step: 0.02,
+                  fmt: function (v) { return Math.round(v * 100) + '%/frame'; } },
+  // ---- Milankovitch orbital forcing (paces the ice ages) ----
+  milankOn:     { label: 'Milankovitch forcing', default: 0 },
+  milankPeriod: { label: 'Orbital period', default: 100000, min: 5000, max: 400000, step: 5000,
+                  fmt: function (v) { return (v / 1000) + ' kyr'; } },
+  milankAmp:    { label: 'Orbital amplitude', default: 6, min: 0, max: 20, step: 0.5,
+                  fmt: function (v) { return '±' + (+v).toFixed(1) + ' K'; } },
+  geoYears:     { default: 0 },
   showLand:       { default: 1 },
   nightShading:   { default: 1 },
   relief:         { default: 0.004 },
@@ -322,12 +338,14 @@ var PARAMS = {
 var BUILTIN_PRESETS = {
   'Default': null, // sentinel: means "restore defaults"
   'CO₂ carbon cycle': {
-    /* Turns on the global carbon cycle with a lively geological clock so the
-       volcanism / biosphere / weathering / ocean balance is visible. Greenhouse
-       becomes CO2-derived. Sea ice on so the ice-gated weathering feedback runs. */
-    co2On: { v: 1 }, iceOn: { v: 1 }, co2Speed: { v: 40 },
-    volcRate: { v: 0.056 }, volcVar: { v: 0.8 },
+    /* Turns on the global carbon cycle + ice-age climate forcing with Milankovitch
+       orbital pacing. co2Speed is set so one ~100-kyr orbital cycle spans ~50k
+       steps (a minute or so of wall-clock). Greenhouse becomes CO2-derived. */
+    co2On: { v: 1 }, iceOn: { v: 1 }, co2Speed: { v: 2 },
+    milankOn: { v: 1 }, milankPeriod: { v: 100000 }, milankAmp: { v: 6 },
+    volcRate: { v: 0.08 }, volcVar: { v: 0.8 },
     weatherRate: { v: 0.09 }, oceanCO2K: { v: 4e-3 }, co2Sens: { v: 0.11 },
+    climCO2Sens: { v: 7 }, climAlbedo: { v: 10 }, climForceFrac: { v: 0.5 },
     bioRate: { v: 10 }, bioOptT: { v: 292 },
   },
   'Earth-like': {

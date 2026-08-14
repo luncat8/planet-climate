@@ -1097,7 +1097,7 @@ uniform int uWhich;   // 0 -> (SUM A*T, SUM A, SUM A*T|ocean, SUM A|ocean)
 void main(){
   int W = uDim.x;
   vec4 acc = vec4(0.0);
-  for(int i=0;i<200000;i++){
+  for(int i=0;i<700000;i++){
     if(i >= uCount) break;
     int x = i - (i/W)*W, y = i/W;
     float A    = texelFetch(uCellA, ivec2(x,y),0).w;
@@ -1108,7 +1108,7 @@ void main(){
       acc.y += A;
       acc.z += (1.0-land)*A*T;
       acc.w += (1.0-land)*A;
-    } else {
+    } else if(uWhich == 1){
       float icef = texelFetch(uIce, ivec2(x,y),0).y;
       float iceFree = 1.0 - step(0.5, icef);
       float dtt = (T - uTopt)/max(uTwidth, 1.0);
@@ -1118,6 +1118,9 @@ void main(){
       acc.y += ifl*A;
       acc.z += (1.0-land)*suit;
       acc.w += land*suit;
+    } else {
+      float icef = clamp(texelFetch(uIce, ivec2(x,y),0).y, 0.0, 1.0);
+      acc.x += A*icef;   // global ice-covered area (fractional)
     }
   }
   o = acc;
@@ -1505,6 +1508,8 @@ uniform float uIceInsul;   // max fractional damping of air-sea flux under ice
 uniform float uIceH0;      // e-folding thickness for insulation/coverage [m]
 uniform float uSice;       // bulk salinity of newly frozen ice [ppt]
 uniform float uFreezeRate; // freeze/melt relaxation rate of the skin [1/s]
+uniform float uClimApply;  // ice-age climate forcing: fraction of uDTshift applied per pass
+uniform float uDTshift;    // target global-mean surface-T anomaly relative to current [K]
 const float uLf     = 3.34e5;   // latent heat of fusion [J/kg]
 const float uRhoIce = 917.0;    // ice density [kg/m^3]
 
@@ -1546,8 +1551,17 @@ void main(){
   float hT = clampH(ts.x, Dep);
   float hD = Dep - hT;
   float Ts = ts.y, St = ts.z;      float Td = ds.x, Sd = ds.y;
+  /* Ice-age climate forcing: nudge the whole ocean column toward the
+     CO2 + Milankovitch + ice-albedo target computed on the CPU. This is what
+     lets the accelerated carbon/orbital cycle actually move temperature (and so
+     grow/retreat ice) on the step timescale, since the ocean's own thermal
+     inertia is far too large to respond to greenhouse alone. Uniform shift =>
+     the spatial pattern (cold poles) is preserved. */
+  float dTclim = uClimApply * uDTshift;
+  Ts += dTclim;  Td += dTclim;
   vec2  vl = la.xy,  vh = ha.xy;
   float Tl = la.z,   Th = ha.z;
+  Tl += dTclim;  Th += dTclim;   // atmosphere follows the ice-age climate shift
   float q  = lb.x,   qh = hb.x;
   float cloud = lb.y, rain = hb.y;
 

@@ -131,3 +131,55 @@ For a would-be ~100-kyr cycle to play over ~1500 steps you'd set `co2Speed ≈ 6
   sandbox — the WebGL context is lost after a few seconds of full rendering
   **regardless of CO₂** (verified with CO₂ off). This is a sandbox/CPU-renderer
   limit only; a real GPU browser runs it fine, and the reduction pass is trivial.
+
+## Update — ice-age dynamics + Milankovitch (turn 30)
+
+### Review (`29_review.txt`) verified against the code
+That file is a meta-review of two LLM reviews. Its two "highest-risk" claims are
+**false**: (1) "the reduce draw happens before the FBO is bound" — `fullscreen()`
+binds `this.fbo[name]` before drawing, so the target is correct; (2) the texture
+channels (`uCellA.w`=area, `uCellB.w`=land, `uTopS.y`=T, `uIce.y`=frac) are the
+real layout. `stepCO2` is confirmed to run before `step()`. Real items were
+minor and fixed: the dead `landFrac` in `stepCO2` (removed) and the hardcoded
+`REDUCE_FS` loop bound (raised 200000→700000, still `break` at `uCount`).
+
+### The real bug behind "CO₂ won't grow / temperature stays low / no cycle"
+Diagnostic: sweeping `greenhouse` 0.55→1.0 changed the mean temperature by
+**0.0°C** — because the ocean's heat capacity (~decades) dwarfs the 128 s of sim
+time per step, so greenhouse forcing can never move temperature within any
+watchable step budget. The carbon cycle was correct but **decoupled from the
+visible climate**.
+
+Fix — **impose the accelerated climate on the sim.** `stepCO2` now computes a
+target global-mean surface temperature
+`Ttarget = climBaseT + climCO2Sens·ln(CO₂/ref) + Milankovitch − climAlbedo·iceFrac`
+and hands `dT = Ttarget − meanT` to `COUPLE_FS`, which nudges the whole surface
+(ocean column + air) toward it by `climForceFrac` per frame (uniform shift ⇒ the
+spatial cold-pole pattern is preserved). Because the ice thermodynamics live in
+`COUPLE_FS`, shifting the field directly grows/retreats ice.
+
+### Milankovitch orbital forcing
+`milankOn` adds `milankAmp·sin(2π·geoYears/milankPeriod)` to `Ttarget`. `geoYears`
+advances by `co2Speed·substeps` per frame, so one cycle spans
+`milankPeriod / co2Speed` steps — e.g. period 100 kyr with `co2Speed 2` ⇒ ~50 k
+steps (~a minute of wall-clock), matching the requested 50 k–200 k range.
+
+### Snowball fix (was trapping frozen)
+Air–sea CO₂ exchange is now gated by open-ocean fraction `(1−iceFrac)`, so a
+frozen planet stops drawing CO₂ down and volcanic CO₂ **builds up until it melts**
+— the real mechanism that ends snowball states (verified: CO₂ rose to >400 ppm
+under heavy ice instead of collapsing).
+
+### Verified behaviour
+- **Volcanism now drives CO₂ & temperature** (the original complaint): volc
+  0.02→1.0 → CO₂ 221→642 ppm, mean T −6.3→+1.4 °C, ice 37→32 %.
+- **Milankovitch drives visible glacial cycles**: ice advances *and* retreats each
+  orbital period (e.g. …46→40→51→43→59→49→67→57 %), T swings ~18 °C, CO₂ 178–299
+  ppm, all finite, no NaN. (A slow multi-cycle glaciation drift remains and is
+  tunable via `climAlbedo` / `climBaseT` / `volcRate`; deep-ice phases self-
+  terminate through CO₂ buildup.)
+- `render.js`: 26 programs, 48 draws, **0 failures**.
+
+New params: `climCO2Sens, climAlbedo, climBaseT, climForceFrac, milankOn,
+milankPeriod, milankAmp` (+ internal `geoYears`). Preset **“CO₂ carbon cycle”**
+enables the whole thing with `co2Speed 2`, 100-kyr orbit.

@@ -304,6 +304,7 @@ Planet.prototype.build = function (level) {
   this.texReduce0 = this.mkTex(1, 1, new Float32Array(4));
   this.fbo.reduce = this.mkFbo([this.texReduce0]);
   this.globals = null;
+  this.climDTshift = 0; this.climApplyPerCouple = 0;
 
   /* ---- Flow-visualisation particle pools -------------------------------
      TWO pools — ocean {top,deep} and air {low,high}. Each particle carries a
@@ -673,7 +674,9 @@ Planet.prototype.couple = function () {
       .f('uIceInsul', P.iceInsul === undefined ? 0.85 : P.iceInsul)
       .f('uIceH0', P.iceH0 === undefined ? 0.5 : P.iceH0)
       .f('uSice', P.iceSalinity === undefined ? 4 : P.iceSalinity)
-      .f('uFreezeRate', P.iceFreezeRate === undefined ? 5e-5 : P.iceFreezeRate);
+      .f('uFreezeRate', P.iceFreezeRate === undefined ? 5e-5 : P.iceFreezeRate)
+      .f('uClimApply', self.climApplyPerCouple || 0)
+      .f('uDTshift', self.climDTshift || 0);
     self.fullscreen(pair[0], W, H);
   });
 };
@@ -786,13 +789,16 @@ Planet.prototype.computeGlobals = function () {
   pr.tex('uTopS', this.A[0]).tex('uIce', this.iceTex())
     .f('uTopt', P.bioOptT === undefined ? 290 : P.bioOptT)
     .f('uTwidth', P.bioTwidth === undefined ? 12 : P.bioTwidth);
-  var b0 = new Float32Array(4), b1 = new Float32Array(4);
+  var b0 = new Float32Array(4), b1 = new Float32Array(4), b2 = new Float32Array(4);
   pr.i('uWhich', 0); this.fullscreen('reduce', 1, 1);
   gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce);
   gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, b0);
   pr.i('uWhich', 1); this.fullscreen('reduce', 1, 1);
   gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce);
   gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, b1);
+  pr.i('uWhich', 2); this.fullscreen('reduce', 1, 1);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce);
+  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, b2);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   var Aall = b0[1] || 1, Aoc = b0[3] || 1, Aifl = b1[1];
   return {
@@ -802,6 +808,7 @@ Planet.prototype.computeGlobals = function () {
     areaTotal: Aall, areaOcean: Aoc,
     iceFreeLandFrac: b1[1] / Aall,
     suitOcean: b1[2], suitLand: b1[3],
+    iceFrac: b2[0] / Aall,                 // global ice-covered area fraction
   };
 };
 
@@ -825,12 +832,13 @@ Planet.prototype.stepCO2 = function () {
   this.globals = g;
   var Tref = P.co2Tref === undefined ? 288 : P.co2Tref;
   var ref  = P.co2Ref === undefined ? 280 : P.co2Ref;
-  var years = (P.co2Speed === undefined ? 20 : P.co2Speed) * Math.max(1, P.substeps | 0);
+  var subs = Math.max(1, P.substeps | 0);
+  var geoStep = (P.co2Speed === undefined ? 20 : P.co2Speed) * subs;   // geo-years this frame
+  var years = geoStep;
   var n = Math.max(1, Math.ceil(years / 50));   // ODE sub-steps, <=50 yr each
   var h = years / n;
   var Ca = P.co2 === undefined ? ref : P.co2;
-  var Cb = P.biomass === undefined ? 400 : P.biomass;
-  var landFrac = Math.max(1e-3, (g.areaTotal - g.areaOcean) / g.areaTotal);
+  var Cb = P.biomass === undefined ? 250 : P.biomass;
   var suitFrac = (g.suitOcean * (P.bioOnWater === undefined ? 1 : P.bioOnWater)
                 + g.suitLand  * (P.bioOnLand  === undefined ? 1 : P.bioOnLand)) / g.areaTotal;
   for (var k = 0; k < n; k++) {
@@ -839,7 +847,11 @@ Planet.prototype.stepCO2 = function () {
     var weather = P.weatherRate * g.iceFreeLandFrac
                 * Math.exp(P.weatherTsens * (g.landT - Tref)) * (Ca / ref);
     var ceq = ref * Math.exp((P.oceanCO2Tsens) * (g.sstMean - Tref));
-    var ocean = P.oceanCO2K * (ceq - Ca);                             // + = ocean releases to air
+    // Air-sea CO2 exchange is blocked where sea ice caps the ocean, so a frozen
+    // planet stops drawing CO2 down and volcanic CO2 builds up until it melts
+    // (the mechanism that ends snowball states). Without this the ocean pins CO2
+    // low under ice and the world is trapped frozen.
+    var ocean = P.oceanCO2K * Math.max(0, 1 - (g.iceFrac || 0)) * (ceq - Ca);
     var npp = P.bioRate * suitFrac * (Ca / (Ca + P.bioHalf)) * Math.max(0, 1 - Cb / P.bioCap);
     var resp = P.bioResp * Cb;
     Ca += h * (volc - weather + ocean - npp + resp);
@@ -849,6 +861,26 @@ Planet.prototype.stepCO2 = function () {
   }
   P.co2 = Ca; P.biomass = Cb;
   P.greenhouse = this.greenhouseFromCO2();
+
+  /* ---- Ice-age climate: impose a CO2 + Milankovitch + ice-albedo temperature
+     target on the sim (see the diagnostic in the CO2 turn: greenhouse alone
+     cannot move the ocean on a watchable step budget). Milankovitch orbital
+     forcing paces the cycle; ice-albedo and CO2/ocean/weathering feedbacks
+     amplify and lag it. */
+  P.geoYears = (P.geoYears || 0) + geoStep;
+  var fOrb = 0;
+  if (P.milankOn > 0.5 && (P.milankPeriod || 0) > 1) {
+    fOrb = (P.milankAmp === undefined ? 5 : P.milankAmp) * Math.sin(2 * Math.PI * P.geoYears / P.milankPeriod);
+  }
+  var Ttarget = (P.climBaseT === undefined ? 272 : P.climBaseT)
+              + (P.climCO2Sens === undefined ? 7 : P.climCO2Sens) * Math.log(Math.max(1, Ca) / ref)
+              + fOrb
+              - (P.climAlbedo === undefined ? 10 : P.climAlbedo) * (g.iceFrac || 0);
+  var dT = Ttarget - g.meanT;
+  dT = Math.max(-40, Math.min(40, dT));           // safety clamp
+  this.climDTshift = dT;
+  var frac = (P.climForceFrac === undefined ? 0.5 : P.climForceFrac);
+  this.climApplyPerCouple = (P.co2On > 0.5) ? (frac / subs) : 0;
 };
 
 /* Barotropic (rigid-lid) projection — see the BARO_* shaders. Removes the

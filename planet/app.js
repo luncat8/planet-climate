@@ -579,6 +579,7 @@ function buildUI() {
     ['iceOn', 'Sea ice & snow (cryosphere)'],
     ['iceOverlay', 'Ice overlay on map'],
     ['co2On', 'CO₂ carbon cycle'],
+    ['milankOn', 'Milankovitch orbital forcing'],
     ['bioOnLand', 'Biosphere on land'],
     ['bioOnWater', 'Biosphere on water'],
   ];
