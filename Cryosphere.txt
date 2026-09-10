@@ -1,0 +1,145 @@
+# Prompt for Coding Agent: Unified Cryosphere Module in GPU Climate Engine
+
+> **Purpose:** Define a production-ready specification for implementing sea ice, glacial flow, and snow/ice accumulation into an existing WebGL2/GLSL ES 3.00 climate engine. The agent is expected to choose implementation paths from the open decisions (§5), justify them physically and computationally, and integrate seamlessly with the existing conservation-first architecture.
+
+---
+
+## 1. Engine Context & Hard Constraints
+
+- **Architecture:** Icosahedral dual-hex grid (levels ~4–7). One cell ≈ 50–300 km depending on level.
+- **State Layout:** Ping-pong RGBA32F textures. Current ocean state:
+  - `oTopS = (h_top, T_top, S_top, _)`
+  - `oDeepS = (T_deep, S_deep, _, _)`
+  - Velocities in `oTopV`, `oDeepV`
+- **Static Cell Data:** 
+  - `cellB.w = land mask` (binary)
+  - `cellC = (D, hRef, bedElev, coastDist)` (`coastDist` already computed via shortest-path)
+- **Coupling Pass (`COUPLE_FS`):** Handles surface heat/moisture fluxes, evaporation/precipitation, salinity updates, and albedo (~line 1505). Currently has **zero** ice/snow/freezing logic.
+- **🔒 Hard Constraint:** The save system writes exactly **8 textures**. Any new state must either:
+  - Reuse free channels (`TopS.w`, `DeepS.z` or `.w`) → ✅ recommended, preserves codec, `mksave.js`, and baselines.
+  - Add a 9th texture + update the entire save/codec pipeline → ⚠️ only if >2 fields are strictly needed. Must document breakage impact.
+- **Conservation Laws:** Mass, momentum, and heat exchanges must be symmetrically written. No creation/destruction of energy or water mass across phase changes or land↔sea transfer.
+
+---
+
+## 2. Core Concept: Unified Cryosphere
+
+Treat all frozen water as a single substance with two fields:
+- `iceThk` — thickness `[m]`, conservative mass proxy (`× ρ_ice`)
+- `iceFrac` — fractional surface coverage `[0..1]`, sub-grid scale (critical at coarse resolution)
+
+Behavior is gated by the `land` mask:
+| Domain | Behavior |
+|--------|----------|
+| **Ocean** (`land=0`) | Floats, drifts with wind + surface current, jams against coasts, ridges on convergence. |
+| **Land** (`land=1`) | Accumulates as snow/ice when `T<0`, flows downslope via shallow-ice approximation, calves into adjacent ocean cells at the coast. |
+
+The land→sea transition is the unified mechanism for "glaciers sliding into the sea". No separate snow or ice-sheet modules.
+
+---
+
+## 3. Required Features
+
+1. **Thermodynamics:** Freezing/melting over both domains with latent heat budget.
+2. **Sea Ice Dynamics:** Wind + ocean-current-driven drift, flux-form conservative transport.
+3. **Glacial Flow on Land:** Downslope creep + coastal calving.
+4. **Coastal Jamming & Ridging:** No-flux BC at coast; convergence naturally raises `iceFrac→1` and thickens ice.
+5. **Scale-Aware Fractional Coverage:** `iceFrac` handles partial cell coverage without discrete iceberg tracking.
+6. **Rendering & Debug Views:** Thickness, fraction, ocean/land distinction, optional velocity overlay.
+7. **Save / Equilibrium / Validation Pipeline:** Stationary state verification, mass conservation tests, baseline regeneration if needed.
+
+---
+
+## 4. Climate Feedback Integration (in `COUPLE_FS`)
+
+All feedbacks must be energy/mass-consistent and applied symmetrically:
+
+| Feedback | Implementation Note |
+|----------|---------------------|
+| **Albedo** | Replace existing formula with `α = mix(α_water, α_ice/α_snow, iceFrac)`. Thickness-dependent for clean vs dirty ice. |
+| **Insulation** | Scale air-sea heat/moisture fluxes by `(1 - insulation(iceThk, iceFrac))`. Thicker ice → weaker exchange. |
+| **Latent Heat** | `Q_lat = L_f · ρ_ice · d(iceThk)/dt` exchanged between `T_top` and `T_low`. Freezing warms (slows further freeze), melting cools. |
+| **Salinity & Freezing Point** | Ocean: `Tf ≈ -0.054·S_top`. Brine rejection on freeze (`↑S_top`), freshening on melt. Land: `Tf ≈ 0°C`. |
+| **Precipitation Routing** | When `T_low < 0°C`, precipitation adds to `iceThk` instead of runoff/evaporation. |
+| **Freshwater Runoff** | Melt/calving flux modifies `S_top` in coastal cells → affects circulation. |
+
+---
+
+## 5. Open Decisions (Agent's Discretion)
+
+The agent must choose one path per item, justify it physically/computationally, and implement accordingly. Recommendations are starting points, not mandates.
+
+| # | Decision | Options | Recommendation |
+|---|----------|---------|----------------|
+| 5.1 | **Representation** | Eulerian field on grid · Lagrangian particles (reuse existing pool) · Hybrid | → Eulerian (`iceThk`/`iceFrac`). Naturally conserves mass, fits ping-pong, survives save/load. Particles only for optional iceberg viz. |
+| 5.2 | **Storage Layout** | Reuse `TopS.w` / `DeepS.z` · Add 9th texture + update codec/save/baselines | → Channel reuse. Verify no other pass reads these channels before committing. |
+| 5.3 | **Sea Ice Rheology** | Free drift with wind/ocean drag · Simplified ridging/jamming · Full EVP/ELP | → Free drift + natural jamming from flux-form BCs. EVP is overkill for coarse grid and risks equilibrium instability. |
+| 5.4 | **Glacial Flow Model** | SIA (`q ∝ iceThk^n · ∇surface`, n≈3) · Diffusive downslope relaxation | → SIA. Standard for continental shields, mass-conserving on FV grids, stops naturally at coast. |
+| 5.5 | **Calving Scheme** | Threshold-based mass transfer to adjacent ocean cell when `coastDist < threshold` or neighbor is sea | → Agent's choice of trigger (thickness, gradient, or adjacency). Must conserve mass exactly. |
+| 5.6 | **Coastal BC** | Zero normal velocity at coast · Tangential slip allowed · Full no-slip | → Zero normal flux for both ice and ocean. Tangential may be preserved for realism but damp if unstable. |
+
+---
+
+## 6. Validation & Testing Protocol
+
+Strict adherence to `AGENTS.md` requirements:
+- **Save/Equilibrium:** Fields must load from save or spin up from zero. Stationary state required (RMS stable over N steps, no runaway growth/melt).
+- **Conservation Tests:** 
+  - Pure transport → constant total ice mass
+  - Calving land→sea → mass conserved exactly
+  - Phase change → energy budget balanced (`dT_top` + `dT_low` + latent = 0)
+- **Stability:** CFL checks on freezing/drift, clamps on `iceThk`/`iceFrac`, zero NaNs, 0 GL errors in `render.js`.
+- **Baselines:** If feedback shifts equilibrium, regenerate `harness/baselines` and document changes.
+
+---
+
+## 7. Rendering & Debug Views
+
+- **Overlay:** Opacity = `iceFrac`, brightness/tint ∝ `iceThk`. Ocean ice = light blue, land ice/snow = white (masked by `land`).
+- **Debug Modes:** Thickness map, fractional coverage, velocity field (if stored), calving flux heatmap.
+- **Optional:** Reuse existing particle pool (`STATE_FS`/`TRAIL_FS`) for iceberg visualization only. Does not affect climate state.
+
+---
+
+## 8. Implementation Scaffolding & Reference
+
+### 8.1 Proposed Shader Passes
+| Pass | Responsibility |
+|------|----------------|
+| `ICE_THERMO_FS` | Updates `iceThk`/`iceFrac` from `T_top`, `S_top`, `T_low`, radiation, precipitation. Handles phase change with latent heat budget. |
+| `ICE_DRIFT_FS` | Solves momentum for sea ice (`u_ice`). Flux-form advection of mass/fraction. Applies wind drag, ocean drag, Coriolis, pressure gradient `∇(bed+iceThk)`. No-flux at coast. |
+
+### 8.2 Key Equations & Constants
+- Freezing point: `Tf = -0.054·S_top` [°C]
+- Latent heat: `L_f ≈ 3.34e5 J/kg`, `ρ_ice ≈ 917 kg/m³`
+- Wind drag: `τ_air = C_d · ρ_air · |Δu| · Δu`
+- Ocean drag: `τ_water = C_w · ρ_water · |Δu| · Δu`
+- SIA flux: `q = 2·A·ρ·g·(1-φ)^n · H^(n+1) · (-∇s)^n`, `n≈3`, `s = bedElev + iceThk`
+
+### 8.3 Integration Points in `COUPLE_FS`
+- Replace albedo formula (~line 1505) with ice-mixing version
+- Scale heat/moisture fluxes by insulation factor
+- Add latent heat term to `dT_top` and `dT_low` budgets
+- Update `S_top` for brine rejection/freshening & freshwater runoff
+- Route precipitation to `iceThk` when `T<0`
+
+### 8.4 Performance Budget
+- New passes must not exceed cost of current ocean dynamics (~1–2 passes).
+- Consider conditional skipping for non-ice cells (`iceFrac < ε`).
+- All operations must fit within WebGL2 / GLSL ES 3.00 fragment shader limits.
+
+---
+
+## 9. Expected Deliverables Format
+
+Provide your response in this structure:
+1. **State Layout:** New uniforms & texture channel mapping (with justification for chosen storage).
+2. **Shader Architecture:** Pseudocode/structure for `ICE_THERMO_FS` and `ICE_DRIFT_FS`, including ping-pong integration.
+3. **Coupling Integration:** Exact modification points in `COUPLE_FS` with conservation notes for each feedback loop.
+4. **Physics & Constants:** Chosen rheology/flow model, key equations, tuned coefficients, and physical justification.
+5. **Coastal Handling:** Jamming, calving trigger, no-flux BC implementation details.
+6. **Cost & Optimization:** Estimated pass count vs current pipeline, conditional skip strategies, memory footprint.
+7. **Assumptions & Open Questions:** Explicit decisions made, known limitations at coarse resolution, and questions for review.
+
+---
+*Agent autonomy is preserved in §5. All other sections define hard constraints, conservation requirements, and integration boundaries. Choose implementations that preserve the existing equilibrium stability while adding physically consistent cryosphere feedback.*

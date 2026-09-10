@@ -1,0 +1,49 @@
+Here's a direct comparison of my review (S20) with the pasted one (S21). Short version: the two reviews **agree on the safe, "obvious" issues** and **diverge on the risky ones** — S21 missed the two silent-failure risks I flagged (FBO bind order, texture-channel mapping), while S21 caught one ordering detail I trusted and one parameter mismatch I framed differently.
+
+## Shared findings (both caught)
+
+| Finding | S20 | S21 |
+|---|---|---|
+| `landFrac` dead code in `stepCO2` | ✅ #4 | ✅ #1 |
+| `REDUCE_FS` hardcodes `200000` loop bound | ✅ #2 | ✅ #3 |
+| Offline solver calibrates defaults (not guessed) | ✅ | ✅ Strength #1 |
+| Physically honest: reduced model = stable thermostat, no intrinsic ice-age cycle | ✅ | ✅ Strength #2 |
+| Backward compat (`co2On` default 0) | ✅ | ✅ Strength #3 |
+| No GPU atomics | ✅ | ✅ Strength #4 |
+| Bounds checking (no NaN) | ✅ | ✅ Strength #5 |
+| One-frame lag / frozen globals across ODE substeps | mentioned (aside) | ✅ #2 (dedicated) |
+
+## What S20 found that S21 missed
+
+1. **`computeGlobals` FBO bind order (potential silent corruption).** S21 never flagged this. The draw happens via `fullscreen('reduce',1,1)` *before* `gl.bindFramebuffer(fbo.reduce)`. If `fullscreen` doesn't bind the program's own FBO, every climate mean (`meanT/sstMean/landT/iceFreeLandFrac/suitability`) is read from the wrong target and the entire carbon cycle runs on garbage — while still producing finite, plausible-looking numbers that pass a casual check. This is the single highest-risk finding in either review and S21 omitted it.
+
+2. **Texture-channel mapping assumptions.** S21 didn't raise it. The shader assumes `uCellA.w`=area, `uCellB.w`=land, `uTopS.y`=temperature, `uIce.y`=ice. If the engine stores these elsewhere, `landT`/`iceFreeLandFrac`/both suitabilities are wrong *without any error*. I recommended a `co2_test.js` assertion that pins the mapping down — S21's validation section takes the 234/721/285 numbers at face value.
+
+3. **Biosphere flux dwarfs geology → V₀ won't balance the live sim as advertised.** S20's modeling note: with `bioRate≈8` (live) the biosphere moves ~1–4 ppm/yr while volcanism/weathering are ~0.05 ppm/yr (~50–100× smaller). So the "Volcanism = Weathering" headline balance is only true after the biosphere saturates, and the baked `V0=0.056` (derived from the reduced solver) likely will **not** reproduce mean CO₂ = 280 in the live spatial sim. S21 touches this only as a benign parameter mismatch (see below) and calls it "no bug."
+
+4. **Biomass snaps to equilibrium (sub-step cap under-resolves fast growth).** S20 #5: `n=ceil(years/50)` caps at 50 yr, but biosphere timescale is ~0.1 yr (~500× under-resolved), so biomass jumps to carrying capacity in 2–4 frames rather than visibly "growing" over accelerated time. S21's #2 is the adjacent "globals frozen across substeps" point, not this one.
+
+## What S21 found that S20 under-weighted / missed
+
+1. **`stepCO2` insertion ordering vs original line 1124.** S21 (#4) explicitly says it needs a one-line check against the original file to confirm it's *before* `this.step()`, not after. S20 trusted the diff's `1124a1207` + the harness's `stepCO2()`-before-substeps ordering. S21 is right that "trust the diff context" isn't proof — worth the one-line confirm (low risk, but cheap).
+
+2. **Explicit `B0` parameter mismatch.** S21 (#5) points out the solver uses `B0: 0.5` while the live default is `bioRate: 8`. S20 noted the *consequence* (live biosphere ~16× solver → V₀ re-tune needed) but didn't quote the literal `0.5 vs 8` discrepancy. This is the concrete number behind S20's modeling concern.
+
+## Where we disagree
+
+- **S21 calls the `B0=0.5` vs `bioRate=8` mismatch "no bug."** S20 disagrees in substance: because the solver *calibrates* `V0=0.056` in a world where the biosphere removes ~0.5/yr but the live world removes ~8/yr, the baked equilibrium is computed for the wrong biosphere strength. The doc's promise "long-run mean CO₂ → 280" should be read as true only for the reduced model, and the live default will need re-tuning. S21 understates this; I'd treat it as an action item, not a footnote.
+- **S21's "insertion ordering needs verification"** — S20 considers this lower-risk than S21 implies, since the harness reproduces the intended `stepCO2`-before-`step` order, but concedes the one-line confirm is worthwhile.
+
+## Bottom line
+
+S21 is the cleaner, more polished write-up of the *expected* behavior and is correct on the shared/low-risk items. But **S20 is the more dangerous-review-complete one**: it caught the two silent-failure modes (FBO bind order, texture channels) that would let the feature "work" while computing nonsense, plus the modeling caveat that the live biosphere is an order of magnitude stronger than the solver assumed.
+
+Combined actionable checklist for the author, in priority order:
+1. **Verify `fullscreen()` binds `fbo.reduce`** (or move `bindFramebuffer` before the draw) — S20 #1.
+2. **Assert texture channels** (`uCellA.w`, `uCellB.w`, `uTopS.y`, `uIce.y`) in `co2_test.js` — S20 #3.
+3. **Confirm `stepCO2` is before `this.step()`** at original ~1124 — S21 #4.
+4. **Raise/replace the `200000` bound** — both.
+5. **Remove dead `landFrac`** — both.
+6. **Re-tune `V0` live** given biosphere is ~16× the solver's strength — S20 modeling + S21 #5.
+
+Neither review alone is sufficient; the author should apply the union.
