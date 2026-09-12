@@ -10,6 +10,7 @@
    usage: node noise.js --level=5 --steps=500 [--params='{...}'] [--series]
 */
 const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 const path = require('path');
 const fs = require('fs');
 
@@ -17,7 +18,7 @@ const arg = (k, d) => {
   const hit = process.argv.find(a => a.startsWith(`--${k}=`));
   return hit ? hit.slice(k.length + 3) : d;
 };
-const DIR = path.resolve(arg('dir', '/home/user/project'));
+const DIR = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
 const LEVEL = parseInt(arg('level', '5'), 10);
 const STEPS = parseInt(arg('steps', '500'), 10);
 const PATCH = JSON.parse(arg('params', '{}'));
@@ -30,13 +31,7 @@ const MARKS = MARKS_ARG ? MARKS_ARG.split(',').map(Number) : null;
 const OUT = arg('out', '');
 
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
-           '--use-angle=swiftshader', '--disable-gpu-sandbox',
-           '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
-    protocolTimeout: 0,   // long step loops run inside one evaluate() call
-  });
+  const browser = await launchBrowser(puppeteer, { protocolTimeout: 0 });   // long step loops run inside one evaluate() call
   const page = await browser.newPage();
   const logs = [];
   page.on('pageerror', e => logs.push('PAGEERROR ' + e.message));

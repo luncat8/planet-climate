@@ -1,9 +1,10 @@
 /* diag_static.js — measure whether the velocity field actually MOVES over time
  * for a loaded saved state, and whether it responds to dt / Coriolis / scheme.
  *
- *   node diag_static.js --dir=/media/sf_1/planet242/planet --steps=400
+ *   node diag_static.js [--dir=../planet] --steps=400
  */
-const puppeteer = require('/media/sf_1/planet242/harness/node_modules/puppeteer');
+const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 const fs = require('fs');
 const path = require('path');
 
@@ -11,17 +12,12 @@ function arg(name, dflt) {
   const hit = process.argv.find(a => a.startsWith('--' + name + '='));
   return hit ? hit.slice(name.length + 3) : dflt;
 }
-const DIR = arg('dir', '/media/sf_1/planet242/planet');
-const SAVE = arg('save', '/media/sf_1/planet242/planet/planet_state.js');
+const DIR = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
+const SAVE = arg('save', path.join(DIR, 'planet_state.js'));
 const STEPS = parseInt(arg('steps', '400'), 10);
 
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new', protocolTimeout: 600000,
-    args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
-           '--use-angle=swiftshader', '--disable-gpu-sandbox', '--enable-webgl',
-           '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
-  });
+  const browser = await launchBrowser(puppeteer, { protocolTimeout: 600000 });
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', e => errs.push('PAGEERROR ' + e.message));

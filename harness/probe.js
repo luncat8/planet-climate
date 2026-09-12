@@ -1,10 +1,7 @@
 const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox','--enable-unsafe-swiftshader','--use-gl=angle','--use-angle=swiftshader',
-           '--disable-gpu-sandbox','--enable-webgl','--ignore-gpu-blocklist']
-  });
+  const browser = await launchBrowser(puppeteer);
   const page = await browser.newPage();
   page.on('console', m => console.log('  [page]', m.text()));
   const r = await page.evaluate(() => {

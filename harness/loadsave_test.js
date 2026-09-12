@@ -6,10 +6,10 @@
  * <script> tag (works from file://). Here we read it as text and run it through
  * readPlanetStateJS() (defined in engine.js) — the same path the app uses.
  *
- *   node loadsave_test.js --dir=/media/sf_1/planet242/planet \
- *        --save=/media/sf_1/planet242/harness/saves/equilibrium_L5.js
+ *   node loadsave_test.js [--dir=../planet] [--save=saves/equilibrium_L5.js]
  */
-const puppeteer = require('/media/sf_1/planet242/harness/node_modules/puppeteer');
+const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 const fs = require('fs');
 const path = require('path');
 
@@ -17,16 +17,11 @@ function arg(name, dflt) {
   const hit = process.argv.find(a => a.startsWith('--' + name + '='));
   return hit ? hit.slice(name.length + 3) : dflt;
 }
-const DIR = arg('dir', '/media/sf_1/planet242/planet');
+const DIR = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
 const SAVE = arg('save', path.resolve(__dirname, 'saves', 'equilibrium_L5.js'));
 
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new', protocolTimeout: 600000,
-    args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
-           '--use-angle=swiftshader', '--disable-gpu-sandbox', '--enable-webgl',
-           '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
-  });
+  const browser = await launchBrowser(puppeteer, { protocolTimeout: 600000 });
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', e => errs.push('PAGEERROR ' + e.message));

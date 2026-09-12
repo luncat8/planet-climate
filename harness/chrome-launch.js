@@ -38,15 +38,17 @@ function chromeArgs(extra) {
 async function launchBrowser(puppeteer, opts) {
   opts = opts || {};
   const bin = chromeBin();
-  if (!bin) {
-    throw new Error('no Chromium found: run harness/setup_chrome.sh first ' +
-      '(or export CHROME_BIN=/path/to/chromium)');
-  }
-  // The bundled libnss3 lives next to the binary (no $ORIGIN rpath), so make
-  // sure the child process resolves it.
-  const dir = path.dirname(bin);
-  if (/tmp\/chrome/.test(dir) || fs.existsSync(path.join(dir, 'libnss3.so'))) {
-    process.env.LD_LIBRARY_PATH = dir + (process.env.LD_LIBRARY_PATH ? ':' + process.env.LD_LIBRARY_PATH : '');
+  // No provisioned Chromium (setup_chrome.sh / CHROME_BIN): fall back to
+  // puppeteer's own browser (a full `npm i puppeteer` downloads one). This
+  // keeps owner machines with a regular puppeteer install working while
+  // sandboxes use the provisioned binary.
+  if (bin) {
+    // The bundled libnss3 lives next to the binary (no $ORIGIN rpath), so
+    // make sure the child process resolves it.
+    const dir = path.dirname(bin);
+    if (/tmp\/chrome/.test(dir) || fs.existsSync(path.join(dir, 'libnss3.so'))) {
+      process.env.LD_LIBRARY_PATH = dir + (process.env.LD_LIBRARY_PATH ? ':' + process.env.LD_LIBRARY_PATH : '');
+    }
   }
   // Back-to-back launches on a loaded 2-CPU box flake intermittently (the
   // child dies during startup handshake with no stderr — teardown/launch
@@ -59,11 +61,12 @@ async function launchBrowser(puppeteer, opts) {
       await new Promise(r => setTimeout(r, 5000));
     }
     try {
-      return await puppeteer.launch(Object.assign({
+      const launchOpts = Object.assign({
         headless: 'new',
-        executablePath: bin,
         args: chromeArgs(opts.args),
-      }, opts, { args: chromeArgs(opts.args) }));
+      }, opts, { args: chromeArgs(opts.args) });
+      if (bin) launchOpts.executablePath = bin;
+      return await puppeteer.launch(launchOpts);
     } catch (e) { lastErr = e; }
   }
   throw lastErr;

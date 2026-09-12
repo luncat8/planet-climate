@@ -1,0 +1,78 @@
+## The L6 button bug: confirmed, fixed, regression-checked
+
+Reported symptom: the L6 level button showed selected while the sim actually
+started on L5. Root cause in `planet/app.js`: `ui.level` was hardcoded to 6
+and `boot()` built the planet at `bootLevel = (st && st.level) ? st.level : 5`
+without ever syncing the two — and `planet/planet_state.js` is untracked, so a
+fresh boot builds L5 while `refreshDynamic()` lit the L6 button.
+
+Fixed (single source of truth = the grid that is actually built):
+- `boot()` now sets `ui.level = p.grid.level` and the HUD level span right
+  after construction; `refreshDynamic()` derives the button highlight from
+  `ui.planet.grid.level` instead of the UI's own idea of the level.
+- Two adjacent same-class bugs found by the new regression check and fixed:
+  * saves/imports of ANOTHER level failed with "save is level X, current grid
+    is level Y" — `loadSave()`/`importState()` now rebuild the grid to the
+    state's level before `applyState()`;
+  * tuning sliders were built before the planet existed and never re-aligned,
+    so loaded/persisted params showed stale thumb positions — `syncSliders()`
+    now runs at boot, after save load, and after import.
+
+Verification: new `harness/level_ui_check.js` (headless Chromium via
+chrome-launch) drives the real page: fresh boot lights L5, L6 click rebuilds +
+lights L6, cross-level snapshot/load round-trips (level, dropdown, clock all
+restored), state-file boot at L6 lights L6. 22/22 PASS. Gate unchanged:
+`BASELINES_DIR=baselines-swvk ./gate.sh` → L5/L6/L7 IDENTICAL
+(f3f718e5/50cbc2ae/23806737, nan=0), i.e. zero physics change.
+
+## Second UI-state bug the check exposed: off-grid slider defaults
+
+Seven PARAMS defaults did not sit on their slider step grid, so an
+`<input type=range>` silently snapped the thumb away from the actual param
+(omegaSpin, omegaOrbit, solar, surfacePressure, pgfTop, mixConv, oceanCO2K —
+e.g. solar 1361 on step 10 displayed 1360). Fixed by choosing steps the
+defaults land on exactly (omegaOrbit's 2π/86400 is not grid-able; step 1e-9
+bounds the snap error to ~5e-11). Defaults untouched → baselines untouched
+(proven by the identical gate above).
+
+## Performance / architecture investigation
+
+Fixed:
+- Harness portability: six scripts required puppeteer by absolute path
+  (`/media/sf_1/planet242/...`) and five more defaulted `--dir` to paths that
+  exist on no other machine (`/media/...`, `/home/user/project`, or
+  cwd-relative `../planet` so they only ran from inside `harness/`). All 17
+  harness scripts now default to the sibling `../planet` checkout (override
+  kept) and launch through `chrome-launch.js`, which gained a fallback to
+  puppeteer's own browser when no provisioned Chromium exists — owner machines
+  keep working, sandboxes use setup_chrome.sh's binary. Verified end-to-end in
+  the sandbox: mksave (L5, 1 day, round-trip clean), loadsave_test PASS,
+  co2_test PASS, render smoke 48/48 programs 0 failures, dti_check PASS
+  (worst 1.037×), bench_visual_smoke ERRORS [], bench_backend full matrix
+  closure 0.956–1.024, ns/cell ladder flat for explicit (1454/1433/1447).
+- Git hygiene: `planet/planet_state.js` (generated multi-MB save) and
+  `harness/saves/` are now gitignored so they can't be committed by accident.
+
+Investigated, not changed (belongs to plan 40, needs owner GPU or rule-2
+re-approval):
+- Implicit scheme runs the FULL `implicitIters` (default 10) Jacobi passes in
+  the UI because early-exit needs a residual readback per iteration (pipeline
+  stall — why `trackResidual` defaults off). The harness's early-exit shows
+  convergence at 6–7 iters, so ~30–40 % of implicit Jacobi work is wasted.
+  Fix path: P5.2 timestamp queries (no stall) or a coarsened residual check;
+  early-exit is sub-1e-6 but not bit-identical → rule 2 applies.
+- Implicit ns/cell inflates L5→L7 (3006→2876→3141, +4.5 % over L5) while
+  explicit stays flat — the per-fragment cost jump the WebGPU port (P5.1)
+  targets; reproduced here in the SwiftShader-relative bench.
+- `computeGlobals()` still stalls the pipeline with a synchronous 4-px
+  readPixels at its sim-time cadence while co2On (documented P1.2 cadence);
+  async one-cycle-late readback is P6.2 territory.
+- Minor, noted only: `sunDir()`/`decl()` allocate per substep inside
+  `couplePass` (small GC churn at ×128); `readPlanetStateJS()` evaluates
+  imported .js via `new Function` (documented file:// design; scope limited
+  to files the user imports).
+
+Carry-overs C1–C6/C8 from `40-improvement-plan-webgpu.md` are untouched and
+still need the owner GPU; nothing in this session changes what they measure
+except the slider steps (UI-only) and the harness launch path (semantics
+unchanged).

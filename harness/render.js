@@ -9,6 +9,7 @@
    usage: node render.js [--level=5] [--params='{"bathyMode":1}']
 */
 const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 const path = require('path');
 const fs = require('fs');
 
@@ -16,16 +17,12 @@ const arg = (k, d) => {
   const hit = process.argv.find(a => a.startsWith(`--${k}=`));
   return hit ? hit.slice(k.length + 3) : d;
 };
-const DIR = path.resolve(arg('dir', '/home/user/project'));
+const DIR = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
 const LEVEL = parseInt(arg('level', '5'), 10);
 const PATCH = JSON.parse(arg('params', '{}'));
 
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--use-gl=swiftshader', '--enable-unsafe-swiftshader',
-           '--disable-dev-shm-usage'],
-  });
+  const browser = await launchBrowser(puppeteer);
   const page = await browser.newPage();
   const logs = [];
   page.on('console', m => { const t = m.text(); if (/error|ERROR|WebGL/.test(t)) logs.push(t); });

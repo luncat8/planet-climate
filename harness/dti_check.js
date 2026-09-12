@@ -35,7 +35,7 @@ const SIMT  = parseFloat(arg('simt', '259200'));   // 3 days [s]
 const LEVEL = parseInt(arg('level', '5'), 10);
 const TOL   = parseFloat(arg('tol', '1.3'));
 const CACHE = process.env.DTI_CACHE || '/tmp/dti';
-const DIR   = '/media/sf_1/planet242/planet';
+const DIR   = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
 const HARNESS = path.join(__dirname, 'harness.js');
 const DTS = [10, 30, 60, 120, 300];
 

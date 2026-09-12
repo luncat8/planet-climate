@@ -2,6 +2,7 @@
    usage: node snap.js --mode=16 --out=/home/user/shots/depth.png [--equi]
 */
 const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 const path = require('path');
 const fs = require('fs');
 
@@ -9,7 +10,7 @@ const arg = (k, d) => {
   const hit = process.argv.find(a => a.startsWith(`--${k}=`));
   return hit ? hit.slice(k.length + 3) : d;
 };
-const DIR = path.resolve(arg('dir', '/home/user/project'));
+const DIR = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
 const LEVEL = parseInt(arg('level', '6'), 10);
 const MODE = parseInt(arg('mode', '16'), 10);
 const STEPS = parseInt(arg('steps', '200'), 10);
@@ -20,11 +21,7 @@ const W = parseInt(arg('w', EQUI ? 1024 : 700), 10);
 const H = parseInt(arg('h', EQUI ? 512 : 700), 10);
 
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--use-gl=swiftshader', '--enable-unsafe-swiftshader',
-           '--disable-dev-shm-usage'],
-  });
+  const browser = await launchBrowser(puppeteer);
   const page = await browser.newPage();
   await page.setViewport({ width: W, height: H });
   await page.setContent(`<style>body{margin:0;background:#05070d}</style><canvas id="c" width="${W}" height="${H}"></canvas>`);

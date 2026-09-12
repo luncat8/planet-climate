@@ -11,13 +11,14 @@
  * magnitude does not depend on dt. It also exercises the SL path for stability.
  *
  * Usage:
- *   node air_dt_sweep.js --dir=/media/sf_1/planet242/planet
+ *   node air_dt_sweep.js [--dir=../planet]
  *                          [--level=4] [--time=172800] [--dts=0.5,1,2,4,8]
  *                          [--advects=0,1] [--tol=0.10] [--out=file.json]
  *
- * The --dir flag is REQUIRED (there is no default project symlink).
+ * --dir defaults to the sibling ../planet checkout.
  */
 const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 const path = require('path');
 const fs = require('fs');
 
@@ -44,13 +45,7 @@ const PATCH   = JSON.parse(arg('patch', '{}'));              // extra param over
       throw new Error('missing engine source ' + path.join(DIR, f));
   }
 
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    protocolTimeout: 600000,
-    args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
-           '--use-angle=swiftshader', '--disable-gpu-sandbox', '--enable-webgl',
-           '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
-  });
+  const browser = await launchBrowser(puppeteer, { protocolTimeout: 600000 });
   const page = await browser.newPage();
   const logs = [];
   page.on('console', m => logs.push(m.text()));

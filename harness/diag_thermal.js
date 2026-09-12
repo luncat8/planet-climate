@@ -1,18 +1,14 @@
 /* diag_thermal.js — does the moving sun actually perturb T/pressure/wind? */
-const puppeteer = require('/media/sf_1/planet242/harness/node_modules/puppeteer');
+const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 const fs = require('fs');
 const path = require('path');
 function arg(n, d) { const h = process.argv.find(a => a.startsWith('--' + n + '=')); return h ? h.slice(n.length + 3) : d; }
-const DIR = arg('dir', '/media/sf_1/planet242/planet');
-const SAVE = arg('save', '/media/sf_1/planet242/planet/planet_state.js');
+const DIR = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
+const SAVE = arg('save', path.join(DIR, 'planet_state.js'));
 
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new', protocolTimeout: 600000,
-    args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
-           '--use-angle=swiftshader', '--disable-gpu-sandbox', '--enable-webgl',
-           '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
-  });
+  const browser = await launchBrowser(puppeteer, { protocolTimeout: 600000 });
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', e => errs.push('PAGEERROR ' + e.message));

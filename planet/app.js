@@ -101,8 +101,11 @@ var ui = {
   planet: null,
   panel: true,
   tuning: false,
-  level: 6,
-  stats: { fps: 0, days: 0, cells: 0, level: 6 },
+  /* Fallback only: boot() syncs this to the grid level that was actually
+     built (planet_state.js level, or the fresh-init default). Do not rely on
+     this default matching the boot level. */
+  level: 5,
+  stats: { fps: 0, days: 0, cells: 0, level: 5 },
   err: null,
   // remembered sun rate so un-ticking "tidally locked" restores the old value
   lockedOrbit: 6.2831853 / 86400,
@@ -205,9 +208,13 @@ function refreshDynamic() {
   Object.keys(ui.streamlineChecks).forEach(function (i) {
     ui.streamlineChecks[i].checked = ((P.streamline >> +i) & 1) !== 0;
   });
+  /* Highlight comes from the grid that is actually built, not from the UI's
+     idea of the level — the two can diverge at boot (planet_state.js level,
+     fresh-init fallback) and when a save of another level is loaded. */
+  var curLevel = (ui.planet && ui.planet.grid) ? ui.planet.grid.level : ui.level;
   ui.levelBtns.forEach(function (b, i) {
     var l = 4 + i;
-    b.className = 'mbtn' + (ui.level === l ? ' on' : '');
+    b.className = 'mbtn' + (curLevel === l ? ' on' : '');
   });
   Object.keys(ui.checks).forEach(function (k) {
     ui.checks[k].checked = P[k] > 0.5;
@@ -276,8 +283,14 @@ function saveCurrent() {
 function loadSave(idx) {
   var p = ui.planet; if (!p) return;
   var s = ui.saves[idx]; if (!s) return;
-  try { p.applyState(s.state); }
+  try {
+    /* applyState() refuses a level mismatch, so re-align the grid to the
+       save's level first (applyState overwrites params/clock right after). */
+    if (s.state.level !== undefined && s.state.level !== p.grid.level) rebuild(s.state.level);
+    p.applyState(s.state);
+  }
   catch (e) { showError('Cannot load save: ' + (e && e.message ? e.message : e)); return; }
+  syncSliders();
   refreshDynamic();
 }
 function exportState() {
@@ -294,10 +307,13 @@ function importState(file) {
   r.onload = function () {
     try {
       var st = decodePlanetState(readPlanetStateJS(r.result));
+      /* applyState() refuses a level mismatch, so re-align the grid first. */
+      if (st.level !== undefined && ui.planet && st.level !== ui.planet.grid.level) rebuild(st.level);
       ui.planet.applyState(st);
       ui.saves.push({ name: file.name, state: st });
       rebuildSaveDropdown(String(ui.saves.length - 1));
       persistSaves();
+      syncSliders();
       refreshDynamic();
     } catch (e) { showError('Invalid state file: ' + (e && e.message ? e.message : e)); }
   };
@@ -842,6 +858,11 @@ function boot() {
       }
     };
     ui.planet = p;
+    /* Sync the UI to the level that was actually built. Until this ran, the
+       level buttons reflected ui.level (hardcoded 6) while a fresh boot builds
+       level 5 — so L6 looked selected while the sim ran L5. */
+    ui.level = p.grid.level;
+    if (ui.fpsEls.lvlSpan) ui.fpsEls.lvlSpan.textContent = String(ui.level);
     if (st && st.level && Array.isArray(st.A) && st.A.length === 8) {
       try {
         var decoded = decodePlanetState(st);
@@ -862,6 +883,9 @@ function boot() {
     }
     // Make the dropdown reflect the loaded default (active) instead of Reset.
     if (loadedState) rebuildSaveDropdown('0');
+    /* The sliders were created before the planet existed (so they hold PARAMS
+       defaults); align their positions to the params we actually booted with. */
+    syncSliders();
     refreshDynamic();
   } catch (e) {
     showError(e && e.message ? e.message : String(e));

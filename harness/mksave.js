@@ -7,22 +7,23 @@
  * equilibrium every time. The .js form loads via a plain <script> tag, so it
  * works from file:// without fetch/CORS.
  *
- *   node mksave.js --dir=/media/sf_1/planet242/planet --level=5 --days=20 \
- *                  --out=/media/sf_1/planet242/harness/saves/equilibrium_L5.js
+ *   node mksave.js [--dir=../planet] --level=5 --days=20 \
+ *                  [--out=saves/equilibrium_L5.js]
  *
  * The page context builds the Planet, runs `days` of simulated time, serializes
  * + encodes the state, then round-trips it (decode+apply) to prove the codec
  * works before the file is written.
  */
-const puppeteer = require('/media/sf_1/planet242/harness/node_modules/puppeteer');
+const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
+const { launchBrowser } = require('./chrome-launch');
 
 function arg(name, dflt) {
   const hit = process.argv.find(a => a.startsWith('--' + name + '='));
   return hit ? hit.slice(name.length + 3) : dflt;
 }
-const DIR = arg('dir', '/media/sf_1/planet242/planet');
+const DIR = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
 const LEVEL = parseInt(arg('level', '5'), 10);
 const DAYS = parseFloat(arg('days', '20'));
 const OUT = arg('out', path.resolve(__dirname, 'saves', 'equilibrium_L' + LEVEL + '.js'));
@@ -31,12 +32,7 @@ const OUT = arg('out', path.resolve(__dirname, 'saves', 'equilibrium_L' + LEVEL 
   for (const f of ['geodesics.js', 'shader.js', 'params.js', 'engine.js']) {
     if (!fs.existsSync(path.join(DIR, f))) throw new Error('missing engine source ' + f);
   }
-  const browser = await puppeteer.launch({
-    headless: 'new', protocolTimeout: 600000,
-    args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
-           '--use-angle=swiftshader', '--disable-gpu-sandbox', '--enable-webgl',
-           '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
-  });
+  const browser = await launchBrowser(puppeteer, { protocolTimeout: 600000 });
   const page = await browser.newPage();
   const errs = [];
   page.on('pageerror', e => errs.push('PAGEERROR ' + e.message));

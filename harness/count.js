@@ -1,8 +1,8 @@
 const puppeteer=require('puppeteer'); const path=require('path'); const fs=require('fs');
-const DIR=path.resolve('../planet');
+const { launchBrowser }=require('./chrome-launch');
+const DIR=path.join(__dirname,'..','planet');
 (async()=>{
-  const b=await puppeteer.launch({headless:'new',protocolTimeout:200000,
-    args:['--no-sandbox','--use-gl=swiftshader','--enable-unsafe-swiftshader','--disable-dev-shm-usage']});
+  const b=await launchBrowser(puppeteer,{protocolTimeout:200000});
   const page=await b.newPage(); const logs=[];
   page.on('console',m=>{const t=m.text(); if(/error|NaN|WebGL/i.test(t))logs.push(t);});
   page.on('pageerror',e=>logs.push('ERR:'+e.message));

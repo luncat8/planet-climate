@@ -11,6 +11,7 @@
  * the 24 h eddy field actually changes. Exit 2 otherwise.
  */
 const puppeteer = require('puppeteer');
+const { launchBrowser } = require('./chrome-launch');
 const path = require('path');
 const fs = require('fs');
 
@@ -30,13 +31,7 @@ const DT = parseInt(arg('dt', '60'), 10);
 const CHUNK = parseInt(arg('chunk', '800'), 10);
 
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    protocolTimeout: 0,
-    args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
-           '--use-angle=swiftshader', '--disable-gpu-sandbox', '--enable-webgl',
-           '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
-  });
+  const browser = await launchBrowser(puppeteer, { protocolTimeout: 0 });
   const page = await browser.newPage();
   page.setDefaultTimeout(0);
   const logs = [];

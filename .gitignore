@@ -1,5 +1,9 @@
 node_modules/
 harness/runs/
 harness/.chrome/
+harness/saves/
 *.log
 .DS_Store
+# Generated simulation save (canonical default state, machine-local; loaded
+# automatically by planet/index.html when present — see AGENTS.md).
+planet/planet_state.js

@@ -12,20 +12,24 @@ var PARAMS = {
   /* Physical spin rate (rad/s) — drives the real 3-D Coriolis force. A tidally
      locked planet still rotates once per orbit in the inertial frame, so this
      should generally stay non-zero even when omegaOrbit = 0. */
-  omegaSpin: { label: 'Spin Ω (Coriolis)',    default: 7.292e-5, min: 0, max: 3.6e-4, step: 1e-6, fmt: function (v) { return (v / 7.292e-5).toFixed(2) + '× Earth'; } },
+  /* step chosen so the default lands exactly on the slider grid (a range
+     input silently snaps off-grid values, desyncing thumb and param). */
+  omegaSpin: { label: 'Spin Ω (Coriolis)',    default: 7.292e-5, min: 0, max: 3.6e-4, step: 1e-8, fmt: function (v) { return (v / 7.292e-5).toFixed(2) + '× Earth'; } },
   /* Apparent angular rate (rad/s) of the sub-solar point sliding across the
      surface — i.e. the day/night cycle. Independent of omegaSpin: set to 0 to
      freeze the sun (tidal lock) while Coriolis keeps spinning. */
-  omegaOrbit:{ label: 'Sun angular rate',     default: 6.2831853 / 86400, min: 0, max: 3e-4, step: 1e-6,
+  /* 2π/86400 is not exactly grid-able; step 1e-9 bounds the snap error to
+     ~5e-11 (fractional day-length error < 1e-6). */
+  omegaOrbit:{ label: 'Sun angular rate',     default: 6.2831853 / 86400, min: 0, max: 3e-4, step: 1e-9,
                fmt: function (v) { return v > 1e-8 ? (6.2831853 / v / 3600).toFixed(1) + ' h/day' : 'frozen (locked)'; } },
-  solar:     { label: 'Solar constant',       default: 1361,  min: 800, max: 4000, step: 10,   fmt: function (v) { return v + ' W/m²'; } },
+  solar:     { label: 'Solar constant',       default: 1361,  min: 800, max: 4000, step: 1,   fmt: function (v) { return v + ' W/m²'; } },
   greenhouse:{ label: 'Greenhouse factor',    default: 0.55,  min: 0,   max: 1,    step: 0.01 },
   /* ---- PLANET-SCALE PHYSICS (Earth-tuned defaults; exposed so non-Earth
       bodies can be simulated). All downstream shaders read these as uniforms
       (uGravity, uSurfacePressure via uPlow/uPhigh, uRhoLo, planet-radius), so the
       default values reproduce the original Earth behaviour exactly. */
   gravity:       { label: 'Surface gravity',    default: 9.81,    min: 0.1, max: 30,     step: 0.01, fmt: function (v) { return v.toFixed(2) + ' m/s²'; } },
-  surfacePressure:{ label: 'Surface pressure',  default: 101325,  min: 0,   max: 2e7,    step: 1000, fmt: function (v) { return (v / 1000).toFixed(v < 1e4 ? 3 : 0) + ' kPa'; } },
+  surfacePressure:{ label: 'Surface pressure',  default: 101325,  min: 0,   max: 2e7,    step: 25, fmt: function (v) { return (v / 1000).toFixed(v < 1e4 ? 3 : 0) + ' kPa'; } },
   atmosDensity:  { label: 'Air density (low)',  default: 1.1,     min: 0,   max: 200,     step: 0.1,  fmt: function (v) { return v.toFixed(3) + ' kg/m³'; } },
   planetRadius:  { label: 'Planet radius',      default: 6371e3,  min: 1e5, max: 1e7,     step: 1e3,  fmt: function (v) { return (v / 1000).toFixed(0) + ' km'; } },
   nuVelAir:  { label: 'Air viscosity ν',      default: 1.6e5, min: 0,   max: 6e5,  step: 1e4,  fmt: function (v) { return v.toExponential(1); } },
@@ -129,7 +133,7 @@ var PARAMS = {
     tip: 'Suppresses grid-scale checkerboard noise. 0 reproduces the old A-grid stencil.' },
   fbStab:     { label: 'Gravity-wave stab.',  default: 30,    min: 0, max: 100, step: 1,
     tip: 'Forward-backward correction for the explicit gravity-wave pair, needed at level 6-7 or large dt. Self-limiting: it targets cells where the timestep is actually stiff, so raising it does not damp coarse grids. 0 = legacy explicit scheme.' },
-  pgfTop:     { label: 'PGF gain (top)',      default: 9.81,  min: 0, max: 20, step: 0.05,
+  pgfTop:     { label: 'PGF gain (top)',      default: 9.81,  min: 0, max: 20, step: 0.01,
                 fmt: function (v) { return v.toFixed(2); } },
   /* Multiplier on the deep layer's +g'*grad(eta) return-limb forcing. */
   pgfDeepGain:{ label: 'PGF gain (deep)',     default: 1.0,  min: 0, max: 4,  step: 0.05,
@@ -181,7 +185,7 @@ var PARAMS = {
                 fmt: function (v) { return v.toFixed(2); } },
   /* Mixing multiplier applied when the column is statically UNSTABLE
      (dense water over light water) -- i.e. convective overturning. */
-  mixConv:    { label: 'Convective mixing',   default: 50,    min: 1, max: 500, step: 5,
+  mixConv:    { label: 'Convective mixing',   default: 50,    min: 1, max: 500, step: 1,
                 fmt: function (v) { return v.toFixed(0) + '×'; } },
   cloudK:    { label: 'Cloud sensitivity',    default: 1.7,   min: 0,   max: 4,    step: 0.05 },
   noise:     { label: 'Symmetry-break noise', default: 0.02,  min: 0,   max: 0.2,  step: 0.005 },
@@ -297,7 +301,7 @@ var PARAMS = {
                   fmt: function (v) { return (+v).toFixed(3); } },
   weatherTsens: { label: 'Weathering T-sens', default: 0.055, min: 0, max: 0.2, step: 0.005,
                   fmt: function (v) { return (+v).toFixed(3) + '/K'; } },
-  oceanCO2K:    { label: 'Ocean CO₂ exchange', default: 8e-4, min: 0, max: 0.02, step: 5e-4,
+  oceanCO2K:    { label: 'Ocean CO₂ exchange', default: 8e-4, min: 0, max: 0.02, step: 1e-4,
                   fmt: function (v) { return (+v).toExponential(1); } },
   oceanCO2Tsens:{ label: 'Ocean solubility T-sens', default: 0.03, min: 0, max: 0.1, step: 0.005,
                   fmt: function (v) { return (+v).toFixed(3) + '/K'; } },
