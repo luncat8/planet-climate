@@ -1,0 +1,6 @@
+Auto substeps (fit 60 fps) not works
+
+i suggest change it from 1 checkbox to 2 checkboxes
+	[checked by default] not less 50fps, only decrease substeps (so it will not increase if goes to i.e. 70fps and 70 is less then rAF in case of 2nd checkbox checked)
+	not more rAF limited i.e. 144 or 180 , only increase substeps
+	if both disabled - use only substep slider

@@ -1,0 +1,61 @@
+# timer: performance.now() resolution 0.0050 ms (crossOriginIsolated=true, origin http:)
+# method: batch-averaged — every value is (batch span)/n with n grown on a x4 ladder so a batch spans >= 8.0 ms (>= 100 timer ticks, <= 1 % quantization); median over the time-boxed batches; one gl.finish() per batch. n/batch column = n; * marks a value whose batch hit the n cap (error > 1 %).
+# input: levels=5,6,7; substeps=10,128; particles(k)=16; particlesB(k)=64; runs=1
+# WARNING: 21 measurement(s) hit the batch cap before spanning 8.0 ms (marked *); their quantization error exceeds 1 %.
+
+level	scheme	substeps	cells	frame ms	draw ms	max fps	days/s	tracers ms	tracers ms @64k	n/batch
+L5	explicit	10	10,242	0.711	0.174	1406	9.764	0.195	0.726	16
+L5	explicit	128	10,242	6.10	0.174	164	14.575	0.195	0.726	4
+L5	implicit	10	10,242	1.43	0.174	701	4.869	0.195	0.726	16
+L5	implicit	128	10,242	16.43	0.174	61	5.410	0.195	0.726	1
+L6	explicit	10	40,962	1.67	0.246	599	4.161	0.226	0.763	16
+L6	explicit	128	40,962	18.81	0.246	53	4.724	0.226	0.763	1
+L6	implicit	10	40,962	3.64	0.246	275	1.910	0.226	0.763	4
+L6	implicit	128	40,962	40.48	0.246	25	2.196	0.226	0.763	1
+L7	explicit	10	163,842	10.00	0.487	100	0.695	0.409	0.753	1
+L7	explicit	128	163,842	112.58	0.487	9	0.790	0.409	0.753	1
+L7	implicit	10	163,842	18.72	0.487	53	0.371	0.409	0.753	1
+L7	implicit	128	163,842	219.22	0.487	5	0.405	0.409	0.753	1
+L5	explicit	auto→128		6.10		164	5.333			
+L5	implicit	auto→128		16.43		61	5.333			
+L6	explicit	auto→113		16.64		60	4.708			
+L6	implicit	auto→51		16.44		61	2.125			
+L7	explicit	auto→17		16.08		62	0.708			
+L7	implicit	auto→8		15.33		65	0.333			
+
+Per-pass breakdown (ms / frame)
+
+pass	L5	L6	L7
+ocean	0.020	0.054	0.336
+air	0.026	0.052	0.236
+cplO	0.018	0.038	0.098
+cplA	0.018	0.036	0.089
+ice	0.026	0.061	0.320
+step	0.105	0.175	0.990
+smooth	0.019	0.040	0.099
+vflow	0.021	0.051	0.349
+flow	0.071	0.090	0.110
+draw	0.153	0.179	0.238
+closure	1.02	1.38	1.09
+
+Draw sweep (ms)
+
+level	mode	streamline	draw ms	n/batch
+L5	m13	s0	0.024	1024
+L5	m13	s15	0.174	64
+L5	m0	s0	0.024	1024
+L5	m0	s15	0.175	64
+L5	m18	s0	0.036	256
+L5	m18	s15	0.197	64
+L6	m13	s0	0.093	256
+L6	m13	s15	0.247	64
+L6	m0	s0	0.093	256
+L6	m0	s15	0.246	64
+L6	m18	s0	0.087	256
+L6	m18	s15	0.243	64
+L7	m13	s0	0.426	64
+L7	m13	s15	0.509	16
+L7	m0	s0	0.429	64
+L7	m0	s15	0.517	16
+L7	m18	s0	0.398	64
+L7	m18	s15	0.475	64
