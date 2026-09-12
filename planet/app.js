@@ -82,6 +82,7 @@ function resetToDefaults() {
   GRID_PARAMS.forEach(function (k) { before[k] = p.params[k]; });
   var def = defaultParams();
   Object.keys(def).forEach(function (key) { p.params[key] = def[key]; });
+  if (p.resetAutoController) p.resetAutoController();
   return GRID_PARAMS.some(function (k) { return p.params[k] !== before[k]; });
 }
 
@@ -597,13 +598,17 @@ function buildUI() {
     ['iceOn', 'Sea ice & snow (cryosphere)'],
     ['iceOverlay', 'Ice overlay on map'],
     ['co2On', 'CO₂ carbon cycle'],
-    ['substepsAuto', 'Auto substeps (fit 60 fps)'],
+    ['substepsAutoDown', 'Auto substeps: keep ≥50 fps (decrease only)',
+      'Safety brake: when delivered FPS drops below 50, only decrease substeps.'],
+    ['substepsAutoUp', 'Auto substeps: fill rAF (increase only)',
+      'Use spare headroom only at the measured requestAnimationFrame/display ceiling.'],
     ['milankOn', 'Milankovitch orbital forcing'],
     ['bioOnLand', 'Biosphere on land'],
     ['bioOnWater', 'Biosphere on water'],
   ];
   chkDefs.forEach(function (d) {
     var lab = el('label', 'chk');
+    if (d[2]) lab.title = d[2];
     lab.appendChild(el('span', null, d[1]));
     var inp = document.createElement('input');
     inp.type = 'checkbox';
@@ -714,6 +719,7 @@ function buildUI() {
     var def = defaultParams();
     Object.keys(def).forEach(function (key) { ui.planet.params[key] = def[key]; });
     ui.planet.bounds = {};
+    if (ui.planet.resetAutoController) ui.planet.resetAutoController();
     syncSliders();
     refreshDynamic();
   };
@@ -876,7 +882,7 @@ function boot() {
     }
     if (!loadedState && ui.persistedSettings) {
       try {
-        p.params = Object.assign(defaultParams(), ui.persistedSettings.params);
+        p.params = paramsWithMigration(ui.persistedSettings.params);
         p.bounds = Object.assign({}, ui.persistedSettings.bounds || {});
         p.simTime = ui.persistedSettings.simTime || 0;
       } catch (e) { /* ignore corrupt settings */ }

@@ -421,8 +421,9 @@ resolutions 20× apart.
 
 **Still standing from all seven captures:** L5/L6 ×128 physics costs (5.7–5.9
 explicit, 14.8–15.3 implicit at L5; 17.2–17.3 explicit, 38.9–39.4 implicit at
-L6), the implicit/explicit ratio (2.3–2.7×), and P2's auto@60 acceptance
-(L6 auto→122/53, L7 auto→32/8, all ≥ 60 fps).
+L6), the implicit/explicit ratio (2.3–2.7×), and the historical P2 `auto@60`
+benchmark rows (L6 auto→122/53, L7 auto→32/8, all ≥ 60 fps). These rows do not
+validate the replaced interactive checkbox controller.
 
 **What the owner GPU measures.** Per-step costs from the ×128 rows of the
 single-shot captures `30-00`…`30-04` (linear-in-substeps fits; those four agree
@@ -456,11 +457,11 @@ Reading these (with `30-03`'s auto rows and per-pass table):
   draw ≥ 20 % reduced **or floor documented**" closes via the documented
   floor: no draw-side work can register below 0.1 ms on this rig. P3's
   `64k ≤ 2× 16k` likewise closes as *floor documented* (both counts < tick).
-- **P2 acceptance met.** `30-03` auto rows: L7 explicit auto→53 @ 60 fps, L7
-  implicit auto→6 @ ~63 fps (target ≥ 30) ✓; L6 explicit auto→116, implicit
-  auto→51, both at 60 fps ✓. Throughput honesty, as designed: at L7 explicit,
-  full ×128 delivers 2.389 d/s vs auto@60's 2.208 d/s — auto buys smoothness,
-  not maximum days/s.
+- **Historical P2 benchmark acceptance.** `30-03` offline rows: L7 explicit
+  auto→53 @ 60 fps, L7 implicit auto→6 @ ~63 fps; L6 explicit auto→116,
+  implicit auto→51. These are benchmark-model results, not the new interactive
+  controller. Throughput honesty remains visible: at L7 explicit, full ×128
+  delivers 2.389 d/s vs the historical auto@60 2.208 d/s.
 - **P4 before/after is legitimate owner evidence (single-run variance ~±5–8 %).**
   L6 explicit ×128 across `9755c73`→`6b92890`→`69292b4`→`30-03`:
   16.60 → 18.00 → 17.10 → 17.00 ms; L7 implicit 244.7 → 248.9 → 241.1 → 244.0.
@@ -634,30 +635,31 @@ owner-verify; L6 explicit back-to-back −0.6% (within 2%) ✓.
 
 ## Optimization log — Phase 2 (adaptive substep budget)
 
-- **P2.1 “Auto” substeps** (`engine.js` `loop()` + `effSubsteps()`): physics
-  wall time per frame feeds a 2 Hz EMA of ms/step (same tick as the fps
-  counter); `autoN = clamp(floor(16.667/ema), 1, 128)` — the largest n with
-  ms/step × n ≤ 16.7. Always measured (enabling auto mid-run picks sanely
-  immediately); the `substepsAuto` checkbox (default off) selects it.
-  `stepCO2` uses the effective n. Flow/draw overhead is deliberately NOT
-  reserved — on draw-bound rigs fps lands under 60, visible in the readout.
-  Verified headless: manual/auto selection, EMA blend, 1/128 clamps, stats
-  fields, co2On subs.
+- **P2.1 “Auto” substeps** (`engine.js` `loop()` + `effSubsteps()`): the old
+  single checkbox and physics-only `16.667 ms / EMA(ms/step)` controller were
+  removed. They could spend the whole frame budget on physics, ignore draw/flow
+  cost, and then miss the user's actual delivered FPS target.
+- Auto is now two independent one-way controls:
+  - **keep ≥50 fps (decrease only)** — checked by default; when delivered FPS
+    drops below 50, reduce the effective substep count, never increase it;
+  - **fill rAF (increase only)** — unchecked by default; increase only when
+    delivered FPS is at the measured rAF/display ceiling (60/120/144/180 Hz),
+    never merely because a 70-fps frame is below a 144-Hz ceiling.
+  The manual **Substeps / frame** slider remains the seed. With both checkboxes
+  off, it is the only source of N. The controller uses delivered FPS, so draw
+  and flow work are included; `stepCO2` uses the effective N.
 - **P2.3 days/s honesty**: UI stats line shows `×n · Y d/s` (`auto×n` when
-  auto); `bench.html` gains a `days/s` column (subs × dt × fps / 86400).
-- **P2.2 `auto@60` rows** in `bench.html`: per level × scheme, fits
-  frame(subs) = base + subs×stepMs through the extreme subs points and reports
-  the largest N with frame ≤ 16.7 (days/s capped at 60 fps = vsync-delivered
-  rate). Needs ≥ 2 subs values. Smoke-tested headless (rows render; vapor
-  stepMs clamps to 128 as designed).
+  auto); `bench.html` retains a `days/s` column (subs × dt × fps / 86400).
+- **P2.2 `auto@60` rows** in `bench.html` remain an offline benchmark model,
+  not the interactive controller: per level × scheme, they fit
+  `frame(subs) = base + subs×stepMs` through the extreme subs points and report
+  the largest N with frame ≤ 16.7. This keeps archived benchmark logs
+  comparable while the UI now targets an actual rAF ceiling and a 50-fps floor.
 
-Gate `p2-final`: s0 IDENTICAL (harness never calls `loop()`; manual path
-byte-identical behavior). **Owner acceptance MET (2026-09-12, capture 30-03):**
-L7 auto ≥ 30 fps at default dt ✓ (explicit auto→53 @ 60 fps; implicit auto→6 @
-~63 fps); L6 auto fps unchanged ✓ (explicit auto→116, implicit auto→51, both at
-60 fps — n < 128 because auto honestly fills the 16.7 ms budget, not because it
-degraded). days/s honesty visible per row (e.g. L7 explicit ×128 = 2.389 d/s
-vs auto@60 = 2.208 d/s).
+Gate `p2-final`: manual path remains unchanged because the harness does not call
+`loop()`; re-run the visual acceptance on the owner GPU after this UI-only
+controller change. The old capture's auto→N rows are historical `auto@60`
+benchmark results, not proof that the old interactive checkbox worked.
 
 ## Optimization log — Phase 3 (tracers & flow pools)
 

@@ -124,6 +124,20 @@ function Planet(canvas, level, opts) {
   this.vaoGlobe = null; this.vaoEmpty = null; this.ibo = null;
   this.raf = 0;
   this.frames = 0; this.lastFps = performance.now(); this.fps = 60;
+  /* Adaptive-substep controller state. `autoN` is intentionally transient:
+     the manual slider remains the seed whenever an auto direction is enabled,
+     and saved states never accidentally carry a stale controller decision. */
+  this.autoN = null;
+  this._autoActive = false;
+  this._autoSeed = null;
+  /* rAF has no portable refresh-rate API. Track the lower tail of delivered
+     callback gaps; once the page gets below its load limit this converges on
+     60/120/144/165/180 Hz without mistaking a slow simulation for a display
+     limit. A browser-provided screen.refreshRate, where available, wins. */
+  this._lastRafT = 0;
+  this._rafGaps = [];
+  this._screenRafHz = this._screenRefreshHz();
+  this.rafHz = this._screenRafHz;
   this.cam = { theta: 0.6, phi: 0.25, dist: 3.0 };
   this.drag = false; this.lx = 0; this.ly = 0;
   this.disposed = false;
@@ -578,6 +592,11 @@ Planet.prototype.reset = function () {
   this.globals = null; this.lastGlobalsT = null;   // P1.2: drop held globals
   /* Restart the stream so reset() is idempotent for a given seed. */
   this._rng = null;
+  /* A reset starts auto control from the current manual slider, not from the
+     previous level's measured optimum. */
+  this.autoN = null;
+  this._autoActive = false;
+  this._autoSeed = null;
   var p = this.prog.init.use();
   this.gridUniforms(p);
   p.f('uSeed', this.seedRand() * 1000)
@@ -659,10 +678,15 @@ Planet.prototype.applyState = function (st) {
     for (var k = 0; k < n; k++) { ice[k * 4] = a3[k * 4 + 2] || 0; ice[k * 4 + 1] = a3[k * 4 + 3] || 0; }
   }
   this.writeTex(this.ice[0], ice); this.writeTex(this.ice[1], ice); this.iceIdx = 0;
-  this.params = Object.assign(defaultParams(), st.params);
+  this.params = paramsWithMigration(st.params);
   this.bounds = Object.assign({}, st.bounds || {});
   this.simTime = st.simTime || 0;
   this.stepCount = st.stepCount || 0;
+  /* The saved manual slider is the new auto seed; do not restore a transient
+     controller value from the level that happened to be active before load. */
+  this.autoN = null;
+  this._autoActive = false;
+  this._autoSeed = null;
   this.vflowInit = false;    // recompute the vertical-flow field from loaded state
   this.smoothInit = false;   // and re-seed the velocity EMA
   return this;
@@ -1420,11 +1444,111 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
   gl.disable(gl.BLEND);
 };
 
-/* Effective substeps/frame: auto mode takes the 2 Hz EMA value, else manual. */
-Planet.prototype.effSubsteps = function () {
+/* Return a browser-provided refresh rate when one exists. `screen.refreshRate`
+   is not standard yet, so all normal browsers fall through to the measured rAF
+   cadence in _sampleRaf(). */
+Planet.prototype._screenRefreshHz = function () {
+  try {
+    var s = (typeof screen !== 'undefined') ? screen : null;
+    var hz = s && Number(s.refreshRate);
+    return isFinite(hz) && hz >= 30 && hz <= 360 ? hz : 0;
+  } catch (e) { return 0; }
+};
+
+/* Estimate the display/rAF ceiling from the fastest tenth of recent callback
+   gaps. A slow simulation produces long gaps, so accept only a recognizable
+   display cadence; otherwise a loaded 70-fps page could be mistaken for a
+   70-Hz display and the increase-only checkbox would add work incorrectly.
+   Keep this estimate separate from `fps`: 70 delivered fps on a 144-Hz display
+   is healthy, but it is not enough headroom to turn on more physics work. */
+Planet.prototype._sampleRaf = function (now) {
+  if (this._lastRafT > 0) {
+    var gap = now - this._lastRafT;
+    if (gap >= 2 && gap <= 1000) {
+      this._rafGaps.push(gap);
+      if (this._rafGaps.length > 120) this._rafGaps.shift();
+      if (!this._screenRafHz) {
+        var a = this._rafGaps.slice().sort(function (x, y) { return x - y; });
+        if (a.length >= 8) {
+          var q = a[Math.floor((a.length - 1) * 0.10)];
+          var measured = 1000 / q;
+          var common = [60, 75, 90, 100, 120, 144, 165, 180, 240];
+          var best = 0, err = Infinity;
+          for (var i = 0; i < common.length; i++) {
+            var e = Math.abs(measured - common[i]);
+            if (e < err) { err = e; best = common[i]; }
+          }
+          /* A 1.5% window absorbs timer/vsync jitter but rejects 70 as 75. */
+          if (err <= Math.max(2, best * 0.015)) this.rafHz = best;
+        }
+      }
+    }
+  }
+  this._lastRafT = now;
+};
+
+/* Forget the transient adaptive decision after a preset/defaults operation.
+   The next frame starts from the current manual slider. */
+Planet.prototype.resetAutoController = function () {
+  this.autoN = null;
+  this._autoActive = false;
+  this._autoSeed = null;
+};
+
+/* Keep the manual slider as the seed. If both directions are disabled this is
+   exactly the old/manual behaviour; toggling an auto direction back on starts
+   from the slider again rather than from a stale value from another level. */
+Planet.prototype._syncAutoState = function () {
   var P = this.params;
-  if (P.substepsAuto > 0.5) return this.autoN || 8;
-  return Math.max(1, P.substeps | 0);
+  var down = P.substepsAutoDown > 0.5;
+  var up = P.substepsAutoUp > 0.5;
+  var active = down || up;
+  var manual = Math.max(1, Math.min(128, P.substeps | 0));
+  if (!active) {
+    this._autoActive = false;
+    return false;
+  }
+  if (!this._autoActive || this._autoSeed !== manual || !isFinite(this.autoN)) {
+    this.autoN = manual;
+    this._autoSeed = manual;
+    this._autoActive = true;
+  }
+  return true;
+};
+
+/* One-way controller with a wide, intentional hysteresis band:
+   - below 50 delivered FPS: only the safety checkbox may reduce N;
+   - at the measured rAF ceiling: only the headroom checkbox may increase N.
+   There is no fit-to-60 rule anymore, so a 70-fps frame on a 144-Hz display
+   neither increases nor decreases the configured physics work. */
+Planet.prototype.updateAutoSubsteps = function () {
+  var P = this.params;
+  if (!P.running || !this._syncAutoState()) return;
+  var n = this.autoN;
+  if (P.substepsAutoDown > 0.5 && this.fps < 50 && n > 1) {
+    /* Scale down when badly overloaded, but always make progress by at least
+       one step. This is still decrease-only; the up checkbox is never used in
+       this branch. */
+    var nextDown = Math.floor(n * this.fps / 50);
+    this.autoN = Math.max(1, Math.min(n - 1, nextDown || n - 1));
+    return;
+  }
+  if (P.substepsAutoUp > 0.5 && n < 128 && this.rafHz > 0) {
+    /* rAF itself caps the observed FPS, so "at or near" the ceiling is the
+       useful signal. Use a small tolerance for timer/vsync jitter; 70 < 144
+       remains decisively below it and cannot trigger an increase. */
+    var margin = Math.max(2, this.rafHz * 0.025);
+    if (this.fps >= this.rafHz - margin) {
+      this.autoN = Math.min(128, Math.max(n + 1, Math.ceil(n * 1.25)));
+    }
+  }
+};
+
+/* Effective substeps/frame: manual slider unless one of the two one-way auto
+   controls is enabled. */
+Planet.prototype.effSubsteps = function () {
+  if (!this._syncAutoState()) return Math.max(1, this.params.substeps | 0);
+  return this.autoN;
 };
 
 Planet.prototype.loop = function () {
@@ -1434,12 +1558,7 @@ Planet.prototype.loop = function () {
   var n = this.effSubsteps();
   if (P.running) {
     if (P.co2On > 0.5) this.stepCO2();
-    var t0 = performance.now();
     for (var i = 0; i < n; i++) this.step();
-    /* P2.1: accumulate physics time for the ms/step EMA (always measured, so
-       enabling auto mid-run picks a sane n immediately; unused when manual). */
-    this._physMsAcc = (this._physMsAcc || 0) + (performance.now() - t0);
-    this._physStepsAcc = (this._physStepsAcc || 0) + n;
     /* P3.2: skip invisible flow-viz work. drawTracers draws nothing when the
        streamline mask is 0 (both pools skipped), so freeze smooth + flow
        (their only consumer is the tracer advection); vflow still runs when a
@@ -1457,26 +1576,22 @@ Planet.prototype.loop = function () {
   this.frames++;
   this._effN = n;
   var now = performance.now();
+  this._sampleRaf(now);
   if (now - this.lastFps > 500) {
     this.fps = (this.frames * 1000) / (now - this.lastFps);
     this.frames = 0; this.lastFps = now;
-    /* P2.1: 2 Hz EMA of measured ms/step -> autoN = largest n with
-       ms/step x n <= 16.7 (clamped to the slider range). Flow/draw overhead
-       is NOT reserved, so on draw-bound rigs fps lands under 60 -- visible
-       in the fps readout (honest) rather than hidden. */
-    if ((this._physStepsAcc || 0) > 0) {
-      var sample = this._physMsAcc / this._physStepsAcc;
-      this._emaStepMs = this._emaStepMs ? (0.5 * this._emaStepMs + 0.5 * sample) : sample;
-      this._physMsAcc = 0; this._physStepsAcc = 0;
-    }
-    if (this._emaStepMs > 0)
-      this.autoN = Math.max(1, Math.min(128, Math.floor(16.667 / this._emaStepMs)));
+    /* Auto control reacts to delivered frame rate, including draw and flow
+       work. It never changes N merely because physics is cheap. */
+    this.updateAutoSubsteps();
     if (this.onStats) this.onStats({
       fps: this.fps, days: this.simTime / 86400,
       cells: this.grid.V, level: this.grid.level,
       co2On: P.co2On > 0.5, co2: P.co2, biomass: P.biomass, greenhouse: P.greenhouse,
       meanT: this.globals ? this.globals.meanT : null,
-      auto: P.substepsAuto > 0.5, effN: n, autoN: this.autoN || null,
+      auto: P.substepsAutoDown > 0.5 || P.substepsAutoUp > 0.5,
+      autoDown: P.substepsAutoDown > 0.5,
+      autoUp: P.substepsAutoUp > 0.5,
+      effN: n, autoN: this.autoN || null, rafHz: this.rafHz || null,
       daysPerSec: n * P.dt * this.fps / 86400,
     });
   }

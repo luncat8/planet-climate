@@ -8,7 +8,13 @@ var PARAMS = {
   // tunable (have min/max/step) -> become sliders
   dt:        { label: 'Timestep dt',          default: 60,   min: 1, max: 900, step: 1,   fmt: function (v) { return v + ' s'; } },
   substeps:  { label: 'Substeps / frame',     default: 8,     min: 1,   max: 128,    step: 1 },
-  substepsAuto:{ label: 'Substeps auto (2 Hz)',  default: 0 },
+  /* Adaptive substeps use measured delivered rAF FPS, not physics time alone.
+     The two one-way controls form a deliberate hysteresis band: the first is
+     the safety brake (default on), the second spends headroom only when the
+     display rAF is saturated. Keep these separate so a perfectly healthy
+     70-fps frame on a 144-Hz display does not make the solver add work. */
+  substepsAutoDown:{ label: 'Auto substeps: keep ≥50 fps (decrease only)', default: 1 },
+  substepsAutoUp:  { label: 'Auto substeps: fill rAF (increase only)',       default: 0 },
   /* Physical spin rate (rad/s) — drives the real 3-D Coriolis force. A tidally
      locked planet still rotates once per orbit in the inertial frame, so this
      should generally stay non-zero even when omegaOrbit = 0. */
@@ -473,6 +479,24 @@ function defaultParams() {
   return o;
 }
 
+/* Merge a saved/persisted parameter object over the current defaults and
+   migrate the old single auto checkbox. A saved `substepsAuto: 0` must not
+   silently turn into the new default safety brake being enabled, while new
+   saves should not retain the obsolete key. */
+function paramsWithMigration(src) {
+  var o = defaultParams();
+  src = src || {};
+  /* Preserve unknown legacy keys just as the old Object.assign() loader did;
+     they are harmless until a future engine gives one meaning. */
+  Object.keys(src).forEach(function (k) { o[k] = src[k]; });
+  if (src.substepsAutoDown === undefined && src.substepsAuto !== undefined)
+    o.substepsAutoDown = src.substepsAuto;
+  if (src.substepsAutoUp === undefined && src.substepsAuto !== undefined)
+    o.substepsAutoUp = 0;
+  delete o.substepsAuto;
+  return o;
+}
+
 /* Effective slider bounds for a key: per-instance override (from a preset)
    merged over the static PARAMS schema. */
 function boundsOf(p, key) {
@@ -519,10 +543,16 @@ function normalizePreset(src) {
 /* Backwards compatibility: the old single `omega` drove BOTH the Coriolis term
    and the sub-solar point, so an old preset/save maps onto both new keys. */
 function migrateKeys(m) {
-  if (!m || m.omega === undefined) return m;
+  if (!m || (m.omega === undefined && m.substepsAuto === undefined)) return m;
   var out = {}, k;
-  for (k in m) if (k !== 'omega') out[k] = m[k];
-  if (out.omegaSpin === undefined) out.omegaSpin = m.omega;
-  if (out.omegaOrbit === undefined) out.omegaOrbit = m.omega;
+  for (k in m) if (k !== 'omega' && k !== 'substepsAuto') out[k] = m[k];
+  if (m.omega !== undefined) {
+    if (out.omegaSpin === undefined) out.omegaSpin = m.omega;
+    if (out.omegaOrbit === undefined) out.omegaOrbit = m.omega;
+  }
+  if (m.substepsAuto !== undefined) {
+    if (out.substepsAutoDown === undefined) out.substepsAutoDown = m.substepsAuto;
+    if (out.substepsAutoUp === undefined) out.substepsAutoUp = 0;
+  }
   return out;
 }

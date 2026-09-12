@@ -103,7 +103,8 @@ on the `@sparticuz/chromium` 152 build).
 
 ## 5. Phase 7 — Polish, docs, soak (0.5 d)
 
-- `docs/BENCH.md`: new baselines, pass table, engine column, auto@60 semantics,
+- `docs/BENCH.md`: new baselines, pass table, engine column, offline auto@60
+  benchmark semantics, interactive auto's 50-fps/rAF two-checkbox semantics,
   smooth columns; archive phase logs; README performance section (current
   L5/L6/L7 numbers, what "auto" means, GPU needed for WebGPU).
 - **Equilibrium soak**: 1,500-day stationary run on the final defaults vs
