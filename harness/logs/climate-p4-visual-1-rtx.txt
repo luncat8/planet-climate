@@ -1,0 +1,59 @@
+# devicePixelRatio: 1.25
+Chrome/151
+# input: levels=5,6,7; substeps=10,128; particles(k)=16; particlesB(k)=64
+
+level	scheme	substeps	cells	frame ms	draw ms	max fps	days/s	tracers ms	tracers ms @64k
+L5	explicit	10	10,242	0.10	0.00	10000	69.444	0.00	0.00
+L5	explicit	128	10,242	4.00	0.00	250	22.222	0.00	0.00
+L5	implicit	10	10,242	0.70	0.00	1429	9.921	0.00	0.00
+L5	implicit	128	10,242	14.90	0.00	67	5.966	0.00	0.00
+L6	explicit	10	40,962	0.10	0.00	10000	69.444	0.00	0.00
+L6	explicit	128	40,962	17.00	0.00	59	5.229	0.00	0.00
+L6	implicit	10	40,962	0.70	0.00	1429	9.921	0.00	0.00
+L6	implicit	128	40,962	39.20	0.00	26	2.268	0.00	0.00
+L7	explicit	10	163,842	0.30	0.00	3333	23.148	0.00	0.00
+L7	explicit	128	163,842	37.20	0.00	27	2.389	0.00	0.00
+L7	implicit	10	163,842	23.30	0.00	43	0.298	0.00	0.00
+L7	implicit	128	163,842	244.00	0.00	4	0.364	0.00	0.00
+L5	explicit	auto→128		4.23		236	5.333		
+L5	implicit	auto→128		15.40		65	5.333		
+L6	explicit	auto→116		16.61		60	4.833		
+L6	implicit	auto→51		16.64		60	2.125		
+L7	explicit	auto→53		16.57		60	2.208		
+L7	implicit	auto→6		15.82		63	0.250		
+
+Per-pass breakdown (ms / frame)
+
+pass	L5	L6	L7
+ocean	0.033	0.033	0.280
+air	0.029	0.030	0.049
+cplO	0.040	0.042	0.056
+cplA	0.061	0.114	0.155
+ice	0.149	0.174	0.053
+smooth	0.003	0.005	0.003
+vflow	0.002	0.003	0.002
+flow	0.016	0.031	0.102
+blend	0.000	0.000	0.007
+draw	0.000	0.000	0.000
+
+Draw sweep (ms)
+
+level	mode	streamline	draw ms
+L5	m13	s0	0.00
+L5	m13	s15	0.00
+L5	m0	s0	0.00
+L5	m0	s15	0.00
+L5	m18	s0	0.00
+L5	m18	s15	0.00
+L6	m13	s0	0.00
+L6	m13	s15	0.00
+L6	m0	s0	0.00
+L6	m0	s15	0.00
+L6	m18	s0	0.00
+L6	m18	s15	0.00
+L7	m13	s0	0.00
+L7	m13	s15	0.00
+L7	m0	s0	0.00
+L7	m0	s15	0.00
+L7	m18	s0	0.00
+L7	m18	s15	0.00

@@ -97,10 +97,17 @@
       the <b>@Bk</b> column repeats it at the second particle count (pool rebuild between). <b>auto&rarr;N</b> rows (P2.2) fit
       frame(subs) through the measured substeps points and pick the largest N with frame ≤ 16.7 ms.
       <br><b>Draw sweep</b> (P4.1) isolates tracer-draw cost (s15−s0) and the L7 render path per mode.
-      <br>Valid on a <b>real GPU only</b>: headless software GL (SwiftShader) executes asynchronously and
-      <code>gl.finish()</code> doesn't block there, so this page would report submission cost, not GPU time.
-      For headless numbers use <code>harness/bench_backend.js</code> (forced differencing — see
+      <br>For headless numbers use <code>harness/bench_backend.js</code> (forced differencing — see
       <code>docs/BENCH.md</code>).
+      <br><b>Reading sub-tick rows:</b> this page's <code>performance.now()</code> is clamped to
+      0.1 ms (Chrome restricts timers to 100 µs on pages that are not cross-origin isolated —
+      a <code>file://</code> page never is). Any median of 0.00/0.10 ms (&ldquo;10000 fps&rdquo;) means
+      <i>&ldquo;under the timer tick&rdquo;</i> on <b>any</b> machine, GPU included — and on some
+      drivers small batches read even lower than their true cost because <code>gl.finish()</code>
+      returns before execution for sub-millisecond work. Read per-step cost from the
+      &times;128 rows (or the auto-fit slope), not from a &times;10 row; read 0.00 as
+      &ldquo;&lt; ~0.1 ms&rdquo;. What identifies software GL is the <code># renderer:</code> header
+      (and the WARNING line it triggers), never the row values.
       <br><b>When a run ends the page stops all simulation work:</b> the planet is disposed and the
       GL context is dropped, so the GPU process can't keep burning CPU on queued frames (the canvas
       goes blank on purpose). The copied report keeps the device strings captured at start; press
@@ -169,10 +176,12 @@
       deviceInfo.vendor = debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
     } catch (e) {}
     // Software renderers (headless SwiftShader, llvmpipe) execute async and
-    // gl.finish() doesn't block there: every number this page produces is
-    // submission cost, not GPU wall-clock. Flag it in the UI and in the
-    // copied payload so a headless capture can't be mistaken for GPU evidence
-    // (three archived logs already carried this signature unnoticed).
+    // gl.finish() doesn't block there: their numbers are submission cost, not
+    // GPU wall-clock. Flag it in the UI and in the copied payload so a real
+    // headless capture can't be mistaken for GPU evidence. (The renderer
+    // string is the ONLY reliable indicator: sub-tick rows like draw 0.00 /
+    // 10000 fps are the 0.1 ms performance.now() clamp on every platform —
+    // owner-GPU logs were once misread as SwiftShader on exactly that basis.)
     deviceInfo.software = /swiftshader|llvmpipe|softpipe|software/i.test(
       deviceInfo.renderer + ' ' + deviceInfo.vendor);
   }

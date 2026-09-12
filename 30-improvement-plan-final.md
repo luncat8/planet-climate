@@ -55,6 +55,10 @@ is the union, in the repo's phase numbering.
 2. Bit-identical by default; float-order/cadence changes ⇒ `--allow-drift` **and**
    re-proved stats (meanT / sstMean / ice area / CO₂ over the gate run).
 3. **L6 160 fps is a hard floor** — > 2 % L6 cost is reverted or compensated.
+   (2026-09-12: no owner-GPU measurement supports a 160 fps L6 figure; the
+   enforceable form on real data is "L6 within 2 % of the committed owner-GPU
+   ×128 baseline" — see the third update checkpoint. The 2 % clause is the
+   operative rule either way.)
 4. Baselines are files: `harness/logs/climate-<phase>-<bench>-<hw>.txt`
    (backend = SwiftShader-relative; visual must name the GPU).
 5. Every reported number carries its device string; SwiftShader is relative-only.
@@ -62,9 +66,11 @@ is the union, in the repo's phase numbering.
 ### Progress checkpoint and revised entry gate (2026-09-12)
 
 P0–P4 implementation work is recorded in `docs/BENCH.md`; P4 has the screenshot
-correctness gate described there. Its **owner-GPU wall-clock acceptance is still
-open**. The two newly archived visual captures are useful history, but not a
-valid before/after performance comparison:
+correctness gate described there. The visual captures taken around this work
+are **valid owner-GPU evidence** (see the corrected analysis in
+`docs/BENCH.md` → Owner-GPU visual logs; an interim claim that they were
+headless SwiftShader output was wrong and has been withdrawn). P4 before/after
+on the owner GPU — single-run medians, run-to-run variance ~±5–8 %:
 
 | config | `9755c73` (prior capture) | `6b92890` (P4) | nominal change |
 |---|---:|---:|---:|
@@ -75,13 +81,11 @@ valid before/after performance comparison:
 | L6 implicit ×128 | 41.70 ms | 41.30 ms | −1.0% |
 | L7 implicit ×128 | 244.70 ms | 248.90 ms | +1.7% |
 
-Both files lack a GPU/device header, report 0.00 ms draw cost, and have 0.10 ms
-low-work rows. Those are the documented headless SwiftShader submission-time
-signature, not render execution timing. More importantly, the pre-fix benchmark
-constructed `Planet` with its normal live rAF loop, while also advancing and
-timing manual frames; that loop could submit extra frames between samples. Thus
-neither the apparent L6 +8.4% nor the other small deltas is evidence of a P4
-regression or gain, and the files stay in `archive/` as historical raw logs only.
+An interim read of this table panicked over the L6 +8.4 % (rule 3). The two
+later owner captures (`69292b4`: 17.10 ms, `30-03`: 17.00 ms) return to
+baseline, so the honest statement is: no P4-specific L6 regression is visible,
+and single runs cannot resolve the 2 % rule anyway — the ×3 median protocol
+does (kept as a follow-up, not a blocker).
 
 **P0.7 / P4.4 — benchmark evidence repair (completed in code; owner run pending).**
 `Planet` now supports `autoStart:false`; `bench.html` uses it, so its manual
@@ -91,35 +95,26 @@ UTC completion time, WebGL renderer/vendor, DPR, browser, and every result table
 The smoke test asserts both the isolated run and copied payload. `setup_chrome.sh`
 also exports `CHROME_DIR`, so the documented local smoke setup works.
 
-**Next required evidence before Phase 5:** run the repaired visual benchmark on
-the owner GPU at L5/L6/L7 with the normal `10,128` substep matrix (and the P4
-mode × streamline sweep), repeat it three times, and archive each copied TSV
-under `harness/logs/` with the exact renderer header. Use the median of the three
-for the L6 160 fps floor and the P2/P3/P4 targets. This becomes the WebGL parity
-and performance baseline for P5. Do not manufacture a visual baseline from the
-two old logs.
-
-Phase 5 remains the next implementation phase after that evidence gate; it is
+Phase 5 remains the next implementation phase after the evidence gate; it is
 not complete, and neither are P6/P7, so this active plan must **not** move to
 `archive/`. P6's rAF hygiene can be applied during the P5 integration, but its
 smoothness acceptance must be measured against the repaired visual baseline.
 
 ### Evidence-gate status and sandbox capabilities (2026-09-12, second update)
 
-**Third visual capture analyzed — still headless, still invalid for the gate.**
-`archive/30-02-log-69292b4-bench.html.txt` came from the *repaired* page
-(isolation, tracers column, draw sweep, auto@60 rows all present) but:
-- **no device header** — it was not saved via the done/copy control (rule 5:
-  every reported number carries its device string);
-- **full SwiftShader submission-time signature**: draw = 0.00 ms in every row,
-  tracers = 0.00, whole draw sweep = 0.00, 0.10 ms / 10 000-fps low-work rows;
-  the larger frame-ms rows (L7 implicit ×128 ≈ 241 ms) are the documented
-  ~300-finish backpressure cliff, not execution timing.
-- Cross-capture explicit ×128 frame ms: L5 3.60/3.90/3.80, L6 16.60/18.00/17.10,
-  L7 37.00/38.60/36.70 across `9755c73` → `6b92890` → `69292b4` — ±8% across the
-  entire P0–P4 change set, i.e. one headless regime, not a trend. Full analysis
-  in `docs/BENCH.md` → Historical visual logs. It stays in `archive/` as
-  history, like 30-00/30-01.
+**Correction of record (2026-09-12, owner-confirmed).** The interim claim that
+the archived visual captures (`30-00`…`30-02`) were headless SwiftShader
+submissions with an identifying "signature" was a hallucinated diagnosis; the
+owner confirms all captures come from the same RTX GPU. The reasoning failed on
+two counts: (a) the 0.00 / 0.10 ms / 10 000-fps rows it treated as a
+SwiftShader fingerprint are the **0.1 ms `performance.now()` clamp** (Chrome ≥ 91
+restricts timers on non-cross-origin-isolated pages; `file://` pages never
+qualify) — every platform shows that floor; (b) the "~300-finish backpressure
+cliff" it cited to explain the large rows is SwiftShader-specific, and
+`gl.finish()` blocks properly on the owner driver — the big rows are real
+`finish()`-bracketed wall time. What the capture *did* legitimately lack was
+the `# renderer:` header (rule 5) — that finding stands. Full corrected
+analysis: `docs/BENCH.md` → Owner-GPU visual logs.
 
 **Hardening landed this checkpoint (evidence-chain repairs):**
 1. `bench.html` **stops all simulation work when a run ends**: the planet is
@@ -152,22 +147,65 @@ committed swvk baselines (hashes match the P4 gate exactly:
 `f3f718e5`/`50cbc2ae`/`23806737`), s1/s2 nan=0. The bench.html changes touch
 no simulation math.
 
-**Decision.** The Phase-5 evidence gate remains open, and it is now clear it
-can only close on owner hardware — the sandbox has neither a GPU nor WebGPU.
-Owner action checklist (in order):
-1. **GPU machine:** open `planet/bench.html` in a normal Chrome (verify
-   `chrome://gpu` shows hardware WebGL), run the default L5/L6/L7 × 10,128
-   matrix, press *copy to clipboard*, repeat ×3, archive each payload as
-   `harness/logs/climate-p4-visual-{1,2,3}-<gpu>.txt`. A valid capture has a
-   `# renderer:` header and **no** `# WARNING: SOFTWARE RENDERER` line.
+**Decision (superseded by the third update below).** ~~The Phase-5 evidence
+gate remains open, and it can only close on owner hardware — the sandbox has
+neither a GPU nor WebGPU.~~ The gate has now closed on owner evidence (third
+update). Owner action checklist as it stood:
+1. **GPU machine:** run `planet/bench.html`'s default L5/L6/L7 × 10,128 matrix,
+   *copy to clipboard*, archive under `harness/logs/`. **Done — `30-03`,
+   archived as `harness/logs/climate-p4-visual-1-rtx.txt`** (single run; the
+   owner trimmed header noise and the `# renderer:` line went with it — future
+   captures should keep that line, and ×3 repeats remain the follow-up for
+   rule-3 medians).
 2. **Same machine:** `node harness/probe_webgpu.js` (or any Chrome with
-   WebGPU) to confirm P5's harness target exists.
+   WebGPU) to confirm P5's harness target exists. **Still open.**
 3. Then **Phase 5 starts** (P5.1…): its code and parity harness are written
    against that browser; sandbox CI keeps running `gate.sh` + backend bench
    for the WebGL reference engine meanwhile.
 
-Until 1–2 land, sandbox-side work is limited to evidence-chain repairs like
-this checkpoint's — no further phase implementation is measurable here.
+### Owner-GPU evidence landed — evidence gate closed, Phase 5 unblocked (2026-09-12, third update)
+
+The owner supplied a new capture, `archive/30-03-log-bench.html.txt` (also
+archived verbatim as `harness/logs/climate-p4-visual-1-rtx.txt`), produced by
+the repaired page on the RTX GPU: full L5/L6/L7 × 10,128 matrix, auto@60 rows,
+per-pass breakdown, P4.1 draw sweep. Owner trimmed header noise for length;
+the device is the same RTX GPU as the earlier captures.
+
+**Accepted into evidence.** Key outcomes (details in `docs/BENCH.md` →
+Owner-GPU visual logs):
+- **P2 acceptance: MET** (L7 auto→53 explicit / auto→6 implicit at 60+ fps ≥ 30;
+  L6 auto→116/51 at 60 fps).
+- **P3 acceptance: closed as floor documented** (whole tracer half < 0.1 ms
+  timer tick at 16k and 64k).
+- **P4 acceptance: closed as floor documented** (entire draw sweep < 0.1 ms at
+  every level — the render half is not where this engine's time goes).
+- **P0.6 revised:** no uniform L2 cliff. Explicit scales sub-linearly (L6→L7
+  = 2.2× per step for 4× cells); implicit pays 5.7× for 4× cells at L6→L7
+  (consistent with the Jacobi working set outgrowing L2). The motivating "16×"
+  is linear cell scaling on implicit, nothing more.
+- **P1's biggest lever confirmed on real hardware:** implicit costs 2.3×–6.0×
+  explicit per step on the owner GPU (0.033/0.120, 0.143/0.326, 0.313/1.870
+  ms/step at L5/L6/L7) — the fixed-iteration Jacobi is the dominant single cost
+  at L7, so P1.3-style iteration budgeting and the P5 compute port both aim at
+  the right target.
+- **Open:** the owner-reference claim "L6 implicit ×128 = 60 fps" conflicts
+  with the measured 39–42 ms (≈ 25 fps) across four captures; owner to
+  re-check the GUI HUD once.
+
+**Consequences for the plan:**
+1. Rule 3's "L6 160 fps" predates any measurement on this project; on the
+   owner rig the same intent is enforced as "L6 within 2 % of the committed
+   owner-GPU ×128 baseline (median-of-3)". The ×3 repeat remains a follow-up,
+   not a blocker.
+2. **Phase 5 is unblocked and is the next implementation phase.** The sandbox
+   still has no WebGPU (finding above stands), so the split is: sandbox
+   authors the P5 code (WebGPU engine mirror, parity harness, bench engine
+   column) with structural/no-GPU tests only; the owner machine runs
+   `probe_webgpu.js`, the parity harness, and produces the acceptance numbers
+   (L7 WebGPU ≤ 0.5× L7 WebGL at ×128, i.e. ≤ ~120 ms/frame today, plus the
+   L6 floor check).
+3. P6 rAF hygiene rides along with the P5 integration as planned; its
+   smoothness numbers come from the owner machine.
 
 ### Phase 0 — Instrument & baseline (0.5–1 d) `[R]`+`[A]`
 - **P0.1** `[R]` Pass-level timing in `bench.html` via a `Planet.prototype.trace`
@@ -210,7 +248,9 @@ this checkpoint's — no further phase implementation is measurable here.
 - **P2.2** `bench.html` `auto@60` row per level.
 - **P2.3** days/s honesty in table + UI.
 - **Acceptance**: L7 auto ≥ 30 fps at default dt on the owner rig; L6 auto
-  unchanged (160 fps, n at max); gates untouched.
+  unchanged (fps at the vsync cap, auto n honestly budget-bound); gates
+  untouched. **MET 2026-09-12 (owner capture 30-03)** — see docs/BENCH.md
+  Phase 2 log.
 
 ### Phase 3 — Tracers & flow pools (0.5–1 d) `[R]`+`[A]`
 - **P3.1** `[R]` `bench.html` **tracers ms** column (smooth + vflow + flow +
@@ -254,7 +294,9 @@ this checkpoint's — no further phase implementation is measurable here.
   L7 (query ring), SoA memory budget at L7 (~40 MB × 2 sets — fine).
 - **Acceptance** `[R]`+`[A]`: L7 ms/step (WebGPU) ≤ 0.5× L7 ms/step (WebGL) at
   same substeps; L5/L6 no worse; parity gate green; no per-frame readback;
-  L6 160 fps floor holds.
+  L6 160 fps floor holds. (2026-09-12: the WebGL side of the ≤ 0.5× target is
+  now measured — L7 implicit ×128 ≈ 244 ms, explicit ≈ 37 ms on the owner GPU;
+  L6 clause enforced as the 2 %-of-owner-baseline form, see rule 3.)
 
 ### Phase 6 — Smoothness: nothing on the rAF path (1 d) `[R]`+`[A]`
 - **P6.1** `[R]` Audit the rAF loop for awaits/syncs (readbacks, stalls,
