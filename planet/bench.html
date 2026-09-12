@@ -28,11 +28,21 @@
   .fps { font-weight: 700; }
   .g { color: #2bc474; } .y { color: #e7c14a; } .r { color: #e2555a; }
   .status { color: #9fb0c0; margin: 8px 0; min-height: 1.4em; }
+  .complete { position: sticky; top: 0; z-index: 2; display: flex; gap: 10px; align-items: center;
+              padding: 9px 18px; background: #10251b; border-bottom: 1px solid #286241; color: #b9f3cf; }
+  .complete[hidden] { display: none; }
+  .complete button { padding: 5px 10px; }
+  .copy-status { color: #9fb0c0; font-size: 12px; }
   .note { color: #7f92a4; font-size: 12.5px; max-width: 70ch; margin-top: 14px; }
   code { background: #131a22; padding: 1px 5px; border-radius: 4px; }
 </style>
 </head>
 <body>
+<div class="complete" id="complete" hidden role="status">
+  <b>done</b>
+  <button id="copy" type="button">copy to clipboard</button>
+  <span class="copy-status" id="copyStatus" aria-live="polite"></span>
+</div>
 <div class="wrap">
   <canvas id="c" width="460" height="460"></canvas>
   <div class="panel">
@@ -45,14 +55,35 @@
       <label class="f">Levels <input id="levels" type="text" value="5,6,7"></label>
       <label class="f">Substeps <input id="subs" type="text" value="10,128"></label>
       <label class="f">Particles(k) <input id="parts" type="text" value="16"></label>
+      <label class="f">Particles B(k) <input id="partsB" type="text" value="64" title="Second particle count for the tracers-ms comparison column (empty = off)"></label>
       <button id="run">Run benchmark</button>
     </div>
     <div class="status" id="status">Ready.</div>
     <table id="tbl">
-      <thead><tr>
+      <thead><tr id="mhead">
         <th>level</th><th>scheme</th><th>substeps</th><th>cells</th>
-        <th>frame ms</th><th>draw ms</th><th class="fps">max fps</th>
+        <th>frame ms</th><th>draw ms</th><th class="fps">max fps</th><th>days/s</th>
+        <th>tracers ms</th>
       </tr></thead>
+      <tbody></tbody>
+    </table>
+    <h1 style="margin-top:22px">Per-pass breakdown (ms / frame)</h1>
+    <p class="sub">Same frame as above at <b>explicit × first-substeps</b>, split by pass via
+      <code>Planet.trace</code> (median of 5 time-boxed rounds). <code>draw</code> is the draw-only
+      measurement (the draw path doesn't go through the traced helper). Pass timers serialize with
+      <code>gl.finish()</code>, so the sum slightly overstates a real overlapped frame.</p>
+    <table id="tbl2">
+      <thead><tr id="bdhead"><th>pass</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h1 style="margin-top:22px">Draw sweep (ms)</h1>
+    <p class="sub">Draw-only cost across display <b>modes</b> &times; <b>streamline</b> masks
+      (P4.1): each cell is <code>stepVFlow + render</code>, warmed, median of a ~350 ms window.
+      Mode 13 = deep-ocean speed (default view), 0 = low-air T, 18 = ocean vertical flux
+      (vflow-reading bake path). Compare <b>s15 &minus; s0</b> for the tracer-draw cost and
+      <b>L7 vs L6</b> for the P4.2/P4.3 render work (&frac12;-rate tracers, baked 1-ring).</p>
+    <table id="tbl3">
+      <thead><tr><th>level</th><th>mode</th><th>streamline</th><th>draw ms</th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="note">
@@ -61,6 +92,15 @@
       caps at your refresh rate (typically 60). “sub@60” intuition: any config whose <b>frame ms</b> is
       under ~16.7 runs at a smooth 60. Explicit is the cheaper ocean integrator; implicit adds the Jacobi
       free-surface solve. Higher level ≈ 4× the cells per step; higher particle count scales the tracer draw.
+      <br><b>days/s</b> = substeps × dt × fps / 86400 (P2.3; auto rows cap fps at 60 for the vsync-delivered rate).
+      <br><b>tracers ms</b> (P3.1) = flow update (smooth+vflow+flow) + tracer draw (render on−off);
+      the <b>@Bk</b> column repeats it at the second particle count (pool rebuild between). <b>auto&rarr;N</b> rows (P2.2) fit
+      frame(subs) through the measured substeps points and pick the largest N with frame ≤ 16.7 ms.
+      <br><b>Draw sweep</b> (P4.1) isolates tracer-draw cost (s15−s0) and the L7 render path per mode.
+      <br>Valid on a <b>real GPU only</b>: headless software GL (SwiftShader) executes asynchronously and
+      <code>gl.finish()</code> doesn't block there, so this page would report submission cost, not GPU time.
+      For headless numbers use <code>harness/bench_backend.js</code> (forced differencing — see
+      <code>docs/BENCH.md</code>).
     </div>
   </div>
 </div>
@@ -76,6 +116,9 @@
   var tbody = document.querySelector('#tbl tbody');
   var statusEl = document.getElementById('status');
   var runBtn = document.getElementById('run');
+  var completeEl = document.getElementById('complete');
+  var copyBtn = document.getElementById('copy');
+  var copyStatusEl = document.getElementById('copyStatus');
   var planet = null;
   var benchRunning = false;
 
@@ -95,7 +138,87 @@
   function median(a) { a = a.slice().sort(function (x, y) { return x - y; }); return a[a.length >> 1]; }
   function fpsClass(f) { return f >= 58 ? 'g' : f >= 30 ? 'y' : 'r'; }
 
-  // One whole-system frame, WITHOUT the internal requestAnimationFrame loop.
+  function tableTSV(id) {
+    var table = document.getElementById(id);
+    return Array.prototype.map.call(table.rows, function (row) {
+      return Array.prototype.map.call(row.cells, function (cell) {
+        return cell.textContent.replace(/\u00a0/g, ' ').trim();
+      }).join('\t');
+    }).join('\n');
+  }
+
+  // Keep a device/config header with copied results. It makes an owner-GPU log
+  // auditable and prevents headless SwiftShader output being mistaken for GPU
+  // wall-clock evidence.
+  function resultText() {
+    var gl = planet && planet.gl;
+    var renderer = 'unavailable';
+    var vendor = 'unavailable';
+    if (gl) {
+      var debug = gl.getExtension('WEBGL_debug_renderer_info');
+      renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+      vendor = debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+    }
+    var clean = function (s) { return String(s || '').replace(/[\r\n]+/g, ' '); };
+    return [
+      '# Planet visual benchmark',
+      '# completed UTC: ' + new Date().toISOString(),
+      '# renderer: ' + clean(renderer),
+      '# vendor: ' + clean(vendor),
+      '# devicePixelRatio: ' + (window.devicePixelRatio || 1),
+      '# browser: ' + clean(navigator.userAgent),
+      '# input: levels=' + document.getElementById('levels').value +
+        '; substeps=' + document.getElementById('subs').value +
+        '; particles(k)=' + document.getElementById('parts').value +
+        '; particlesB(k)=' + document.getElementById('partsB').value,
+      '',
+      tableTSV('tbl'),
+      '',
+      'Per-pass breakdown (ms / frame)',
+      '',
+      tableTSV('tbl2'),
+      '',
+      'Draw sweep (ms)',
+      '',
+      tableTSV('tbl3')
+    ].join('\n');
+  }
+
+  function fallbackCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    var copied = false;
+    try { copied = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    return copied;
+  }
+
+  async function copyResults() {
+    var text = resultText();
+    copyBtn.disabled = true;
+    copyStatusEl.textContent = 'Copying…';
+    var copied = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        copied = true;
+      } else {
+        copied = fallbackCopy(text);
+      }
+    } catch (e) {
+      copied = fallbackCopy(text);  // file:// and permission-denied fallback
+    }
+    copyStatusEl.textContent = copied ? 'Copied.' : 'Copy failed; select the tables manually.';
+    copyBtn.disabled = false;
+  }
+
+  // One whole-system frame. The benchmark creates Planet with autoStart:false,
+  // so this is the only simulation/render work submitted while it samples.
+
   function frame(p) {
     var P = p.params;
     for (var i = 0; i < P.substeps; i++) p.step();
@@ -122,18 +245,64 @@
     return median(t);
   }
 
+  // Per-pass ms/frame via Planet.trace (P0.1): finish-serialized timers around
+  // every engine pass while running whole frames. Median of N rounds; each
+  // round time-boxed like measure(). Real-GPU-only (see note above).
+  async function breakdown() {
+    for (var i = 0; i < 3; i++) frame(planet);
+    planet.gl.finish();
+    var N = FAST ? 2 : 5, rounds = [];
+    for (var r = 0; r < N; r++) {
+      planet.traceStart();
+      var n = 0, t0 = performance.now(), budget = FAST ? 150 : 400;
+      while (performance.now() - t0 < budget || n < 2) { frame(planet); n++; }
+      var t = planet.traceStop(), row = {};
+      for (var k in t) row[k] = t[k] / n;
+      rounds.push(row);
+      await nextFrame();
+    }
+    var keys = {};
+    rounds.forEach(function (rw) { for (var k in rw) keys[k] = 1; });
+    var med = {};
+    for (var k in keys) {
+      var a = rounds.map(function (rw) { return rw[k] || 0; })
+                    .sort(function (x, y) { return x - y; });
+      med[k] = a[a.length >> 1];
+    }
+    return med;
+  }
+
   async function run() {
     if (benchRunning) return;   // guard against overlapping runs (double-click / auto-run)
     benchRunning = true;
     runBtn.disabled = true;
+    completeEl.hidden = true;
+    copyStatusEl.textContent = '';
     tbody.innerHTML = '';
+    var autoPts = {};   // P2.2: "level|scheme" -> [{subs, frameMs}] for the auto@60 fit
+    var dtByLevel = {};
+    document.querySelector('#tbl2 tbody').innerHTML = '';
+    document.querySelector('#tbl3 tbody').innerHTML = '';
+    document.getElementById('bdhead').innerHTML = '<th>pass</th>';
+    var bdowns = [];
     var levels = document.getElementById('levels').value.split(',').map(function (s) { return +s.trim(); }).filter(Boolean);
     var subs = document.getElementById('subs').value.split(',').map(function (s) { return +s.trim(); }).filter(Boolean);
     var parts = +document.getElementById('parts').value || 16;
+    var partsB = parseInt(document.getElementById('partsB').value, 10);
+    if (!(partsB > 0) || partsB === parts) partsB = 0;   // 0 = compare off
+    var mh = document.getElementById('mhead');
+    while (mh.children.length > 9) mh.removeChild(mh.lastChild);   // reset re-runs
+    if (partsB) {
+      var thb = document.createElement('th');
+      thb.textContent = 'tracers ms @' + partsB + 'k';
+      mh.appendChild(thb);
+    }
     var schemes = [{ name: 'explicit', v: 0 }, { name: 'implicit', v: 2 }];
 
     try {
-    if (!planet) planet = new Planet(canvas, levels[0] || 5);
+    // Do not start Planet's interactive rAF loop: it would submit extra frames
+    // between timed samples and make the visual matrix non-comparable.
+    if (!planet) planet = new Planet(canvas, levels[0] || 5, { autoStart: false });
     planet.params.flowParticles = parts;
 
     for (var li = 0; li < levels.length; li++) {
@@ -152,10 +321,64 @@
       planet.params.mode = 13;            // an ocean-current view so tracers draw
       planet.params.streamline = 15;      // all four sublayer bits -> both pools drawn
       var cells = planet.grid.V;
+      dtByLevel[level] = planet.params.dt;
 
       // draw-only cost (independent of scheme/substeps) once per level
       setStatus('L' + level + ': measuring draw…');
       var drawMs = await measure(drawOnly, FAST ? 2 : 6, FAST ? 250 : 800);
+
+      /* P4.1 draw sweep: mode x streamline draw-only matrix (warmed medians).
+         Restores the default view (mode 13, all streamlines) afterwards. */
+      setStatus('L' + level + ': draw sweep…');
+      var sweepModes = [13, 0, 18], sweepMasks = [0, 15];
+      var tb3 = document.querySelector('#tbl3 tbody');
+      for (var mi = 0; mi < sweepModes.length; mi++) {
+        for (var qi = 0; qi < sweepMasks.length; qi++) {
+          planet.params.mode = sweepModes[mi];
+          planet.params.streamline = sweepMasks[qi];
+          var swMs = await measure(drawOnly, FAST ? 2 : 3, FAST ? 150 : 350);
+          var swTr = document.createElement('tr');
+          swTr.innerHTML = '<td>L' + level + '</td><td>m' + sweepModes[mi] +
+            '</td><td>s' + sweepMasks[qi] + '</td><td>' + swMs.toFixed(2) + '</td>';
+          tb3.appendChild(swTr);
+        }
+      }
+      planet.params.mode = 13;
+      planet.params.streamline = 15;
+
+      /* P3.1 tracers ms = flow update (smooth+vflow+flow, no render) + tracer
+         draw (render with streamlines on minus render with them off). Work is
+         subs/scheme-independent, so once per level; optional B count rebuilds
+         pools, measures, and restores A for the matrix below. */
+      async function tracersMs() {
+        var dtF = planet.params.dt * subs[0];
+        function update(p) { p.stepSmooth(); p.stepVFlow(); p.stepFlow(dtF); }
+        var upd = await measure(update, FAST ? 2 : 4, FAST ? 200 : 600);
+        function renderOn(p) { p.params.streamline = 15; p.render(); }
+        function renderOff(p) { p.params.streamline = 0; p.render(); }
+        var rOn = await measure(renderOn, FAST ? 2 : 4, FAST ? 200 : 600);
+        var rOff = await measure(renderOff, FAST ? 2 : 4, FAST ? 200 : 600);
+        planet.params.streamline = 15;
+        return upd + Math.max(0, rOn - rOff);
+      }
+      setStatus('L' + level + ': measuring tracers…');
+      var trMs = await tracersMs();
+      var trMsB = 0;
+      if (partsB) {
+        planet.params.flowParticles = partsB;
+        planet.rebuildPools();
+        setStatus('L' + level + ': measuring tracers @' + partsB + 'k…');
+        trMsB = await tracersMs();
+        planet.params.flowParticles = parts;
+        planet.rebuildPools();
+      }
+
+      // per-pass breakdown at explicit × first substeps value
+      planet.params.oceanScheme = 0;
+      planet.params.substeps = subs[0];
+      setStatus('L' + level + ': pass breakdown…');
+      var bd = await breakdown();
+      bdowns.push({ level: level, med: bd, drawMs: drawMs });
 
       for (var si = 0; si < schemes.length; si++) {
         for (var bi = 0; bi < subs.length; bi++) {
@@ -165,6 +388,7 @@
           await nextFrame();
           var frameMs = await measure(frame, FAST ? 2 : 6, FAST ? 300 : 1200);
           var fps = 1000 / frameMs;
+          var dps = subs[bi] * planet.params.dt * fps / 86400;   // P2.3 honesty
           var tr = document.createElement('tr');
           if (frameMs <= 16.7) tr.className = 'hd60';
           tr.innerHTML =
@@ -174,13 +398,81 @@
             '<td>' + cells.toLocaleString() + '</td>' +
             '<td>' + frameMs.toFixed(2) + '</td>' +
             '<td>' + drawMs.toFixed(2) + '</td>' +
-            '<td class="fps ' + fpsClass(fps) + '">' + fps.toFixed(0) + '</td>';
+            '<td class="fps ' + fpsClass(fps) + '">' + fps.toFixed(0) + '</td>' +
+            '<td>' + dps.toFixed(3) + '</td>' +
+            '<td>' + trMs.toFixed(2) + '</td>' +
+            (partsB ? '<td>' + trMsB.toFixed(2) + '</td>' : '');
           tbody.appendChild(tr);
+          var akey = level + '|' + schemes[si].name;
+          (autoPts[akey] = autoPts[akey] || []).push({ subs: subs[bi], frameMs: frameMs });
         }
       }
     }
+    // render the per-pass breakdown table (union of pass keys, fixed order first)
+    (function () {
+      var order = ['ocean', 'air', 'cplO', 'cplA', 'proj', 'ice',
+                   'smooth', 'vflow', 'flow', 'reduce', 'draw', 'blend'];
+      var seen = {};
+      bdowns.forEach(function (b) { for (var k in b.med) seen[k] = 1; });
+      var keys = order.filter(function (k) { return seen[k]; });
+      for (var k in seen) if (order.indexOf(k) < 0) keys.push(k);
+      var head = document.getElementById('bdhead');
+      bdowns.forEach(function (b) {
+        var th = document.createElement('th');
+        th.textContent = 'L' + b.level;
+        head.appendChild(th);
+      });
+      var tb = document.querySelector('#tbl2 tbody');
+      keys.forEach(function (k) {
+        var tr = document.createElement('tr');
+        var html = '<td>' + k + '</td>';
+        bdowns.forEach(function (b) {
+          html += '<td>' + (b.med[k] || 0).toFixed(3) + '</td>';
+        });
+        tr.innerHTML = html;
+        tb.appendChild(tr);
+      });
+      var trd = document.createElement('tr');
+      var htmld = '<td>draw</td>';
+      bdowns.forEach(function (b) { htmld += '<td>' + b.drawMs.toFixed(3) + '</td>'; });
+      trd.innerHTML = htmld;
+      tb.appendChild(trd);
+    })();
+    /* P2.2 auto@60 rows: fit frame(subs) = base + subs*stepMs through the two
+       extreme subs points, then autoN = largest n with base + n*stepMs <= 16.7
+       (clamped to 1..128, the UI slider range). Needs >= 2 subs values. */
+    (function () {
+      Object.keys(autoPts).forEach(function (akey) {
+        var pts = autoPts[akey].slice().sort(function (a, b) { return a.subs - b.subs; });
+        if (pts.length < 2) return;
+        var lo = pts[0], hi = pts[pts.length - 1];
+        if (hi.subs === lo.subs) return;
+        var parts = akey.split('|'), level = +parts[0], scheme = parts[1];
+        var stepMs = (hi.frameMs - lo.frameMs) / (hi.subs - lo.subs);
+        var base = Math.max(0, lo.frameMs - lo.subs * stepMs);
+        var autoN = stepMs > 0 ? Math.max(1, Math.min(128, Math.floor((16.7 - base) / stepMs))) : 128;
+        var frameEst = base + autoN * stepMs, fpsEst = 1000 / frameEst;
+        var dps = autoN * (dtByLevel[level] || 60) * Math.min(fpsEst, 60) / 86400;
+        var tr = document.createElement('tr');
+        if (frameEst <= 16.7) tr.className = 'hd60';
+        tr.innerHTML =
+          '<td>L' + level + '</td>' +
+          '<td>' + scheme + '</td>' +
+          '<td>auto&rarr;' + autoN + '</td>' +
+          '<td></td>' +
+          '<td>' + frameEst.toFixed(2) + '</td>' +
+          '<td></td>' +
+          '<td class="fps ' + fpsClass(fpsEst) + '">' + fpsEst.toFixed(0) + '</td>' +
+          '<td>' + dps.toFixed(3) + '</td>' +
+          '<td></td>' +
+          (partsB ? '<td></td>' : '');
+        tbody.appendChild(tr);
+      });
+    })();
     setStatus('Done. Higher “max fps” is better; ≥60 rows are highlighted.');
+    completeEl.hidden = false;
     } catch (e) {
+      completeEl.hidden = true;
       setStatus('Benchmark error: ' + (e && e.message ? e.message : e));
     } finally {
       runBtn.disabled = false;
@@ -189,6 +481,7 @@
   }
 
   runBtn.addEventListener('click', run);
+  copyBtn.addEventListener('click', copyResults);
   // auto-run once on load (unless suppressed for scripted testing)
   if (!/[?&]noauto=1/.test(location.search))
     window.addEventListener('load', function () { setTimeout(run, 200); });

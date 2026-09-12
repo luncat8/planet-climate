@@ -8,7 +8,7 @@ Facts re-verified against the tree for this merge:
 - `this.fullscreen(` call sites: 21 (+ the prototype definition; repo says 22).
 - Committed gate baselines: `harness/baselines/L5.json`, `L6.json` — **no L7 baseline exists** (repo P0.4 catch confirmed).
 - `serializeState` = 9 full-texture `readPixels` (A[0..7] + ice).
-- `computeGlobals` = 3 `readPixels(1×1)` per call, called once per frame while `co2On`.
+- After P1.2/P1.4, `computeGlobals` = 1 `readPixels(4×1)` at the sim-day cadence while `co2On` (zero at default `co2On: 0`); the original 3-per-frame path is retired.
 - Per-pass working set (9 textures touched per dynamics pass): L6 ≈ 5.9 MB, L7 ≈ 23.6 MB.
 - Dependent `texelFetch` per fragment (source-audited, incl. 6-neighbour loops):
   ocean ≈ 50, air ≈ 30, couple ≈ 11 each, ice ≈ 40, vflow ≈ 35 → ≈ 1,100/cell/frame
@@ -58,6 +58,51 @@ is the union, in the repo's phase numbering.
 4. Baselines are files: `harness/logs/climate-<phase>-<bench>-<hw>.txt`
    (backend = SwiftShader-relative; visual must name the GPU).
 5. Every reported number carries its device string; SwiftShader is relative-only.
+
+### Progress checkpoint and revised entry gate (2026-09-12)
+
+P0–P4 implementation work is recorded in `docs/BENCH.md`; P4 has the screenshot
+correctness gate described there. Its **owner-GPU wall-clock acceptance is still
+open**. The two newly archived visual captures are useful history, but not a
+valid before/after performance comparison:
+
+| config | `9755c73` (prior capture) | `6b92890` (P4) | nominal change |
+|---|---:|---:|---:|
+| L5 explicit ×128 | 3.60 ms | 3.90 ms | +8.3% |
+| L6 explicit ×128 | 16.60 ms | 18.00 ms | +8.4% |
+| L7 explicit ×128 | 37.00 ms | 38.60 ms | +4.3% |
+| L5 implicit ×128 | 15.60 ms | 14.80 ms | −5.1% |
+| L6 implicit ×128 | 41.70 ms | 41.30 ms | −1.0% |
+| L7 implicit ×128 | 244.70 ms | 248.90 ms | +1.7% |
+
+Both files lack a GPU/device header, report 0.00 ms draw cost, and have 0.10 ms
+low-work rows. Those are the documented headless SwiftShader submission-time
+signature, not render execution timing. More importantly, the pre-fix benchmark
+constructed `Planet` with its normal live rAF loop, while also advancing and
+timing manual frames; that loop could submit extra frames between samples. Thus
+neither the apparent L6 +8.4% nor the other small deltas is evidence of a P4
+regression or gain, and the files stay in `archive/` as historical raw logs only.
+
+**P0.7 / P4.4 — benchmark evidence repair (completed in code; owner run pending).**
+`Planet` now supports `autoStart:false`; `bench.html` uses it, so its manual
+`frame()` is the only frame submitted during sampling. Successful runs expose a
+sticky `done` / `copy to clipboard` control. Its TSV includes the input values,
+UTC completion time, WebGL renderer/vendor, DPR, browser, and every result table.
+The smoke test asserts both the isolated run and copied payload. `setup_chrome.sh`
+also exports `CHROME_DIR`, so the documented local smoke setup works.
+
+**Next required evidence before Phase 5:** run the repaired visual benchmark on
+the owner GPU at L5/L6/L7 with the normal `10,128` substep matrix (and the P4
+mode × streamline sweep), repeat it three times, and archive each copied TSV
+under `harness/logs/` with the exact renderer header. Use the median of the three
+for the L6 160 fps floor and the P2/P3/P4 targets. This becomes the WebGL parity
+and performance baseline for P5. Do not manufacture a visual baseline from the
+two old logs.
+
+Phase 5 remains the next implementation phase after that evidence gate; it is
+not complete, and neither are P6/P7, so this active plan must **not** move to
+`archive/`. P6's rAF hygiene can be applied during the P5 integration, but its
+smoothness acceptance must be measured against the repaired visual baseline.
 
 ### Phase 0 — Instrument & baseline (0.5–1 d) `[R]`+`[A]`
 - **P0.1** `[R]` Pass-level timing in `bench.html` via a `Planet.prototype.trace`

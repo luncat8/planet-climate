@@ -1,0 +1,203 @@
+{
+  "phase": "P1",
+  "date": "2026-09-11",
+  "git": "296abd6",
+  "device": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+  "method": "forced differencing (see P0 baseline for protocol). Box drift on shared CPU is ~+/-10% run-to-run for L6/L7; <10% claims need back-to-back A/B.",
+  "note": "SwiftShader CPU-relative absolute ms. P1 changes: implicitIters 12->10 (scheme 2), smooth 4->1 MRT (flow), two-level reduce + sim-day cadence (co2On path only).",
+  "rows": [
+    {
+      "level": 5,
+      "scheme": "explicit",
+      "cells": 10242,
+      "k1": 10,
+      "k2": 30,
+      "msStep": 10.56,
+      "stepsSec": 94.7,
+      "sub60": 1.58,
+      "autoN": 1,
+      "daysPerSec": 0.042,
+      "nsPerCell": 1031,
+      "per": {
+        "ocean": 3.47,
+        "air": 3.49,
+        "cplO": 0.825,
+        "cplA": 0.76,
+        "ice": 1.86
+      },
+      "closure": 0.985,
+      "flow": {
+        "smooth": 0.395,
+        "vflow": 1.66,
+        "flow": 20.125
+      },
+      "jac": null
+    },
+    {
+      "level": 5,
+      "scheme": "implicit",
+      "cells": 10242,
+      "k1": 10,
+      "k2": 30,
+      "msStep": 23.86,
+      "stepsSec": 41.9,
+      "sub60": 0.7,
+      "autoN": 1,
+      "daysPerSec": 0.042,
+      "nsPerCell": 2329.6,
+      "per": {
+        "ocean": 14.98,
+        "air": 3.69,
+        "cplO": 0.88,
+        "cplA": 0.815,
+        "ice": 1.965
+      },
+      "closure": 0.936,
+      "flow": {
+        "smooth": 0.425,
+        "vflow": 1.615,
+        "flow": 20.885
+      },
+      "jac": {
+        "iters": 6,
+        "resid": [
+          0.0011,
+          0.00022,
+          4.39e-05,
+          8.79e-06,
+          1.74e-06,
+          3.43e-07
+        ]
+      }
+    },
+    {
+      "level": 6,
+      "scheme": "explicit",
+      "cells": 40962,
+      "k1": 4,
+      "k2": 12,
+      "msStep": 41.6375,
+      "stepsSec": 24,
+      "sub60": 0.4,
+      "autoN": 1,
+      "daysPerSec": 0.042,
+      "nsPerCell": 1016.5,
+      "per": {
+        "ocean": 13.525,
+        "air": 14.625,
+        "cplO": 3.1125,
+        "cplA": 2.825,
+        "ice": 7.4125
+      },
+      "closure": 0.997,
+      "flow": {
+        "smooth": 1.25,
+        "vflow": 6.6,
+        "flow": 21.4625
+      },
+      "jac": null
+    },
+    {
+      "level": 6,
+      "scheme": "implicit",
+      "cells": 40962,
+      "k1": 4,
+      "k2": 12,
+      "msStep": 88.65,
+      "stepsSec": 11.3,
+      "sub60": 0.19,
+      "autoN": 1,
+      "daysPerSec": 0.042,
+      "nsPerCell": 2164.2,
+      "per": {
+        "ocean": 58.15,
+        "air": 13.55,
+        "cplO": 3.1125,
+        "cplA": 2.8625,
+        "ice": 7.3875
+      },
+      "closure": 0.96,
+      "flow": {
+        "smooth": 1.175,
+        "vflow": 6.65,
+        "flow": 20.0875
+      },
+      "jac": {
+        "iters": 6,
+        "resid": [
+          0.00234,
+          0.000467,
+          9.33e-05,
+          1.86e-05,
+          3.73e-06,
+          7.45e-07
+        ]
+      }
+    },
+    {
+      "level": 7,
+      "scheme": "explicit",
+      "cells": 163842,
+      "k1": 2,
+      "k2": 6,
+      "msStep": 177.15,
+      "stepsSec": 5.6,
+      "sub60": 0.09,
+      "autoN": 1,
+      "daysPerSec": 0.042,
+      "nsPerCell": 1081.2,
+      "per": {
+        "ocean": 59.675,
+        "air": 57.275,
+        "cplO": 12.725,
+        "cplA": 11.4,
+        "ice": 30.45
+      },
+      "closure": 0.968,
+      "flow": {
+        "smooth": 4.55,
+        "vflow": 28.1,
+        "flow": 22.1
+      },
+      "jac": null
+    },
+    {
+      "level": 7,
+      "scheme": "implicit",
+      "cells": 163842,
+      "k1": 2,
+      "k2": 6,
+      "msStep": 372.725,
+      "stepsSec": 2.7,
+      "sub60": 0.04,
+      "autoN": 1,
+      "daysPerSec": 0.042,
+      "nsPerCell": 2274.9,
+      "per": {
+        "ocean": 259.85,
+        "air": 57.95,
+        "cplO": 13.3,
+        "cplA": 11.725,
+        "ice": 28.95
+      },
+      "closure": 0.997,
+      "flow": {
+        "smooth": 4.925,
+        "vflow": 27.275,
+        "flow": 21.625
+      },
+      "jac": {
+        "iters": 7,
+        "resid": [
+          0.00557,
+          0.00111,
+          0.00022,
+          4.37e-05,
+          8.67e-06,
+          1.73e-06,
+          3.28e-07
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+level	scheme	substeps	cells	frame ms	draw ms	max fps
+L5	explicit	10	10,242	0.10	0.00	10000
+L5	explicit	128	10,242	3.60	0.00	278
+L5	implicit	10	10,242	0.70	0.00	1429
+L5	implicit	128	10,242	15.60	0.00	64
+L6	explicit	10	40,962	0.10	0.00	10000
+L6	explicit	128	40,962	16.60	0.00	60
+L6	implicit	10	40,962	0.80	0.00	1250
+L6	implicit	128	40,962	41.70	0.00	24
+L7	explicit	10	163,842	0.10	0.00	10000
+L7	explicit	128	163,842	37.00	0.00	27
+L7	implicit	10	163,842	0.80	0.00	1250
+L7	implicit	128	163,842	244.70	0.00	4

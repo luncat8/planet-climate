@@ -8,6 +8,7 @@ var PARAMS = {
   // tunable (have min/max/step) -> become sliders
   dt:        { label: 'Timestep dt',          default: 60,   min: 1, max: 900, step: 1,   fmt: function (v) { return v + ' s'; } },
   substeps:  { label: 'Substeps / frame',     default: 8,     min: 1,   max: 128,    step: 1 },
+  substepsAuto:{ label: 'Substeps auto (2 Hz)',  default: 0 },
   /* Physical spin rate (rad/s) — drives the real 3-D Coriolis force. A tidally
      locked planet still rotates once per orbit in the inertial frame, so this
      should generally stay non-zero even when omegaOrbit = 0. */
@@ -149,7 +150,7 @@ var PARAMS = {
   /* Jacobi iterations for scheme B (implicit free surface). Hard ceiling; the
      engine early-exits once the residual drops below 1e-6, so cheap levels do
      not pay for all of them. Only meaningful when oceanScheme == 2. */
-  implicitIters:{ label: 'Implicit iters (B)', default: 12, min: 1, max: 40, step: 1,
+  implicitIters:{ label: 'Implicit iters (B)', default: 10, min: 1, max: 40, step: 1,
     tip: 'Jacobi iterations for the implicit free surface (scheme B). Greyed out for schemes 0/1.' },
   /* Barotropic (rigid-lid) projection: enforces div(h_top u_top + h_deep u_deep)
      = 0 each step so the two ocean layers mass-balance (deep = true return

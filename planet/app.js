@@ -345,7 +345,8 @@ function buildUI() {
   var fpsEl = el('span', 'g', '0 fps');
   var dayEl = el('span', 'a', 'day 0.0');
   var yrEl = el('span', 's', '0.00 yr');
-  mono.appendChild(fpsEl); mono.appendChild(dayEl); mono.appendChild(yrEl);
+  var subsEl = el('span', 'g', '');
+  mono.appendChild(fpsEl); mono.appendChild(dayEl); mono.appendChild(yrEl); mono.appendChild(subsEl);
   box.appendChild(mono);
   var co2Mono = el('div', 'mono');
   var co2El = el('span', 'a', 'CO₂ —');
@@ -355,6 +356,7 @@ function buildUI() {
   co2Mono.appendChild(co2El); co2Mono.appendChild(greenEl); co2Mono.appendChild(bioEl); co2Mono.appendChild(tEl);
   box.appendChild(co2Mono);
   ui.fpsEls = { cellSpan: cellSpan, lvlSpan: lvlSpan, fps: fpsEl, day: dayEl, yr: yrEl,
+                subs: subsEl,
                 co2: co2El, green: greenEl, bio: bioEl, meanT: tEl };
 
   hdr.appendChild(box);
@@ -579,6 +581,7 @@ function buildUI() {
     ['iceOn', 'Sea ice & snow (cryosphere)'],
     ['iceOverlay', 'Ice overlay on map'],
     ['co2On', 'CO₂ carbon cycle'],
+    ['substepsAuto', 'Auto substeps (fit 60 fps)'],
     ['milankOn', 'Milankovitch orbital forcing'],
     ['bioOnLand', 'Biosphere on land'],
     ['bioOnWater', 'Biosphere on water'],
@@ -825,6 +828,8 @@ function boot() {
     p.onStats = function (s) {
       ui.stats = s;
       ui.fpsEls.fps.textContent = s.fps.toFixed(0) + ' fps';
+      ui.fpsEls.subs.textContent = (s.auto ? 'auto×' + s.effN : '×' + s.effN) +
+        ' · ' + (s.daysPerSec || 0).toFixed(2) + ' d/s';
       ui.fpsEls.day.textContent = 'day ' + s.days.toFixed(1);
       ui.fpsEls.yr.textContent = (s.days / 365).toFixed(2) + ' yr';
       ui.fpsEls.cellSpan.textContent = s.cells.toLocaleString();

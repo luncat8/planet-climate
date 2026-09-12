@@ -1079,52 +1079,83 @@ void main(){
    to track Jacobi convergence per iteration and early-exit. Reads the whole grid
    in one fragment; cheap enough given scheme B is the slow path by design. */
 
-/* REDUCE_FS — global carbon-cycle reduction (see CO2.md). One draw, 2x1 output;
-   a single fragment loops over all V cells (like MAX_FS) and, branching on
-   gl_FragCoord.x, accumulates area-weighted global sums used by the CPU CO2 ODE.
-   No atomics, one 2-pixel readback per frame.
+/* TILE_FS + REDUCE4_FS — P1.4 two-level global reduction (see CO2.md). Level 1
+   renders T = ceil(V/256) fragments, each summing a 256-cell tile into the
+   three accumulator groups (MRT); level 2 sums the T partials into a 4x1
+   target (px0, px1, ice, spare) with one 4-pixel readback. Same sums as the old
+   single-fragment O(V) loop, but fragment-parallel (the old 3 draws x V serial
+   iterations stalled one fragment); float summation ORDER differs, so results
+   match to ~1e-5 relative, not bitwise. Loop caps (256 fixed chunk, 4096 tiles)
+   cover L8 (T = 2561). No atomics.
      px0 = (SUM A*T, SUM A, SUM A*T over ocean, SUM A over ocean)
      px1 = (SUM A*T over ice-free land, SUM A over ice-free land,
             SUM suitability over ocean, SUM suitability over land)
    suitability = A*exp(-((T-Topt)/Twidth)^2) drives the temperature-optimal
    biosphere on water and/or land. */
-var REDUCE_FS = SHADER_HEAD + SHADER_COMMON + `
-out vec4 o;
+var TILE_FS = SHADER_HEAD + SHADER_COMMON + `
+layout(location=0) out vec4 oPx0;
+layout(location=1) out vec4 oPx1;
+layout(location=2) out vec4 oIce;
 uniform sampler2D uTopS, uIce;
 uniform float uTopt, uTwidth;
-uniform int uWhich;   // 0 -> (SUM A*T, SUM A, SUM A*T|ocean, SUM A|ocean)
-                      // 1 -> (SUM A*T|iceFreeLand, SUM A|iceFreeLand, suit|ocean, suit|land)
 void main(){
   int W = uDim.x;
-  vec4 acc = vec4(0.0);
-  for(int i=0;i<700000;i++){
+  int t0 = int(gl_FragCoord.x) * 256;
+  vec4 a0 = vec4(0.0), a1 = vec4(0.0);
+  float aIce = 0.0;
+  for(int j=0;j<256;j++){
+    int i = t0 + j;
     if(i >= uCount) break;
     int x = i - (i/W)*W, y = i/W;
-    float A    = texelFetch(uCellA, ivec2(x,y),0).w;
-    float land = texelFetch(uCellB, ivec2(x,y),0).w;
-    float T    = texelFetch(uTopS,  ivec2(x,y),0).y;
-    if(uWhich == 0){
-      acc.x += A*T;
-      acc.y += A;
-      acc.z += (1.0-land)*A*T;
-      acc.w += (1.0-land)*A;
-    } else if(uWhich == 1){
-      float icef = texelFetch(uIce, ivec2(x,y),0).y;
-      float iceFree = 1.0 - step(0.5, icef);
-      float dtt = (T - uTopt)/max(uTwidth, 1.0);
-      float suit = A*exp(-dtt*dtt);
-      float ifl = land*iceFree;
-      acc.x += ifl*A*T;
-      acc.y += ifl*A;
-      acc.z += (1.0-land)*suit;
-      acc.w += land*suit;
-    } else {
-      float icef = clamp(texelFetch(uIce, ivec2(x,y),0).y, 0.0, 1.0);
-      acc.x += A*icef;   // global ice-covered area (fractional)
+    ivec2 t = ivec2(x,y);
+    float A    = texelFetch(uCellA, t,0).w;
+    float land = texelFetch(uCellB, t,0).w;
+    float T    = texelFetch(uTopS,  t,0).y;
+    float icef = texelFetch(uIce,   t,0).y;
+    a0.x += A*T;
+    a0.y += A;
+    float oc = 1.0-land;
+    a0.z += oc*A*T;
+    a0.w += oc*A;
+    float iceFree = 1.0 - step(0.5, icef);
+    float dtt = (T - uTopt)/max(uTwidth, 1.0);
+    float suit = A*exp(-dtt*dtt);
+    float ifl = land*iceFree;
+    a1.x += ifl*A*T;
+    a1.y += ifl*A;
+    a1.z += oc*suit;
+    a1.w += land*suit;
+    aIce += A*clamp(icef, 0.0, 1.0);
+  }
+  oPx0 = a0; oPx1 = a1; oIce = vec4(aIce, 0.0, 0.0, 0.0);
+}`;
+
+var REDUCE4_FS = SHADER_HEAD + SHADER_COMMON + `
+out vec4 o;
+uniform sampler2D uTile0, uTile1, uTile2;
+uniform int uTiles;
+void main(){
+  int x = int(gl_FragCoord.x);
+  vec4 acc = vec4(0.0);
+  if(x == 0){
+    for(int t=0;t<4096;t++){
+      if(t >= uTiles) break;
+      acc += texelFetch(uTile0, ivec2(t,0), 0);
+    }
+  } else if(x == 1){
+    for(int t=0;t<4096;t++){
+      if(t >= uTiles) break;
+      acc += texelFetch(uTile1, ivec2(t,0), 0);
+    }
+  } else if(x == 2){
+    for(int t=0;t<4096;t++){
+      if(t >= uTiles) break;
+      acc += texelFetch(uTile2, ivec2(t,0), 0);
     }
   }
   o = acc;
 }`;
+
 
 var MAX_FS = SHADER_HEAD + SHADER_COMMON + `
 out vec4 o;
@@ -1132,7 +1163,7 @@ uniform sampler2D uSrc;
 void main(){
   int W = uDim.x;
   float m = 0.0;
-  for(int i=0;i<200000;i++){
+  for(int i=0;i<700000;i++){   // P1.4: cap covers L8 (V = 655488); uCount break does the real bound
     if(i >= uCount) break;
     int x = i - (i/W)*W;
     int y = i / W;
@@ -1943,7 +1974,7 @@ void main(){
    techniques (all toggled from the UI) address that:
 
      * uUseSmooth : advect on a temporally-AVERAGED velocity field (a running
-                    EMA maintained per layer by SMOOTH_FS). Noise cancels over
+                    EMA maintained per layer by SMOOTH_MRT_FS). Noise cancels over
                     time, the coherent mean current survives, and stable
                     streamlines emerge from the noise.
      * uNormalize : move at a near-constant visible pace (direction only, speed
@@ -2150,17 +2181,28 @@ void main(){
    Small uAlpha = long memory = heavy smoothing (noise cancels, mean survives);
    uAlpha=1 copies the instantaneous field (no averaging). One texel per cell,
    run once per layer per frame -- cheap. */
-var SMOOTH_FS = SHADER_HEAD + `
-out vec4 o;
-uniform sampler2D uCur, uPrev;
+/* SMOOTH_MRT_FS — P1.5: all 4 smooth channels (ocean top/deep, low/high air)
+   in ONE draw with 4 MRT outputs, replacing 4 fullscreen passes. Per-texel math
+   is the same mix() in the same order: bit-identical, 1/4 the pass overhead. */
+var SMOOTH_MRT_FS = SHADER_HEAD + `
+layout(location=0) out vec4 o0;
+layout(location=1) out vec4 o1;
+layout(location=2) out vec4 o2;
+layout(location=3) out vec4 o3;
+uniform sampler2D uCur0, uPrev0, uCur1, uPrev1, uCur2, uPrev2, uCur3, uPrev3;
 uniform float uAlpha;
-void main(){
-  ivec2 t = ivec2(gl_FragCoord.xy);
-  vec2 cur  = texelFetch(uCur,  t, 0).xy;
-  vec2 prev = texelFetch(uPrev, t, 0).xy;
+vec2 sm2(vec2 cur, vec2 prev, float a){
   if(any(isnan(cur)))  cur  = vec2(0.0);
   if(any(isnan(prev))) prev = cur;
-  o = vec4(mix(prev, cur, clamp(uAlpha,0.0,1.0)), 0.0, 0.0);
+  return mix(prev, cur, a);
+}
+void main(){
+  ivec2 t = ivec2(gl_FragCoord.xy);
+  float a = clamp(uAlpha, 0.0, 1.0);
+  o0 = vec4(sm2(texelFetch(uCur0, t, 0).xy, texelFetch(uPrev0, t, 0).xy, a), 0.0, 0.0);
+  o1 = vec4(sm2(texelFetch(uCur1, t, 0).xy, texelFetch(uPrev1, t, 0).xy, a), 0.0, 0.0);
+  o2 = vec4(sm2(texelFetch(uCur2, t, 0).xy, texelFetch(uPrev2, t, 0).xy, a), 0.0, 0.0);
+  o3 = vec4(sm2(texelFetch(uCur3, t, 0).xy, texelFetch(uPrev3, t, 0).xy, a), 0.0, 0.0);
 }`;
 
 var PART_VS = SHADER_HEAD + SHADER_COMMON + `
@@ -2172,6 +2214,8 @@ uniform float uRadius, uEquirect, uAsPoints, uPointSize;
 uniform int   uDrawSlots;  // how many trail slots to draw (<= uSlots)
 uniform vec3  uColor0, uColor1;   // sublayer colours
 uniform int   uMask, uIdx0, uIdx1; // streamline enable bits for the two sublayers
+uniform int   uIndexed;  // P3.3: 1 = indexed LINES (vid = pid*K + slot)
+uniform int   uStride;   // P4.2: draw every uStride-th particle (POINTS)
 out float vA;
 out vec3  vCol;
 
@@ -2182,7 +2226,8 @@ vec4 slotTex(int px, int py, int slot){
 void main(){
   int K = max(uDrawSlots, 2);
   int pid, slot;
-  if(uAsPoints > 0.5){ pid = gl_VertexID; slot = 0; }
+  if(uAsPoints > 0.5){ pid = gl_VertexID * max(uStride, 1); slot = 0; }
+  else if(uIndexed != 0){ pid = gl_VertexID / K; slot = gl_VertexID - pid*K; }
   else {
     int perp = 2*(K-1);                 // 2 verts per LINES segment, K-1 segments
     pid = gl_VertexID / perp;
@@ -2233,6 +2278,8 @@ void main(){
 function GLOBE_VS(m) {
 return SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uVFlow, uIce;
+uniform sampler2D uBake;
+uniform int uUseBake;
 uniform mat4 uMVP;
 uniform float uRelief;
 uniform float uIceOn;
@@ -2252,6 +2299,44 @@ void main(){
   // rasteriser already gives across each triangle). Instead we pre-blend a
   // little of the 1-ring neighbourhood into each vertex value here: cheap (a
   // few extra texelFetch per vertex, not per pixel) and resolution-independent.
+  float v;
+  if (uUseBake != 0) {
+    v = texelFetch(uBake, cTex(cell), 0).x;   // P4.3: pre-blended value
+  } else {
+    float v0 = sampleVal(cell);
+    float vAcc = 0.0, wAcc = 0.0;
+    for(int k=0;k<6;k++){
+      vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+      if(na.w < 0.5) continue;
+      vAcc += sampleVal(int(na.x));
+      wAcc += 1.0;
+    }
+    v = wAcc > 0.0 ? mix(v0, vAcc/wAcc, 0.35) : v0;
+  }
+
+  vVal = clamp(v, 0.0, 1.0);
+  vLand = cb.w;
+  vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
+  vN = n;
+  vIce = uIceOn * clamp(texelFetch(uIce, cTex(cell),0).y, 0.0, 1.0);
+  vPos = n*(1.0 + uRelief*cb.w);
+  gl_Position = uMVP*vec4(vPos, 1.0);
+}`;
+}
+
+/* P4.3: bake target for the globe/cloud 1-ring pre-blend. Each fragment is one
+   cell (1:1 texel map); the loop bodies below are verbatim copies of the
+   GLOBE_VS v-loop and the CLOUD_VS c/r-loop so the baked values are
+   bit-identical to the per-vertex computation. Output: (vVal, cloud c, rain r).
+   Rendered only when V > 80k and the fields changed (see _bakeBlend). */
+function BLEND_BAKE_FS(m) {
+return SHADER_HEAD + SHADER_COMMON + `
+uniform sampler2D uTopS, uTopV, uDeepS, uDeepV, uLoA, uLoB, uHiA, uHiB, uVFlow, uIce;
+out vec4 o;
+${modeSampleFnSrc(m)}
+void main(){
+  int cell = int(gl_FragCoord.x) + int(gl_FragCoord.y)*uDim.x;
+  if (cell >= uCount) { o = vec4(0.0); return; }
   float v0 = sampleVal(cell);
   float vAcc = 0.0, wAcc = 0.0;
   for(int k=0;k<6;k++){
@@ -2261,14 +2346,20 @@ void main(){
     wAcc += 1.0;
   }
   float v = wAcc > 0.0 ? mix(v0, vAcc/wAcc, 0.35) : v0;
-
-  vVal = clamp(v, 0.0, 1.0);
-  vLand = cb.w;
-  vCloud = clamp(lb.y + hb.y*0.5, 0.0, 1.0);
-  vN = n;
-  vIce = uIceOn * clamp(texelFetch(uIce, cTex(cell),0).y, 0.0, 1.0);
-  vPos = n*(1.0 + uRelief*cb.w);
-  gl_Position = uMVP*vec4(vPos, 1.0);
+  float c0 = texelFetch(uLoB, cTex(cell),0).y;
+  float r0 = texelFetch(uHiB, cTex(cell),0).y;
+  float cAcc = 0.0, rAcc = 0.0, wAcc2 = 0.0;
+  for(int k=0;k<6;k++){
+    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+    if(na.w < 0.5) continue;
+    int j = int(na.x);
+    cAcc += texelFetch(uLoB, cTex(j),0).y;
+    rAcc += texelFetch(uHiB, cTex(j),0).y;
+    wAcc2 += 1.0;
+  }
+  float cb = wAcc2 > 0.0 ? mix(c0, cAcc/wAcc2, 0.4) : c0;
+  float rb = wAcc2 > 0.0 ? mix(r0, rAcc/wAcc2, 0.4) : r0;
+  o = vec4(clamp(v, 0.0, 1.0), clamp(cb, 0.0, 1.0), clamp(rb, 0.0, 2.0), 0.0);
 }`;
 }
 
@@ -2309,6 +2400,8 @@ ${modeLitSrc(m)}
 
 var CLOUD_VS = SHADER_HEAD + SHADER_COMMON + `
 uniform sampler2D uLoB, uHiB;
+uniform sampler2D uBake;
+uniform int uUseBake;
 uniform mat4 uMVP;
 uniform float uShellR;
 out float vC; out float vR; out vec3 vN;
@@ -2316,19 +2409,27 @@ void main(){
   int cell = gl_VertexID;
   vec3 n = normalize(texelFetch(uCellA, cTex(cell),0).xyz);
   // 1-ring pre-blend, as in GLOBE_VS: softens hex faceting of the cloud deck.
-  float c0 = texelFetch(uLoB, cTex(cell),0).y;
-  float r0 = texelFetch(uHiB, cTex(cell),0).y;
-  float cAcc = 0.0, rAcc = 0.0, wAcc = 0.0;
-  for(int k=0;k<6;k++){
-    vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
-    if(na.w < 0.5) continue;
-    int j = int(na.x);
-    cAcc += texelFetch(uLoB, cTex(j),0).y;
-    rAcc += texelFetch(uHiB, cTex(j),0).y;
-    wAcc += 1.0;
+  float cb, rb;
+  if (uUseBake != 0) {
+    vec4 bb = texelFetch(uBake, cTex(cell), 0);   // P4.3: pre-blended (c, r)
+    cb = bb.y; rb = bb.z;
+  } else {
+    float c0 = texelFetch(uLoB, cTex(cell),0).y;
+    float r0 = texelFetch(uHiB, cTex(cell),0).y;
+    float cAcc = 0.0, rAcc = 0.0, wAcc = 0.0;
+    for(int k=0;k<6;k++){
+      vec4 na = texelFetch(uNbrA, nTex(cell,k), 0);
+      if(na.w < 0.5) continue;
+      int j = int(na.x);
+      cAcc += texelFetch(uLoB, cTex(j),0).y;
+      rAcc += texelFetch(uHiB, cTex(j),0).y;
+      wAcc += 1.0;
+    }
+    cb = wAcc > 0.0 ? mix(c0, cAcc/wAcc, 0.4) : c0;
+    rb = wAcc > 0.0 ? mix(r0, rAcc/wAcc, 0.4) : r0;
   }
-  vC = clamp(wAcc > 0.0 ? mix(c0, cAcc/wAcc, 0.4) : c0, 0.0, 1.0);
-  vR = clamp(wAcc > 0.0 ? mix(r0, rAcc/wAcc, 0.4) : r0, 0.0, 2.0);
+  vC = clamp(cb, 0.0, 1.0);
+  vR = clamp(rb, 0.0, 2.0);
   vN = n;
   gl_Position = uMVP*vec4(n*uShellR, 1.0);
 }`;

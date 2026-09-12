@@ -1,1 +1,5 @@
 node_modules/
+harness/runs/
+harness/.chrome/
+*.log
+.DS_Store

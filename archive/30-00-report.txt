@@ -1,0 +1,51 @@
+webGL
+https://github.com/luncat8/planet-climate.git
+
+webGPU
+https://github.com/luncat8/planet-geotectonics.git
+
+
+## 1. Engine & feature comparison (engineering aspects only)
+
+| | **planet-climate** | **planet-geotectonics** |
+|---|---|---|
+| Compute model | WebGL2 fragment passes over **8 RGBA32F ping-pong textures** + ice + scratch; ~45 grid-res draws/frame at default (8 substeps × 5 passes + 5) | **WebGPU compute**, SoA storage buffers, 14 WGSL kernels/step; *same kernel graph also runs as plain JS on CPU* |
+| Per-fragment cost | ≈1,100 dependent `texelFetch`/cell/frame (source-audited: ocean ≈50, ice ≈40, air ≈30…) — texture indirection everywhere | linear SoA array loads, 6-ring reads by index — no dependent fetches, no FBO ping-pong |
+| Determinism/oracle | No CPU reference — physics exists only as GLSL; headless = slow SwiftShader, hash-gated baselines (L5, L6 — **no L7 baseline exists**) | Bit-identical determinism test, **CPU↔GPU 1000-frame parity ensemble** with declared floors, frame-2 clone test, Node-builtins `run-all` suite, WGSL structural check, 4.5 Gyr release soak |
+| CPU sync points | `readPixels` in the frame path: CO₂ globals ×3/frame (when on), 9 full readbacks per save; optional per-Jacobi-iteration residual readback | Render reads GPU buffers directly (zero readback); CPU mirror pulled only at event cadence (1 cycle late — the issue you're already working on in their 0.3-plan) |
+| Batching | every pass = own FBO bind + program + uniforms + draw; N substeps = N× fixed overhead | N steps = N encoders today; 0.3-plan Phase III makes it **one encoder per rAF for N steps** |
+| Timing discipline | step-level only (bench_backend, bench.html matrix) | per-kernel ms (CPU `Perf.lap`), p95/max frame-gap ring, event round-trip timings, 2 Hz non-allocating strip; GPU timestamp queries in their Phase I |
+| Persistence | 8 textures → base64 JS (file:// friendly), pre-equilibrated bundled save | validated binary blob + 20 Myr checkpoint ring |
+| Bench | two-benchmark convention (portable backend vs real-GPU visual), SwiftShader = relative-only | perf-proxy tests, one-factor calibration sweeps, committed baseline logs, in-page bench |
+
+Features differ by goal (water vs plates) — excluded per your instruction. The one goal-neutral feature gap: climate has a 3D globe + particle-tracer flow-viz; geotectonics has a resolution ladder only in its grid (UI is L5) and no flow visualization at all.
+
+## 2. Why L7 is 10 fps (16× for 4× cells)
+
+L7 = 163,842 cells (256×641) vs L6 40,962 (256×161). The frame isn't draw-bound at L7 — the 16× decomposes:
+
+- **×4 — cells.** 45 grid-res passes/frame each do 4× the pixels; globe+cloud vertex stage 4×.
+- **×2–4 — the L2 cliff (the extra factor, main suspect).** Each dynamics pass touches ~9 textures → per-pass working set **L6 ≈ 5.9 MB (fits L2) → L7 ≈ 23.6 MB (DRAM-bound)**. With ~1,100 dependent texture fetches per cell per frame, per-fragment cost inflates several-fold. 4 × ~3–4 ≈ your 16×. (BENCH.md's "L7 ≈ 4× slower" reference was measured in a regime where this cliff didn't bite — worth re-confirming with the Phase-0 ms/cell table.)
+- **45 unbatches draws** — per-pass bind/uniform/draw latency, never amortized (substeps × 8 pay it 8×).
+- **Globe/cloud VS 1-ring pre-blend**: 16–21 dependent fetches *per vertex* × 2 draws × 164 k verts at L7.
+- **If CO₂ is on**: 3 single-fragment reductions each serially looping all 163,842 cells + 3 `readPixels(1×1)` = 3 full pipeline stalls *every frame*.
+- (If implicit: BENCH shows the Jacobi penalty grows ×3→×6 per level, widening it further.)
+
+The plan's Phase 0 includes a toggle-bisect matrix (substeps 1/8, flow, CO₂, scheme, view) to confirm each term on your GPU in an hour.
+
+## 3. What to pick from each other
+
+**climate ← geotectonics:** dual-engine parity architecture (CPU oracle + GPU, ensemble + clone + determinism tests) · WebGPU compute with SoA buffers + one encoder per rAF · perf strip (EMA + p95/max gaps, per-kernel ms, 2 Hz, zero alloc in frame loop) · GPU timestamp query ring · async one-cycle-late round trips (fixes the CO₂ stalls) · bounded-kernel discipline (their `loserRank` lesson → climate's serial O(V) reductions) · validated single-blob checkpoints · Node-builtins test rig + soak + device-stamped baselines.
+
+**geotectonics ← climate:** resolution-ladder UX (live L5/L6/L7 rebuild + presets with bounds overrides) · particle-tracer flow-viz tech (persistent tracers, trail conveyor, vertical-flux sublayer transitions — port to mantle plumes/crustal drift) · 3D globe + per-vertex pre-blend display tech · `bench.html` GUI + two-benchmark convention (their Phase I3 can copy it) · plain-JS `file://` save · per-param slider `tip` metadata.
+
+## 4. Plans (in the required order)
+
+1. **My own plan first** → `docs/improvement-plan-agent.md` (written before opening the other file).
+2. **Read `30-performance-plan.md`**, compared → **comparison chart** (20 topics × repo-draft × agent-draft × decision) in `docs/improvement-plan-final.md` §1.
+3. **Final best-of plan** → `docs/improvement-plan-final.md` §2: the repo draft's phase spine (0 instrument → 1 kill dead/stalling → 2 auto-substeps → 3 tracers → 4 render → 5 WebGPU port → 6 smoothness → 7 docs) plus my items merged in: the L2-cliff root cause as the hypothesis Phase 0 must confirm, SMOOTH ×4→1 MRT pass, indexed-line tracer draw, VS pre-blend gate at high levels, two-level parallel CO₂ reduction + `uCount`-driven loop bounds (latent L8 bug: MAX_FS caps at 200 000), and — a gap in the repo draft — the save/persistence story for the WebGPU engine.
+
+Headline wins: Phase 2 (auto substeps) alone takes L7 from 10 fps to ≥30 fps in half a day; Phases 1+3+4 get the L7/L6 ratio to ~6×; Phase 5 (WebGPU) is where the ≤0.5× L7 step-cost target lands, with the WebGL engine kept as parity reference + fallback. I verified their key factual claims while merging: 21 `fullscreen(` call sites (they said 22 counting the definition), no L7 gate baseline exists, and `serializeState` is 9 full readbacks.
+
+
+Everything is on disk (auto-saved, uncommitted): `docs/improvement-plan-agent.md` (my independent draft), `docs/improvement-plan-final.md` (comparison chart + final best-of plan, presented above). If you can run the Phase-0 toggle matrix on your GPU, the ms/cell table will confirm or kill the L2-cliff hypothesis in a couple of hours — happy to turn Phase 0 (the `Planet.prototype.trace` toggle + bench rows) into code next.

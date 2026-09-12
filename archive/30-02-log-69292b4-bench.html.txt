@@ -1,0 +1,55 @@
+level	scheme	substeps	cells	frame ms	draw ms	max fps	days/s	tracers ms	tracers ms @64k
+L5	explicit	10	10,242	0.10	0.00	10000	69.444	0.00	0.00
+L5	explicit	128	10,242	3.80	0.00	263	23.392	0.00	0.00
+L5	implicit	10	10,242	0.80	0.00	1250	8.681	0.00	0.00
+L5	implicit	128	10,242	14.80	0.00	68	6.006	0.00	0.00
+L6	explicit	10	40,962	0.10	0.00	10000	69.444	0.00	0.00
+L6	explicit	128	40,962	17.10	0.00	58	5.198	0.00	0.00
+L6	implicit	10	40,962	0.70	0.00	1429	9.921	0.00	0.00
+L6	implicit	128	40,962	39.00	0.00	26	2.279	0.00	0.00
+L7	explicit	10	163,842	0.30	0.00	3333	23.148	0.00	0.00
+L7	explicit	128	163,842	36.70	0.00	27	2.422	0.00	0.00
+L7	implicit	10	163,842	23.40	0.00	43	0.297	0.00	0.00
+L7	implicit	128	163,842	241.10	0.00	4	0.369	0.00	0.00
+L5	explicit	auto→128		4.01		249	5.333		
+L5	implicit	auto→128		15.19		66	5.333		
+L6	explicit	auto→115		16.57		60	4.792		
+L6	implicit	auto→51		16.55		60	2.125		
+L7	explicit	auto→54		16.66		60	2.250		
+L7	implicit	auto→6		16.02		62	0.250		
+
+Per-pass breakdown (ms / frame)
+
+pass	L5	L6	L7
+ocean	0.035	0.037	0.436
+air	0.032	0.031	0.146
+cplO	0.038	0.034	0.098
+cplA	0.061	0.099	0.222
+ice	0.174	0.187	0.059
+smooth	0.003	0.003	0.001
+vflow	0.004	0.004	0.005
+flow	0.019	0.028	0.127
+blend	0.000	0.000	0.002
+draw	0.000	0.000	0.000
+
+Draw sweep (ms)
+
+level	mode	streamline	draw ms
+L5	m13	s0	0.00
+L5	m13	s15	0.00
+L5	m0	s0	0.00
+L5	m0	s15	0.00
+L5	m18	s0	0.00
+L5	m18	s15	0.00
+L6	m13	s0	0.00
+L6	m13	s15	0.00
+L6	m0	s0	0.00
+L6	m0	s15	0.00
+L6	m18	s0	0.00
+L6	m18	s15	0.00
+L7	m13	s0	0.00
+L7	m13	s15	0.00
+L7	m0	s0	0.00
+L7	m0	s15	0.00
+L7	m18	s0	0.00
+L7	m18	s15	0.00

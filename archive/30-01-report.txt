@@ -1,0 +1,21 @@
+P4 complete, committed as `6b92890` and pushed. Summary:
+
+## P4 — render pass (`planet/engine.js`, `shader.js`, `bench.html`, `harness/screenshot.js`)
+
+- **P4.1** — `bench.html` draw sweep: per level, draw-only ms over modes {13, 0, 18} × streamline {0, 15} in a new third table; `blend` added to the breakdown order.
+- **P4.2a** — dpr cap 1.5 at L7 (2 elsewhere).
+- **P4.2b** — tracer stride 2 at L7 only: dots via `uStride`, lines via strided pids in `_tracerIbo` (stride in the cache key — pool size is level-independent, so this was required for correctness).
+- **P4.2c** — mvp/eye cached on `theta|phi|dist|w|h`.
+- **P4.3** — 1-ring bake for V > 80k: `BLEND_BAKE_FS(m)` bakes (vVal, cloud c, rain r) once per field change (key `level|mode|stepCount`, nulled on reset/applyState/build); paused frames skip it.
+- **`harness/screenshot.js`** (new): render-regression matrix — one seeded trajectory/level, all mode×mask combos hashed from raw pixels, `--baseline` drift gating, `--png` eyeballs. Deterministic across runs.
+
+## Verification (all green)
+- **18-config pre-P4↔P4 matrix**: L5/L6 all 12 IDENTICAL; **L7 s0 all 3 IDENTICAL → bake is bit-exact**; L7 s15 drifts only by the intended stride (PNG eyeball: globe intact, dots sparser).
+- One real bug caught by the matrix: the first bake left `fbo.blend` bound → GL feedback loop voided the globe draw (all L7 modes hashed the same); fixed with FBO/viewport/depth restore in `_bakeBlend`.
+- Bake lifecycle probe exact (bake → paused skip → re-bake on step/mode-switch); mvp path-independence pixel-identical; **gate `p4-final` s0 IDENTICAL** L5/L6/L7 (`f3f718e5`/`50cbc2ae`/`23806737`); bench.html smoke clean.
+- `docs/BENCH.md` P4 log appended; `bench-swvk.json` untouched per the step-math-only rule.
+
+## Notes
+- The sandbox lost the earlier per-phase commits (`.git` rolled back to base) — everything is now in **one comprehensive commit** on `arena/01a08f2f-planet-climate`, pushed to origin.
+- P4's wall-clock proof needs your GPU (draw-side work is vapor headless): run `bench.html` and read the sweep table — L7 s15−s0 isolates tracer-draw cost, L7-vs-L6 shows the bake/stride win. L6 160fps floor check is also an owner-hardware item.
+- Remaining plan scope: P5 (WebGPU port, deferred as out-of-session) and P6 (docs/smoothness pass) — say the word if you want P6 next.

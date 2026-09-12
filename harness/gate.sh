@@ -4,10 +4,17 @@
 #
 #   ./gate.sh <tag> [--allow-drift]
 #
-# Baselines live in baselines/<tag>.json and are created on first run.
+# Baselines live in $BASELINES_DIR/<level>.json and are created on first run.
+# Hashes are driver-specific (ANGLE backend / SwiftShader version change float
+# rounding), so each driver keeps its own baseline dir:
+#   baselines/       — owner reference driver (committed L5/L6; L7 by owner)
+#   baselines-swvk/  — sandbox SwiftShader-Vulkan driver (see docs/BENCH.md)
+# Override with BASELINES_DIR=baselines-swvk ./gate.sh <tag>.
 set -uo pipefail
 cd "$(dirname "$0")"
 TAG="${1:?usage: gate.sh <tag> [--allow-drift]}"
+BASELINES_DIR="${BASELINES_DIR:-baselines}"
+mkdir -p "$BASELINES_DIR"
 ALLOW="${2:-}"
 mkdir -p baselines runs
 
@@ -52,7 +59,7 @@ for s in $SCHEMES; do
       if [ "$n" != "0" ]; then echo "  [s$s $name] NaN DETECTED: $n"; fail=1; fi
       continue
     fi
-    base="baselines/${name}.json"
+    base="${BASELINES_DIR}/${name}.json"
     if [ ! -f "$base" ]; then
       cp "$out" "$base"; echo "  [s$s $name] baseline created  hash=$h nan=$n"
     else
@@ -66,6 +73,7 @@ for s in $SCHEMES; do
       fi
     fi
     if [ "$n" != "0" ]; then echo "  [s$s $name] NaN DETECTED: $n"; fail=1; fi
+    sleep 3   # cooldown: back-to-back launches flake when teardown overlaps init
   done
 done
 exit $fail

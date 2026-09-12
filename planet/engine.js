@@ -91,7 +91,11 @@ Prog.prototype.tex = function (n, t) {
 };
 
 /* =================== Planet =================== */
-function Planet(canvas, level) {
+/* opts.autoStart=false lets a caller own frame advancement. The visual benchmark
+   uses it so its explicit frame() measurements cannot race the interactive rAF
+   loop. The browser app and all existing callers retain the auto-start default. */
+function Planet(canvas, level, opts) {
+  opts = opts || {};
   var gl = canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
   if (!gl) throw new Error('WebGL2 is not available in this browser.');
   this.gl = gl;
@@ -130,6 +134,7 @@ function Planet(canvas, level) {
   this.trackResidual = false;
   this.residualHistory = [];
   this.lastJacobiIters = 0;
+  this.readbackCount = 0;   // cumulative GPU->CPU readPixels (audit + cadence checks)
 
   var self = this;
   this._onDown = function (e) {
@@ -152,7 +157,7 @@ function Planet(canvas, level) {
   this.compile();
   this.build(level);
   this.bindInput();
-  this.loop();
+  if (opts.autoStart !== false) this.loop();
 }
 
 Planet.prototype.mkTex = function (w, h, data, comps, linear) {
@@ -203,10 +208,11 @@ Planet.prototype.compile = function () {
   this.prog.init2 = new Prog(gl, QUAD_VS, INIT2_FS, 'init2');
   this.prog.vflow = new Prog(gl, QUAD_VS, VFLOW_FS, 'vflow');
   this.prog.iceDyn = new Prog(gl, QUAD_VS, ICE_DYN_FS, 'iceDyn');
-  this.prog.reduce = new Prog(gl, QUAD_VS, REDUCE_FS, 'reduce');
+  this.prog.tile = new Prog(gl, QUAD_VS, TILE_FS, 'tile');
+  this.prog.reduce = new Prog(gl, QUAD_VS, REDUCE4_FS, 'reduce');
   this.prog.state = new Prog(gl, QUAD_VS, STATE_FS, 'state');
   this.prog.trail = new Prog(gl, QUAD_VS, TRAIL_FS, 'trail');
-  this.prog.smooth = new Prog(gl, QUAD_VS, SMOOTH_FS, 'smooth');
+  this.prog.smoothMRT = new Prog(gl, QUAD_VS, SMOOTH_MRT_FS, 'smoothMRT');
   this.prog.points = new Prog(gl, PART_VS, PART_PS, 'points');
   this.prog.cloud = new Prog(gl, CLOUD_VS, CLOUD_FS, 'cloud');
   this.prog.equiCloud = new Prog(gl, EQUI_VS, EQUI_CLOUD_FS, 'equiCloud');
@@ -219,6 +225,40 @@ Planet.prototype.getGlobeProg = function (m) {
   var c = this.prog.globeByMode;
   if (!c[m]) c[m] = new Prog(this.gl, GLOBE_VS(m), GLOBE_FS(m), 'globe' + m);
   return c[m];
+};
+/* P4.3: per-mode bake programs (vVal blend is mode-dependent; the packed
+   cloud/rain channels are mode-invariant but ride along for free). */
+Planet.prototype.getBakeProg = function (m) {
+  if (!this.prog.bakeByMode) this.prog.bakeByMode = {};
+  var c = this.prog.bakeByMode;
+  if (!c[m]) c[m] = new Prog(this.gl, QUAD_VS, BLEND_BAKE_FS(m), 'bake' + m);
+  return c[m];
+};
+/* Re-bake the 1-ring blend only when level/mode/fields changed. stepCount is
+   the fields-changed proxy (steps are the only in-place mutators besides
+   applyState/reset, which null the key explicitly). Skips entirely while
+   paused -- the single largest L7 vertex-stage saving. */
+Planet.prototype._bakeBlend = function (m, w, h) {
+  var key = this.grid.level + '|' + m + '|' + this.stepCount;
+  if (this._bakeKey === key) return;
+  var b = this.getBakeProg(m).use();
+  this.gridUniforms(b);
+  b.tex('uTopS', this.A[0]).tex('uTopV', this.A[1])
+    .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
+    .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
+    .tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
+    .tex('uVFlow', this.texVFlow)
+    .tex('uIce', this.iceTex());
+  this.fullscreen('blend', this.grid.W, this.grid.H, 'blend');
+  /* fullscreen() leaves fbo.blend bound with its viewport and depth/blend
+     off; restore render()'s entering state (null FBO, canvas viewport,
+     depth on, blend off) or the globe draws into the bake target while
+     sampling it -- a feedback loop that voids the draw. */
+  var gl = this.gl;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  gl.enable(gl.DEPTH_TEST);
+  this._bakeKey = key;
 };
 Planet.prototype.getEquiProg = function (m) {
   var c = this.prog.equiByMode;
@@ -286,6 +326,11 @@ Planet.prototype.build = function (level) {
   this.texEtaB = this.mkTex(W, H, null);
   this.fbo.etaA = this.mkFbo([this.texEtaA]);
   this.fbo.etaB = this.mkFbo([this.texEtaB]);
+  /* P4.3: 1-ring bake target (globe vVal + cloud c/r); re-baked only when the
+     fields change (see _bakeBlend). */
+  this.blendTex = this.mkTex(W, H, null);
+  this.fbo.blend = this.mkFbo([this.blendTex]);
+  this._bakeKey = null;
   this.texMaxRes = this.mkTex(1, 1, null);
   this.fbo.maxRes = this.mkFbo([this.texMaxRes]);
 
@@ -299,10 +344,15 @@ Planet.prototype.build = function (level) {
   this.fbo.ice1 = this.mkFbo([this.ice[1]]);
   this.iceIdx = 0;
 
-  /* Carbon-cycle global reduction target: a single 1x1 float attachment (the
-     exact pattern proven by fbo.maxRes). Filled by two REDUCE_FS draws. */
-  this.texReduce0 = this.mkTex(1, 1, new Float32Array(4));
-  this.fbo.reduce = this.mkFbo([this.texReduce0]);
+  /* P1.4 two-level reduction scratch: tile partials (ceil(V/256) texels x 3
+     RGBA32F) + a 4x1 final target (px0, px1, ice, spare). */
+  this.reduceTiles = Math.ceil(this.grid.V / 256);
+  this.tileTex = [this.mkTex(this.reduceTiles, 1, null),
+                  this.mkTex(this.reduceTiles, 1, null),
+                  this.mkTex(this.reduceTiles, 1, null)];
+  this.fbo.tile = this.mkFbo(this.tileTex);
+  this.reduce4Tex = this.mkTex(4, 1, null);
+  this.fbo.reduce4 = this.mkFbo([this.reduce4Tex]);
   this.globals = null;
   this.climDTshift = 0; this.climApplyPerCouple = 0;
 
@@ -326,13 +376,15 @@ Planet.prototype.build = function (level) {
 
   /* Temporally-averaged velocity (RG in .xy) for the 4 sources feeding the two
      pools' sublayers: 0 = ocean top (A1), 1 = ocean deep (A3), 2 = low air
-     (A4), 3 = high air (A6). Updated once per frame by SMOOTH_FS. */
+     (A4), 3 = high air (A6). Updated once per frame by SMOOTH_MRT_FS. */
   this.smoothSrc = [1, 3, 4, 6];
   this.smooth = this.smoothSrc.map(function (srcIdx, i) {
     var a = self.mkTex(W, H, null), b = self.mkTex(W, H, null);
-    self.fbo['smooth' + i + 'a'] = self.mkFbo([a]); self.fbo['smooth' + i + 'b'] = self.mkFbo([b]);
-    return { tex:[a, b], idx:0, fboA:'smooth' + i + 'a', fboB:'smooth' + i + 'b', srcIdx: srcIdx };
+    return { tex:[a, b], idx:0, srcIdx: srcIdx };
   });
+  /* P1.5: one MRT FBO per ping-pong side (was 8 single-target FBOs). */
+  this.fbo.smoothMRTa = this.mkFbo(this.smooth.map(function (sm) { return sm.tex[0]; }));
+  this.fbo.smoothMRTb = this.mkFbo(this.smooth.map(function (sm) { return sm.tex[1]; }));
   this.smoothInit = false;   // first pass copies the raw field (alpha=1)
 
   this.ibo = gl.createBuffer();
@@ -424,16 +476,20 @@ Planet.prototype.destroyGrid = function () {
   if (this.smooth) partTexs = this.smooth.reduce(function (a, s) { return a.concat(s.tex); }, partTexs);
   if (this.texVFlow) partTexs.push(this.texVFlow);
   if (this.ice) partTexs = partTexs.concat(this.ice);
-  if (this.texReduce0) partTexs.push(this.texReduce0);
+  if (this.tileTex) partTexs = partTexs.concat(this.tileTex);
+  if (this.reduce4Tex) partTexs.push(this.reduce4Tex);
   var all = this.A.concat(this.B, partTexs, [this.texCellA, this.texCellB, this.texCellC, this.texNbrA, this.texNbrB, this.texLookup]);
-  if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes, this.texPhi]);
+  if (this.P) all = all.concat(this.P, [this.texEtaA, this.texEtaB, this.texMaxRes, this.texPhi, this.blendTex]);
   all.forEach(function (t) { if (t) gl.deleteTexture(t); });
   Object.keys(this.fbo).forEach(function (k) { gl.deleteFramebuffer(this.fbo[k]); }, this);
   this.fbo = {};
   if (this.ibo) gl.deleteBuffer(this.ibo);
+  if (this.iboTracer) gl.deleteBuffer(this.iboTracer);
+  if (this.vaoTracer) gl.deleteVertexArray(this.vaoTracer);
+  this.iboTracer = null; this.vaoTracer = null;
   if (this.vaoGlobe) gl.deleteVertexArray(this.vaoGlobe);
   if (this.vaoEmpty) gl.deleteVertexArray(this.vaoEmpty);
-  this.A = []; this.B = []; this.pools = []; this.smooth = []; this.texVFlow = null; this.ice = null; this.texReduce0 = null;
+  this.A = []; this.B = []; this.pools = []; this.smooth = []; this.texVFlow = null; this.ice = null; this.tileTex = null; this.reduce4Tex = null; this.blendTex = null;
 };
 
 /* Advance the smoothed-velocity EMA one frame for the 4 sublayer sources.
@@ -444,15 +500,15 @@ Planet.prototype.stepSmooth = function () {
   var P = this.params;
   var s = P.flowSmooth === undefined ? 0.9 : P.flowSmooth;
   var alpha = this.smoothInit ? Math.max(0.0, Math.min(1.0, 1.0 - s)) : 1.0;
+  /* P1.5: all 4 channels in one MRT draw (the shader has exactly 4 outputs). */
+  var idx = this.smooth[0].idx, pr = this.prog.smoothMRT.use();
   for (var i = 0; i < this.smooth.length; i++) {
     var sm = this.smooth[i];
-    var src = sm.tex[sm.idx];
-    var dstFbo = sm.idx === 0 ? sm.fboB : sm.fboA;
-    var pr = this.prog.smooth.use();
-    pr.tex('uCur', this.A[sm.srcIdx]).tex('uPrev', src).f('uAlpha', alpha);
-    this.fullscreen(dstFbo, this.grid.W, this.grid.H);
-    sm.idx = 1 - sm.idx;
+    pr.tex('uCur' + i, this.A[sm.srcIdx]).tex('uPrev' + i, sm.tex[idx]);
   }
+  pr.f('uAlpha', alpha);
+  this.fullscreen(idx === 0 ? 'smoothMRTb' : 'smoothMRTa', this.grid.W, this.grid.H, 'smooth');
+  for (var j = 0; j < this.smooth.length; j++) this.smooth[j].idx = 1 - idx;
   this.smoothInit = true;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
@@ -472,7 +528,18 @@ Planet.prototype.gridUniforms = function (p) {
     .f('uPlow', this.params.surfacePressure === undefined ? 101325 : this.params.surfacePressure)
     .f('uPhigh', (this.params.surfacePressure === undefined ? 101325 : this.params.surfacePressure) * 0.442692);
 };
-Planet.prototype.fullscreen = function (fboName, w, h) {
+/* ---- Phase 0 instrumentation: per-pass timing --------------------------------
+   When tracing is on (traceStart/traceStop), fullscreen() brackets every pass
+   in a finish()-serialized timer and accumulates ms per pass name. Kept for
+   quick ad-hoc diagnosis on real GPUs; the committed benches do NOT use it —
+   they time each pass in batch isolation (N repeats + one finish) via the
+   per-pass steppers (stepOcean/stepAir/coupleOcean/coupleAir/stepIce/...),
+   because per-pass finish() both serializes away real overlap and trips a
+   SwiftShader-Vulkan cliff (~300 finishes then ~12 ms each — see BENCH.md).
+   The interactive loop never enables tracing: one null check per pass. */
+Planet.prototype.traceStart = function () { this._trace = {}; };
+Planet.prototype.traceStop = function () { var t = this._trace || {}; this._trace = null; return t; };
+Planet.prototype._fullscreenDraw = function (fboName, w, h) {
   var gl = this.gl;
   gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo[fboName]);
   gl.viewport(0, 0, w, h);
@@ -480,6 +547,18 @@ Planet.prototype.fullscreen = function (fboName, w, h) {
   gl.disable(gl.BLEND);
   gl.bindVertexArray(this.vaoEmpty);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+};
+Planet.prototype.fullscreen = function (fboName, w, h, pass) {
+  if (this._trace) {
+    var t0 = performance.now();
+    this._fullscreenDraw(fboName, w, h);
+    this.gl.finish();
+    var dt = performance.now() - t0;
+    var k = pass || fboName;
+    this._trace[k] = (this._trace[k] || 0) + dt;
+    return;
+  }
+  this._fullscreenDraw(fboName, w, h);
 };
 
 /* Deterministic seed stream. reset() previously drew uSeed from Math.random(),
@@ -494,19 +573,21 @@ Planet.prototype.seedRand = function () {
 };
 Planet.prototype.reset = function () {
   var W = this.grid.W, H = this.grid.H;
+  this._bakeKey = null;   // P4.3: fields rebuilt below
   this.simTime = 0;
+  this.globals = null; this.lastGlobalsT = null;   // P1.2: drop held globals
   /* Restart the stream so reset() is idempotent for a given seed. */
   this._rng = null;
   var p = this.prog.init.use();
   this.gridUniforms(p);
   p.f('uSeed', this.seedRand() * 1000)
     .f('uHtop', this.params.hTop).f('uHtotal', this.params.hTotal);
-  this.fullscreen('init', W, H);
+  this.fullscreen('init', W, H, 'init');
   var p2 = this.prog.init2.use();
   this.gridUniforms(p2);
   p2.f('uSeed', this.seedRand() * 1000)
     .f('uGravity', this.params.gravity).f('uRhoLo', this.params.atmosDensity);
-  this.fullscreen('init2', W, H);
+  this.fullscreen('init2', W, H, 'init');
   // cryosphere spins up from zero
   if (this.ice) {
     var zero = new Float32Array(W * H * 4);
@@ -529,6 +610,7 @@ Planet.prototype.readTex = function (tex) {
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
   var buf = new Float32Array(W * H * 4);
   gl.readPixels(0, 0, W, H, gl.RGBA, gl.FLOAT, buf);
+  this.readbackCount++;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.deleteFramebuffer(fbo);
   return buf;
@@ -563,7 +645,9 @@ Planet.prototype.serializeState = function () {
 };
 
 Planet.prototype.applyState = function (st) {
+  this._bakeKey = null;   // P4.3: externally supplied fields
   if (!st || st.level === undefined) throw new Error('invalid state object');
+  this.globals = null; this.lastGlobalsT = null;   // P1.2: drop held globals
   if (st.level !== this.grid.level)
     throw new Error('save is level ' + st.level + ', current grid is level ' + this.grid.level);
   for (var i = 0; i < 8; i++) this.writeTex(this.A[i], st.A[i]);
@@ -638,22 +722,24 @@ function readPlanetStateJS(text) {
   return fn(sandbox);
 }
 
-Planet.prototype.couple = function () {
+/* One coupling half-pass (kind = 'cplO' ocean / 'cplA' air). Split out of couple()
+   so benches can time each half in isolation (batch mode); couple() runs both
+   in the original order with the identical GL call sequence. */
+Planet.prototype.couplePass = function (kind) {
   var W = this.grid.W, H = this.grid.H;
   var P = this.params;
   var src = this.B;
   var sun = this.sunDir();
-  var self = this;
-  [['cplO', 'cplO'], ['cplA', 'cplA']].forEach(function (pair) {
-    var pr = self.prog[pair[1]].use();
-    self.gridUniforms(pr);
+  {
+    var pr = this.prog[kind].use();
+    this.gridUniforms(pr);
     pr.tex('uTopS', src[0]).tex('uTopV', src[1])
       .tex('uDeepS', src[2]).tex('uDeepV', src[3])
       .tex('uLoA', src[4]).tex('uLoB', src[5])
       .tex('uHiA', src[6]).tex('uHiB', src[7]);
-    pr.f('uDt', P.dt).f('uTime', self.simTime)
+    pr.f('uDt', P.dt).f('uTime', this.simTime)
       .v3('uSun', sun[0], sun[1], sun[2])
-      .f('uSolar', P.solar).f('uDayNight', P.dayNight).f('uSeasonDecl', self.decl())
+      .f('uSolar', P.solar).f('uDayNight', P.dayNight).f('uSeasonDecl', this.decl())
       .f('uKsurf', P.kSurf).f('uEvap', P.evap).f('uWindStress', P.windStress)
       .f('uConv', P.conv).f('uKrad', P.kRad).f('uLapse', P.lapse)
       .f('uThermo', P.thermo).f('uCloudK', P.cloudK).f('uRainK', P.rainK)
@@ -667,7 +753,7 @@ Planet.prototype.couple = function () {
       .f('uAirDpdTHi', P.airDpdTHi === undefined ? 200 : P.airDpdTHi)
       .f('uGravity', P.gravity)
       .f('uRhoLo', P.atmosDensity);
-    pr.tex('uIce', self.iceTex())
+    pr.tex('uIce', this.iceTex())
       .f('uIceOn', P.iceOn === undefined ? 0 : P.iceOn)
       .f('uAlbIce', P.iceAlbedo === undefined ? 0.62 : P.iceAlbedo)
       .f('uAlbSnow', P.snowAlbedo === undefined ? 0.78 : P.snowAlbedo)
@@ -675,10 +761,16 @@ Planet.prototype.couple = function () {
       .f('uIceH0', P.iceH0 === undefined ? 0.5 : P.iceH0)
       .f('uSice', P.iceSalinity === undefined ? 4 : P.iceSalinity)
       .f('uFreezeRate', P.iceFreezeRate === undefined ? 5e-5 : P.iceFreezeRate)
-      .f('uClimApply', self.climApplyPerCouple || 0)
-      .f('uDTshift', self.climDTshift || 0);
-    self.fullscreen(pair[0], W, H);
-  });
+      .f('uClimApply', this.climApplyPerCouple || 0)
+      .f('uDTshift', this.climDTshift || 0);
+    this.fullscreen(kind, W, H, kind);   // 'cplO' / 'cplA'
+  }
+};
+Planet.prototype.coupleOcean = function () { this.couplePass('cplO'); };
+Planet.prototype.coupleAir = function () { this.couplePass('cplA'); };
+Planet.prototype.couple = function () {
+  this.coupleOcean();
+  this.coupleAir();
 };
 
 Planet.prototype.decl = function () {
@@ -697,16 +789,13 @@ Planet.prototype.sunDir = function () {
   return [Math.cos(d) * Math.cos(lon), Math.sin(d), Math.cos(d) * Math.sin(lon)];
 };
 
-Planet.prototype.step = function () {
+/* Explicit ocean dynamics (schemes 0/1): flux-form continuity for h_top,
+   pressure gradient -g*grad(h) on top / +g'*grad(h) on deep, equal-and-opposite
+   inter-layer drag, then tracer advection + diffusion.  A -> B */
+Planet.prototype.stepOcean = function () {
   var W = this.grid.W, H = this.grid.H;
   var P = this.params;
-
-  // Ocean dynamics: flux-form continuity for h_top, pressure gradient
-  // -g*grad(h) on top / +g'*grad(h) on deep, equal-and-opposite inter-layer
-  // drag, then tracer advection + diffusion.  A -> B
-  if (P.oceanScheme === 2) {
-    this.stepOceanB();                 // implicit free surface (Jacobi)
-  } else {
+  {
     var po = this.prog.ocean.use();
     this.gridUniforms(po);
     /* Scheme A (1) decouples the heightmap: drop div(h*u) from continuity (the
@@ -731,9 +820,14 @@ Planet.prototype.step = function () {
       .f('uCoriCN', P.coriCN ? 1 : 0)
       .f('uFbStab', inert ? 0 : P.fbStab)
       .i('uScheme', P.oceanScheme | 0);
-    this.fullscreen('dynO', W, H);
+    this.fullscreen('dynO', W, H, 'ocean');
   }
+};
 
+/* Air dynamics (both layers in one MRT pass). A -> B */
+Planet.prototype.stepAir = function () {
+  var W = this.grid.W, H = this.grid.H;
+  var P = this.params;
   var pa = this.prog.air.use();
   this.gridUniforms(pa);
   pa.tex('uLoA', this.A[4]).tex('uLoB', this.A[5]).tex('uHiA', this.A[6]).tex('uHiB', this.A[7])
@@ -746,8 +840,20 @@ Planet.prototype.step = function () {
     .f('uAirAdvect', P.airAdvect === undefined ? 0 : (P.airAdvect | 0))
     .f('uAirCs', P.airCs === undefined ? 40 : P.airCs)
     .f('uAirFbStab', P.airFbStab === undefined ? 20 : P.airFbStab);
-  this.fullscreen('dynA', W, H);
+  this.fullscreen('dynA', W, H, 'air');
+};
 
+/* One full dynamics substep: ocean + air + coupling (+ optional projection
+   and ice). The per-pass methods exist so benches can time passes in
+   isolation; this wrapper preserves the original order exactly. */
+Planet.prototype.step = function () {
+  var P = this.params;
+  if (P.oceanScheme === 2) {
+    this.stepOceanB();                 // implicit free surface (Jacobi)
+  } else {
+    this.stepOcean();                  // explicit (schemes 0/1)
+  }
+  this.stepAir();
   this.couple();
   if (P.rigidLid > 0.5) this.projectBarotropic();
   if (P.iceOn > 0.5) this.stepIce();
@@ -775,40 +881,42 @@ Planet.prototype.stepIce = function () {
     .f('uDsia', P.iceSia === undefined ? 3e-8 : P.iceSia)
     .f('uThkMax', P.iceThkMax === undefined ? 60 : P.iceThkMax)
     .f('uIceH0', P.iceH0 === undefined ? 0.5 : P.iceH0);
-  this.fullscreen(nxt === 1 ? 'ice1' : 'ice0', W, H);
+  this.fullscreen(nxt === 1 ? 'ice1' : 'ice0', W, H, 'ice');
   this.iceIdx = nxt;
   this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
 };
 
-/* Area-weighted global means for the carbon cycle (one REDUCE_FS draw + a
-   2-pixel readback). Returns temperatures in K and area fractions. */
+/* Area-weighted global means for the carbon cycle (P1.4 two-level reduction:
+   tile partials, then a 4x1 final with ONE 4-pixel readback). Returns
+   temperatures in K and area fractions. Summation order differs from the old
+   single-fragment loop: expect ~1e-5 relative agreement, not bitwise. */
 Planet.prototype.computeGlobals = function () {
   var gl = this.gl, P = this.params;
-  var pr = this.prog.reduce.use();
-  this.gridUniforms(pr);
-  pr.tex('uTopS', this.A[0]).tex('uIce', this.iceTex())
+  var pt = this.prog.tile.use();
+  this.gridUniforms(pt);
+  pt.tex('uTopS', this.A[0]).tex('uIce', this.iceTex())
     .f('uTopt', P.bioOptT === undefined ? 290 : P.bioOptT)
     .f('uTwidth', P.bioTwidth === undefined ? 12 : P.bioTwidth);
-  var b0 = new Float32Array(4), b1 = new Float32Array(4), b2 = new Float32Array(4);
-  pr.i('uWhich', 0); this.fullscreen('reduce', 1, 1);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce);
-  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, b0);
-  pr.i('uWhich', 1); this.fullscreen('reduce', 1, 1);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce);
-  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, b1);
-  pr.i('uWhich', 2); this.fullscreen('reduce', 1, 1);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce);
-  gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, b2);
+  this.fullscreen('tile', this.reduceTiles, 1, 'reduce');
+  var pr = this.prog.reduce.use();
+  this.gridUniforms(pr);
+  pr.tex('uTile0', this.tileTex[0]).tex('uTile1', this.tileTex[1]).tex('uTile2', this.tileTex[2])
+    .i('uTiles', this.reduceTiles);
+  this.fullscreen('reduce4', 4, 1, 'reduce');
+  gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.reduce4);
+  var b = new Float32Array(16);
+  gl.readPixels(0, 0, 4, 1, gl.RGBA, gl.FLOAT, b);
+  this.readbackCount++;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  var Aall = b0[1] || 1, Aoc = b0[3] || 1, Aifl = b1[1];
+  var Aall = b[1] || 1, Aoc = b[3] || 1, Aifl = b[5];
   return {
-    meanT:   b0[0] / Aall,
-    sstMean: b0[2] / Aoc,
-    landT:   Aifl > 1 ? b1[0] / Aifl : b0[0] / Aall,
+    meanT:   b[0] / Aall,
+    sstMean: b[2] / Aoc,
+    landT:   Aifl > 1 ? b[4] / Aifl : b[0] / Aall,
     areaTotal: Aall, areaOcean: Aoc,
-    iceFreeLandFrac: b1[1] / Aall,
-    suitOcean: b1[2], suitLand: b1[3],
-    iceFrac: b2[0] / Aall,                 // global ice-covered area fraction
+    iceFreeLandFrac: b[5] / Aall,
+    suitOcean: b[6], suitLand: b[7],
+    iceFrac: b[8] / Aall,                 // global ice-covered area fraction
   };
 };
 
@@ -825,14 +933,27 @@ Planet.prototype.greenhouseFromCO2 = function () {
 /* Global carbon cycle (see CO2.md): CPU ODE for atmospheric CO2 + biomass,
    advanced on a geological clock (co2Speed years per physics step). Reads the
    live climate via computeGlobals(), writes back the greenhouse factor. Runs
-   once per frame from loop(); the harness calls it explicitly. */
+   once per frame from loop() while co2On (never at defaults; the gate never
+   calls it, so cadence changes are gate-neutral). */
 Planet.prototype.stepCO2 = function () {
   var P = this.params;
-  var g = this.computeGlobals();
-  this.globals = g;
+  /* P1.2: the climate globals evolve on ~day timescales while a frame advances
+     minutes (dt*substeps sim-s), so refresh the GPU reduction at a sim-time
+     cadence (default 1 sim-day) and hold the last value between refreshes --
+     zero readbacks on most frames instead of 3/frame. The carbon ODE still
+     advances every frame on the held value (its own clock jumps geo-centuries
+     per frame, so a day-stale climate input is exact to ~1e-6). Sim-time, not
+     wall-time, so co2On runs stay deterministic. */
+  var every = P.globalsEvery === undefined ? 86400 : P.globalsEvery;
+  var lastT = (this.lastGlobalsT === undefined || this.lastGlobalsT === null) ? -1e30 : this.lastGlobalsT;
+  if (!this.globals || (this.simTime - lastT) >= every) {
+    this.globals = this.computeGlobals();
+    this.lastGlobalsT = this.simTime;
+  }
+  var g = this.globals;
   var Tref = P.co2Tref === undefined ? 288 : P.co2Tref;
   var ref  = P.co2Ref === undefined ? 280 : P.co2Ref;
-  var subs = Math.max(1, P.substeps | 0);
+  var subs = this.effSubsteps();
   var geoStep = (P.co2Speed === undefined ? 20 : P.co2Speed) * subs;   // geo-years this frame
   var years = geoStep;
   var n = Math.max(1, Math.ceil(years / 50));   // ODE sub-steps, <=50 yr each
@@ -896,14 +1017,14 @@ Planet.prototype.projectBarotropic = function () {
   // snapshot A[1],A[3] -> P[1],P[3]
   var cpy = this.prog.baroCopy.use();
   cpy.tex('uSrc0', this.A[1]).tex('uSrc1', this.A[3]);
-  this.fullscreen('baroV', W, H);
+  this.fullscreen('baroV', W, H, 'proj');
 
   // b = div(U*) into eta.y; phi (.x) warm-started from texPhi
   var dv = this.prog.baroDiv.use();
   this.gridUniforms(dv);
   dv.tex('uTopS', this.A[0]).tex('uTopV', this.A[1]).tex('uDeepV', this.A[3])
     .tex('uPhiPrev', this.texPhi);
-  this.fullscreen('etaA', W, H);
+  this.fullscreen('etaA', W, H, 'proj');
 
   // Jacobi sweeps: lap(phi) = b
   var etaT = { etaA: this.texEtaA, etaB: this.texEtaB };
@@ -913,7 +1034,7 @@ Planet.prototype.projectBarotropic = function () {
     var ji = this.prog.baroJacobi.use();
     this.gridUniforms(ji);
     ji.tex('uEtaIn', etaT[src]).f('uJacobiOmega', 0.8);
-    this.fullscreen(dst, W, H);
+    this.fullscreen(dst, W, H, 'proj');
     var t = src; src = dst; dst = t;
   }
 
@@ -922,7 +1043,7 @@ Planet.prototype.projectBarotropic = function () {
   this.gridUniforms(cr);
   cr.tex('uTopS', this.A[0]).tex('uTopV', this.P[1]).tex('uDeepV', this.P[3])
     .tex('uEta', etaT[src]);
-  this.fullscreen('oceanV', W, H);
+  this.fullscreen('oceanV', W, H, 'proj');
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
 
@@ -950,7 +1071,7 @@ Planet.prototype.stepOceanB = function () {
       .f('uHtot', P.hTotal).f('uHref', P.hTop)
       .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
       .f('uRhieChow', 0).f('uCoriCN', P.coriCN ? 1 : 0);
-  this.fullscreen('P', W, H);
+  this.fullscreen('P', W, H, 'ocean');
 
   // 2. RHS probe: R = eta_pred - dt*div(h*u*) from the predicted state. P -> etaA.
   var rr = this.prog.oceanRhs.use();
@@ -958,7 +1079,7 @@ Planet.prototype.stepOceanB = function () {
   rr.tex('uTopS', this.P[0]).tex('uTopV', this.P[1])
     .tex('uDeepS', this.P[2]).tex('uDeepV', this.P[3])
     .f('uDt', P.dt).f('uPgfTop', P.pgfTop);
-  this.fullscreen('etaA', W, H);
+  this.fullscreen('etaA', W, H, 'ocean');
 
   // 3. Jacobi loop with convergence tracking and early-exit.
   var etaT = { etaA: this.texEtaA, etaB: this.texEtaB };
@@ -973,11 +1094,11 @@ Planet.prototype.stepOceanB = function () {
       .tex('uCellC', this.texCellC)
       .f('uDt', P.dt).f('uPgfTop', P.pgfTop)
       .f('uJacobiOmega', 0.8);
-    this.fullscreen(dst, W, H);
+    this.fullscreen(dst, W, H, 'ocean');
     this.lastJacobiIters = it + 1;
     if (this.trackResidual) {
       // Only when validating: read back max |residual| for early-exit + history.
-      var mx = this._maxResidual(dst);
+      var mx = this._maxResidual(etaT[dst]);
       this.residualHistory.push(mx);
       if (!(mx > 0) || mx < 1e-6) { src = dst; break; }   // converged
     }
@@ -994,19 +1115,23 @@ Planet.prototype.stepOceanB = function () {
       .f('uPgfTop', P.pgfTop).f('uPgfDeepGain', P.pgfDeepGain)
       .f('uAlphaT', 1.7e-4).f('uBetaS', 7.8e-4)
       .f('uGravity', P.gravity);
-  this.fullscreen('dynO', W, H);
+  this.fullscreen('dynO', W, H, 'ocean');
 };
 
-/* 1-fragment max-reduction of the eta texture's |residual| channel (.w). */
-Planet.prototype._maxResidual = function (texName) {
+/* 1-fragment max-reduction of the eta texture's |residual| channel (.w).
+   Takes the eta TEXTURE (etaT[dst]); passing the FBO key string used to bind
+   the null texture and read a constant 1.0, so the early-exit could never
+   trigger. Harness-only (trackResidual). */
+Planet.prototype._maxResidual = function (tex) {
   var gl = this.gl;
   var pr = this.prog.maxRed.use();
   this.gridUniforms(pr);
-  pr.tex('uSrc', this[texName]).i('uCount', this.grid.V);
-  this.fullscreen('maxRes', 1, 1);
+  pr.tex('uSrc', tex).i('uCount', this.grid.V);
+  this.fullscreen('maxRes', 1, 1, 'max');
   var buf = new Float32Array(4);
   gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo.maxRes);
   gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, buf);
+  this.readbackCount++;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   return buf[0];
 };
@@ -1052,12 +1177,18 @@ Planet.prototype.stepFlow = function (dt) {
       .f('uMove', move).f('uTransK', transK).f('uMaxP', 0.25)
       .f('uVScale', c.wScale).f('uFluxSign', c.fluxSign).i('uWChan', c.wChan);
     this.bindFlow(ps, pool);
-    this.fullscreen('st' + i + (nxt === 1 ? 'b' : 'a'), this.PW, this.PH);
+    this.fullscreen('st' + i + (nxt === 1 ? 'b' : 'a'), this.PW, this.PH, 'flow');
     // 2. TRAIL: shift the conveyor, writing the new head (+sublayer) into slot 0.
+    /* P3.3: shift only the drawn prefix + 2 guard slots (min(PT, K+2)); slots
+       above are never read (draw/STATE/respawn all read < K), and raising
+       flowSegs refills them within a few frames. At default K=24 the dominant
+       trail pass drops to 26/40 rows. uSlots stays PT (texture layout). */
+    var K = Math.max(2, Math.min(this.PT, P.flowSegs | 0));
+    var lim = Math.min(this.PT, K + 2);
     var pt = this.prog.trail.use();
     pt.tex('uTrail', pool.trail[cur]).tex('uState', pool.state[nxt])
       .iv2('uPDim', this.PW, this.PH).i('uSlots', this.PT);
-    this.fullscreen('tr' + i + (nxt === 1 ? 'b' : 'a'), this.PW, this.PH * this.PT);
+    this.fullscreen('tr' + i + (nxt === 1 ? 'b' : 'a'), this.PW, this.PH * lim, 'flow');
     pool.idx = nxt;
   }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1070,7 +1201,7 @@ Planet.prototype.stepVFlow = function () {
   var p = this.prog.vflow.use();
   this.gridUniforms(p);
   p.tex('uTopS', this.A[0]).tex('uTopV', this.A[1]).tex('uDeepV', this.A[3]).tex('uLoA', this.A[4]);
-  this.fullscreen('vflow', this.grid.W, this.grid.H);
+  this.fullscreen('vflow', this.grid.W, this.grid.H, 'vflow');
   this.vflowInit = true;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 };
@@ -1078,7 +1209,10 @@ Planet.prototype.stepVFlow = function () {
 Planet.prototype.render = function () {
   var gl = this.gl;
   var P = this.params;
-  var dpr = Math.min(window.devicePixelRatio || 1, 2);
+  /* P4.2: cap device pixels at 1.5 for L7 (4x the cells already; full-dpr
+     fragments are pure fill cost), 2 elsewhere. */
+  var dprCap = (this.grid && this.grid.level >= 7) ? 1.5 : 2;
+  var dpr = Math.min(window.devicePixelRatio || 1, dprCap);
   var w = Math.max(1, Math.floor(this.canvas.clientWidth * dpr));
   var h = Math.max(1, Math.floor(this.canvas.clientHeight * dpr));
   if (this.canvas.width !== w || this.canvas.height !== h) {
@@ -1103,18 +1237,33 @@ Planet.prototype.render = function () {
     return;
   }
 
+  /* P4.2: mvp/eye recomputed only when the camera or canvas size moves
+     (static scenes skip the trig + matrix chain every frame; uSun/uEye
+     uniforms still upload since the sun moves). */
   var c = this.cam;
-  var eye = [
-    c.dist * Math.cos(c.phi) * Math.sin(c.theta),
-    c.dist * Math.sin(c.phi),
-    c.dist * Math.cos(c.phi) * Math.cos(c.theta),
-  ];
-  var proj = m4.persp(0.9, w / h, 0.05, 40);
-  var view = m4.look(eye, [0, 0, 0], [0, 1, 0]);
-  var mvp = m4.mul(proj, view);
+  var mvpKey = c.theta + '|' + c.phi + '|' + c.dist + '|' + w + '|' + h;
+  if (this._mvpKey !== mvpKey) {
+    var eye = [
+      c.dist * Math.cos(c.phi) * Math.sin(c.theta),
+      c.dist * Math.sin(c.phi),
+      c.dist * Math.cos(c.phi) * Math.cos(c.theta),
+    ];
+    var proj = m4.persp(0.9, w / h, 0.05, 40);
+    var view = m4.look(eye, [0, 0, 0], [0, 1, 0]);
+    this._mvp = m4.mul(proj, view);
+    this._eye = eye;
+    this._mvpKey = mvpKey;
+  }
+  var eye = this._eye, mvp = this._mvp;
 
+  /* P4.3: past 80k verts the per-vertex 1-ring loops dominate; read the
+     baked blend instead (bit-identical values, vertex work only once per
+     field change -- and skipped while paused). */
+  var useBake = this.grid.V > 80000 ? 1 : 0;
+  if (useBake) this._bakeBlend(P.mode, w, h);
   var g = this.getGlobeProg(P.mode).use();
   this.gridUniforms(g);
+  g.tex('uBake', this.blendTex).i('uUseBake', useBake);
   g.tex('uTopS', this.A[0]).tex('uTopV', this.A[1])
     .tex('uDeepS', this.A[2]).tex('uDeepV', this.A[3])
     .tex('uLoA', this.A[4]).tex('uLoB', this.A[5])
@@ -1136,6 +1285,7 @@ Planet.prototype.render = function () {
     var cl = this.prog.cloud.use();
     this.gridUniforms(cl);
     cl.tex('uLoB', this.A[5]).tex('uHiB', this.A[7])
+      .tex('uBake', this.blendTex).i('uUseBake', useBake)
       .m4('uMVP', mvp).f('uShellR', 1.02)
       .v3('uSun', sun[0], sun[1], sun[2]).f('uNight', P.nightShading);
     gl.drawElements(gl.TRIANGLES, this.grid.indices.length, gl.UNSIGNED_INT, 0);
@@ -1164,6 +1314,10 @@ Planet.prototype.drawTracers = function (mvp, equirect, psz) {
   var dots = (P.flowLines === undefined ? 1 : P.flowLines) < 0.5;
   var K = Math.max(2, Math.min(this.PT, P.flowSegs | 0));
   var n = this.PW * this.PH;
+  /* P4.2: draw every 2nd particle at L7 (tracer vertex work halves; L5/L6
+     unchanged). Sparser trails at the densest grid -- a documented knob. */
+  var stride = (this.grid && this.grid.level >= 7) ? 2 : 1;
+  var nDraw = Math.floor(n / stride);
   var mask = P.streamline | 0;
   for (var pi = 0; pi < this.pools.length; pi++) {
     var pool = this.pools[pi], c = pool.cfg;
@@ -1179,9 +1333,44 @@ Planet.prototype.drawTracers = function (mvp, equirect, psz) {
       .v3('uColor1', c.col[1][0], c.col[1][1], c.col[1][2])
       .i('uMask', mask).i('uIdx0', c.idx[0]).i('uIdx1', c.idx[1]);
     if (mvp) pp.m4('uMVP', mvp);
-    gl.bindVertexArray(this.vaoEmpty);
-    gl.drawArrays(dots ? gl.POINTS : gl.LINES, 0, dots ? n : n * 2 * (K - 1));
+    pp.i('uStride', stride);
+    if (dots) {
+      pp.i('uIndexed', 0);
+      gl.bindVertexArray(this.vaoEmpty);
+      gl.drawArrays(gl.POINTS, 0, nDraw);
+    } else {
+      /* P3.3: indexed LINES -- K verts/particle + 2(K-1) indices (was 2(K-1)
+         duplicated verts); shared slot verts shade once via the xform cache.
+         Same segment pairs in the same order: pixel-identical. */
+      pp.i('uIndexed', 1);
+      this._tracerIbo(K, n, stride);
+      gl.drawElements(gl.LINES, nDraw * 2 * (K - 1), gl.UNSIGNED_INT, 0);
+      gl.bindVertexArray(this.vaoEmpty);
+    }
   }
+};
+
+/* P3.3: (re)build the tracer index buffer for (K slots, n particles) --
+   per particle the pairs (s,s+1). Rebuilt only when K or n changes (slider /
+   pool rebuild); the VAO captures the element-buffer binding. */
+Planet.prototype._tracerIbo = function (K, n, stride) {
+  var gl = this.gl;
+  if (!this.vaoTracer) {
+    this.vaoTracer = gl.createVertexArray();
+    this.iboTracer = gl.createBuffer();
+    this._iboK = -1; this._iboN = -1; this._iboS = -1;
+  }
+  gl.bindVertexArray(this.vaoTracer);
+  if (this._iboK === K && this._iboN === n && this._iboS === stride) return;
+  var nD = Math.floor(n / stride);
+  var idx = new Uint32Array(nD * 2 * (K - 1)), o = 0;
+  for (var q = 0; q < nD; q++) {
+    var base = (q * stride) * K;   // strided pids; VS decode unchanged
+    for (var j = 0; j < K - 1; j++) { idx[o++] = base + j; idx[o++] = base + j + 1; }
+  }
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.iboTracer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+  this._iboK = K; this._iboN = n; this._iboS = stride;
 };
 
 Planet.prototype.renderEquirect = function (w, h, sun) {
@@ -1231,30 +1420,64 @@ Planet.prototype.renderEquirect = function (w, h, sun) {
   gl.disable(gl.BLEND);
 };
 
+/* Effective substeps/frame: auto mode takes the 2 Hz EMA value, else manual. */
+Planet.prototype.effSubsteps = function () {
+  var P = this.params;
+  if (P.substepsAuto > 0.5) return this.autoN || 8;
+  return Math.max(1, P.substeps | 0);
+};
+
 Planet.prototype.loop = function () {
   if (this.disposed) return;
   this.raf = requestAnimationFrame(this._loop);
   var P = this.params;
+  var n = this.effSubsteps();
   if (P.running) {
     if (P.co2On > 0.5) this.stepCO2();
-    for (var i = 0; i < P.substeps; i++) this.step();
-    this.stepSmooth();
-    this.stepVFlow();
-    this.stepFlow(P.dt * P.substeps);
+    var t0 = performance.now();
+    for (var i = 0; i < n; i++) this.step();
+    /* P2.1: accumulate physics time for the ms/step EMA (always measured, so
+       enabling auto mid-run picks a sane n immediately; unused when manual). */
+    this._physMsAcc = (this._physMsAcc || 0) + (performance.now() - t0);
+    this._physStepsAcc = (this._physStepsAcc || 0) + n;
+    /* P3.2: skip invisible flow-viz work. drawTracers draws nothing when the
+       streamline mask is 0 (both pools skipped), so freeze smooth + flow
+       (their only consumer is the tracer advection); vflow still runs when a
+       vertical-flux display mode (18-21) shows it. */
+    var tracersOn = (P.streamline | 0) !== 0;
+    var mm = P.mode | 0;
+    var vflowShown = mm >= 18 && mm <= 21;
+    if (tracersOn) this.stepSmooth();
+    if (tracersOn || vflowShown || !this.vflowInit) this.stepVFlow();
+    if (tracersOn) this.stepFlow(P.dt * n);
   } else if (!this.vflowInit) {
     this.stepVFlow();       // ensure the up/down map is populated when paused
   }
   this.render();
   this.frames++;
+  this._effN = n;
   var now = performance.now();
   if (now - this.lastFps > 500) {
     this.fps = (this.frames * 1000) / (now - this.lastFps);
     this.frames = 0; this.lastFps = now;
+    /* P2.1: 2 Hz EMA of measured ms/step -> autoN = largest n with
+       ms/step x n <= 16.7 (clamped to the slider range). Flow/draw overhead
+       is NOT reserved, so on draw-bound rigs fps lands under 60 -- visible
+       in the fps readout (honest) rather than hidden. */
+    if ((this._physStepsAcc || 0) > 0) {
+      var sample = this._physMsAcc / this._physStepsAcc;
+      this._emaStepMs = this._emaStepMs ? (0.5 * this._emaStepMs + 0.5 * sample) : sample;
+      this._physMsAcc = 0; this._physStepsAcc = 0;
+    }
+    if (this._emaStepMs > 0)
+      this.autoN = Math.max(1, Math.min(128, Math.floor(16.667 / this._emaStepMs)));
     if (this.onStats) this.onStats({
       fps: this.fps, days: this.simTime / 86400,
       cells: this.grid.V, level: this.grid.level,
       co2On: P.co2On > 0.5, co2: P.co2, biomass: P.biomass, greenhouse: P.greenhouse,
       meanT: this.globals ? this.globals.meanT : null,
+      auto: P.substepsAuto > 0.5, effN: n, autoN: this.autoN || null,
+      daysPerSec: n * P.dt * this.fps / 86400,
     });
   }
 };

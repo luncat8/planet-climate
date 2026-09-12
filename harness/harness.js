@@ -8,13 +8,14 @@
 const puppeteer = require('puppeteer');
 const path = require('path');
 const fs = require('fs');
+const { launchBrowser } = require('./chrome-launch');
 
 function arg(name, dflt) {
   const hit = process.argv.find(a => a.startsWith('--' + name + '='));
   return hit ? hit.slice(name.length + 3) : dflt;
 }
 
-const DIR    = path.resolve(arg('dir', path.join(__dirname, '..', 'project')));
+const DIR    = path.resolve(arg('dir', path.join(__dirname, '..', 'planet')));
 const STEPS  = parseInt(arg('steps', '500'), 10);
 const LEVEL  = parseInt(arg('level', '5'), 10);
 const OUT    = arg('out', '');
@@ -29,11 +30,9 @@ const LEGACY_SEED = process.argv.includes('--legacy-seed');
 const SEED   = 12345;
 
 (async () => {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--enable-unsafe-swiftshader', '--use-gl=angle',
-           '--use-angle=swiftshader', '--disable-gpu-sandbox', '--enable-webgl',
-           '--ignore-gpu-blocklist', '--disable-dev-shm-usage'],
+  const browser = await launchBrowser(puppeteer, {
+    protocolTimeout: 600000,
+    args: ['--enable-webgl'],
   });
   const page = await browser.newPage();
   const logs = [];
