@@ -250,7 +250,7 @@
      behind a batched draw sweep).
 
      Real GPUs: they block for a whole frame, but NOT for a batch of one small
-     pass. The owner captures 40-00/40-01 (RTX, Chrome 151) prove it: with
+     pass. The owner captures 30-05-00/30-05-01 (RTX, Chrome 151) prove it: with
      finish() only, the isolated `ocean` pass reads 0.001-0.029 ms at L7 — a
      163,842-cell pass with ~50 dependent texelFetches per cell cannot run in
      1 us — and the draw sweep failed to reproduce between two runs of the same
@@ -312,7 +312,7 @@
       span = timedBatch(fn, n);
     }
     /* The calibration batch is a warm-up, not a sample: on the owner GPU the
-       first batch of a heavy config ran up to 34x off the rest (40-00 read
+       first batch of a heavy config ran up to 34x off the rest (30-05-00 read
        `step` = 17.15 ms at L7 where the whole x10 frame is 5.99 ms), so keeping
        it in a 3-sample median would let a cold batch decide the value. */
     var t = [], total = 0;
@@ -527,7 +527,7 @@
     /* Repeat each pass from the SAME state. Running one stepper alone hundreds
        of times drives the fields off the manifold (an ocean pass with no
        coupling or air), and every later pass is then timed on garbage — that
-       is what made 40-00 report `step` = 17.15 ms at L7 against a 5.99 ms
+       is what made 30-05-00 report `step` = 17.15 ms at L7 against a 5.99 ms
        whole frame, and `closure` = 0.00. serializeState()/applyState() is the
        engine's own snapshot path; one restore per batch keeps drift inside a
        batch and costs ~1 s/level at L7. */
@@ -569,7 +569,7 @@
       thb.textContent = 'tracers ms @' + partsB + 'k';
       // children[], not lastChild: lastChild is the trailing whitespace TEXT
       // node, which put this header after n/batch while the cells stayed in
-      // (tracers, tracers@B, n) order — the 40-00/40-01 logs have that
+      // (tracers, tracers@B, n) order — the 30-05-00/30-05-01 logs have that
       // mismatch and carry a note saying so.
       mh.insertBefore(thb, mh.children[mh.children.length - 1]);
     }

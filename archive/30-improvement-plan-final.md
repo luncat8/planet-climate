@@ -388,7 +388,7 @@ its measurable form ("L6 within 2 % of the committed owner-GPU ×128 baseline,
 median-of-3") and a new rule 6 forbids sub-tick evidence.
 
 **Finished in the last session under this plan (instrumentation repair).** The
-final owner captures (`archive/30-04`, then `40-00`/`40-01` on the repaired
+final owner captures (`archive/30-04`, then `30-05-00`/`30-05-01` on the repaired
 page) showed the visual bench could not support any claim below ~0.3 ms:
 `performance.now()` is clamped to 0.1 ms on a non-cross-origin-isolated page,
 ×10 rows under-reported by 1.7–12.2× against the ×128 slope, and one `finish()`

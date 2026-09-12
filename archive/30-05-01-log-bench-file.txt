@@ -1,7 +1,7 @@
 # timer: performance.now() resolution 0.1000 ms (crossOriginIsolated=false, origin file:)
 # method: batch-averaged — every value is (batch span)/n with n grown on a x4 ladder so a batch spans >= 10.0 ms (>= 100 timer ticks, <= 1 % quantization); median over the time-boxed batches; one gl.finish() per batch. n/batch column = n; * marks a value whose batch hit the n cap (error > 1 %).
 # input: levels=5,6,7; substeps=10,128; particles(k)=16; particlesB(k)=64; runs=1
-# browser: Chrome 151, devicePixelRatio 1.25 (same machine as 40-00)
+# browser: Chrome 151, devicePixelRatio 1.25 (same machine as 30-05-00)
 
 level	scheme	substeps	cells	frame ms	draw ms	max fps	days/s	tracers ms	n/batch	tracers ms @64k
 L5	explicit	10	10,242	0.800	0.172	1250	8.681	0.095	0.072	16

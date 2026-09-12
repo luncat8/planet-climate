@@ -1,0 +1,26 @@
+## Your two runs found real bugs in what I shipped
+
+First, the honest part: the batched page you ran had two defects, and your `30-05-00`/`30-05-01` pair is what proved them.
+
+- **`ocean` = 0.001–0.029 ms at L7** is impossible for a 163,842-cell pass with ~50 dependent `texelFetch`es per cell, while `step` read **17.15 ms** where the whole ×10 frame is 5.99 ms — 10 steps cannot cost 171 ms. Two causes: `gl.finish()` does **not** force a batch of one small pass even on your GPU, and repeating one stepper alone drives the fields off the manifold, so every later pass was timed on garbage (that's the `closure` = 0.00/0.28).
+- **Header column order was wrong**: I inserted the `tracers ms @64k` header before `mh.lastChild`, which is the trailing whitespace *text node* — so it landed after `n/batch` while the cells stayed in (tracers, tracers@B, n) order. Your `0.205 0.237 16` is 16 k = 0.205 ms, 64 k = 0.237 ms, n = 16. Both logs carry that note.
+
+Fixed: every batch now ends in a 1 px forcing readback on **all** renderers (your data killed my "software-only" gate), each pass is re-timed from a `serializeState()` snapshot restored per batch with n ≤ 32, the calibration batch is no longer counted as a sample, and the header insertion uses `children[]`.
+
+## Analysis
+
+**`30-04`** (computed, not eyeballed): `30-03` has **24/24** values as exact multiples of 0.1 ms; `30-04` has **2/24** — so that run's timer was *not* clamped (your http run explains how: `crossOriginIsolated=true` → 0.005 ms). Its ×10 rows under-report **1.7–12.2×** vs the ×128 slope (L6 explicit 0.11 measured vs 1.34 predicted) — a second defect, not rounding. Five of six ×128 rows reproduce within ±1.4 %, but L5 explicit ×128 swings **+32 %**. `draw ms` = 0.02 at every level, sweep 0.01–0.05 — so **P3's and P4's "floor documented" closures rested on cells the timer couldn't resolve** and are withdrawn.
+
+**`30-05-00` vs `30-05-01`** (same machine, 20× timer difference): 8 of 12 frame rows agree within 8 %, all four L5/L6 ×128 rows within 4 %, and the ×10 rows now sit *above* the slope instead of 12× below. Still broken: L7 ×128 disagrees 1.4–2.4× and `30-05-01` reports implicit 50.38 ms **<** explicit 85.93 ms — impossible, since implicit adds the Jacobi solve. Likely cause (unverified): nothing equilibrates L7 — `planet/planet_state.js` isn't tracked in this repo and only applies at L5 anyway.
+
+## Benchmark changes
+
+Batch-averaged timing (span/n, n grown to ≥ 100 timer ticks ⇒ ≤ 1 % error), `# timer:` + `# method:` + `n/batch` + `*` in every log, forcing readback, snapshot-restored pass isolation with a `closure` row, `Runs` median-of-N for rule 3, and software-GL guards (heavy stays n=1 — batching frames there trips the documented >10 M-queued-cell-pass cliff).
+
+## Plans
+
+`40-improvement-plan-webgpu.md` holds Phases 5–8, rules (rule 3 re-based to median-of-3, new rule 6 banning sub-tick evidence), cross-borrow, risks, and carry-overs **C1–C8**. `30-improvement-plan-final.md` is archived with a closure note.
+
+**Verified:** `BASELINES_DIR=baselines-swvk ./gate.sh bench-timing-fix` → s0 L5/L6/L7 **IDENTICAL** (`f3f718e5`/`50cbc2ae`/`23806737`, nan=0), exit 0; `node bench_visual_smoke.js` → `ERRORS []`, timer 0.1 ms reported, max n/batch 4, all six sweep cells resolved, explicit 164.8 ms < implicit 168.9 ms.
+
+**Needs your machine:** one run on the current page with `Runs = 3` (C1/C2), an L7 save via `mksave.js --level=7` or a documented spin-up (C8), and the GUI HUD check for the disputed "L6 implicit ×128 = 60 fps" (C3).
