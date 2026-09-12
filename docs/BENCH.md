@@ -183,6 +183,17 @@ WebGL renderer/vendor, DPR, browser, and input settings. Save that complete
 text as the visual log: it is the device evidence required for performance
 claims and makes a SwiftShader result unambiguous.
 
+**When a run ends the page stops all simulation work.** The benchmark planet
+is disposed and the GL context is dropped, so the GPU process cannot keep
+burning CPU on queued frames — on software renderers `gl.finish()` doesn't
+block, so an unfinished teardown would leave a deep command backlog draining
+long after "done" (the canvas goes blank on purpose). **Run benchmark** swaps
+in a fresh canvas/context and measures again; the copied report keeps the
+device strings captured at the start of the run. If the renderer string
+matches a software implementation (SwiftShader/llvmpipe/…), the status line
+and the copied payload carry a `WARNING: SOFTWARE RENDERER` line, so a
+headless capture can never be mistaken for GPU wall-clock evidence.
+
 - **Levels** / **Substeps** / **Particles(k)** — the matrix to sweep.
 - For every `level × scheme × substeps` it times the full frame
   (`substeps × step()` + `stepSmooth`+`stepVFlow`+`stepFlow` + `render`) with a
@@ -210,14 +221,42 @@ test).
 
 #### Historical visual logs
 
-`archive/30-00-log-9755c73.txt` and `archive/30-01-log-6b92890.txt` are retained
-as historical pre-isolation captures, not as a before/after performance baseline. They
-pre-date benchmark isolation and omit a renderer string; their 0.10 ms low-work
-rows and 0.00 ms draw column have the documented SwiftShader submission-time
-signature. In addition, the old page's live rAF loop could submit frames between
-timed samples. Do not use their small high-substep deltas to accept or reject P4.
-Re-run the matrix on the owner GPU with this version and archive the copied,
-metadata-bearing result instead.
+`archive/30-00-log-9755c73.txt`, `archive/30-01-log-6b92890.txt`, and
+`archive/30-02-log-69292b4-bench.html.txt` are retained as historical
+captures only — **none is GPU wall-clock evidence**, and none may be used to
+accept or reject any phase.
+
+- `30-00` / `30-01` pre-date benchmark isolation and omit a renderer string;
+  in addition, the old page's live rAF loop could submit frames between timed
+  samples.
+- `30-02` comes from the repaired page (autoStart isolation, tracers column,
+  draw sweep, auto@60 rows are all present) but still carries the
+  SwiftShader submission-time signature, and it was NOT saved via the
+  done/copy control: it has no `# renderer:` header (rule 5 violation — every
+  reported number must carry a device string).
+- Shared signature of all three: **draw = 0.00 ms in every row**, tracers =
+  0.00 (30-02), the whole draw sweep = 0.00 (30-02), and 0.10 ms / 10 000-fps
+  low-work rows — physically impossible on a real GPU; this is command
+  submission cost while `gl.finish()` runs async (see driver artifacts). The
+  larger frame-ms rows (e.g. L7 implicit ×128 ≈ 241–249 ms) are the
+  documented ~300-finish backpressure cliff where submits start blocking on
+  queue drain — submission regime mixing, not execution timing.
+- Cross-capture stability (explicit ×128 frame ms):
+  L5 3.60/3.90/3.80, L6 16.60/18.00/17.10, L7 37.00/38.60/36.70 across
+  `9755c73` → `6b92890` → `69292b4`. All three sit within ±8% of each other
+  across commits that include the whole P0–P4 change set — consistent with
+  one headless submission regime, i.e. these logs cannot distinguish code
+  changes and must not be read as a performance trend.
+- 30-02's per-pass table (ocean 0.035–0.436 ms, draw 0.000) is the same
+  regime: finish-per-pass traces measure submission on software GL — kept for
+  structure only, exactly as the `traceStart/traceStop` real-GPU-only note
+  warns.
+
+The repaired page now flags software renderers itself (status line +
+`# WARNING: SOFTWARE RENDERER` in the copied payload), so a fourth headless
+capture is self-identifying. The Phase-5 evidence gate still stands: run the
+matrix on a real GPU, three repeats, archive the copied (header-bearing,
+warning-free) TSVs under `harness/logs/`.
 
 ### Reference GUI performance (real GPU, from the project owner)
 
@@ -500,3 +539,30 @@ with `node harness/bench_visual_smoke.js` after `harness/setup_chrome.sh`:
 copied payload must populate without JS/GL errors. This is a functional test,
 not a source of performance numbers. All committed headless numbers come from
 `bench_backend.js` (forced differencing, closure-checked).
+
+---
+
+## WebGPU availability (Phase-5 readiness probe)
+
+`harness/probe_webgpu.js` reports `navigator.gpu`, the adapter, and runs a tiny
+compute dispatch end-to-end. Phase 5 (P5.1–P5.6) needs it green on the machine
+that develops the engine.
+
+**Sandbox result (2026-09-12, Chromium 152.0.7977.0 headless,
+`@sparticuz/chromium` build, `--enable-unsafe-swiftshader` from
+`chrome-launch.js`): `navigator.gpu` is UNDEFINED** — also with
+`--enable-features=WebGPU,…`. This build ships no WebGPU implementation, so the
+P5 parity harness (`harness/parity_webgpu.js`) and the WebGPU acceptance
+numbers (L7 WebGPU ≤ 0.5× L7 WebGL) cannot be produced in the sandbox. Until a
+WebGPU-capable browser is in play, the WebGL engine + `bench_backend.js` +
+`gate.sh` remain the sandbox-verifiable surface; P5 implementation and
+verification move to the owner machine (the probe runs there unchanged).
+
+## Gate re-validation log
+
+Committed-state gate runs (rule 1 evidence; scheme 0 = regression-gated vs
+`harness/baselines-swvk`, schemes 1/2 = NaN-checked):
+
+| date | tag | tree | result |
+|---|---|---|---|
+| 2026-09-12 | `p4-teardown-check` | post-P4 + bench.html teardown/warning (no sim-math change) | s0 L5/L6/L7 **IDENTICAL** (`f3f718e5`/`50cbc2ae`/`23806737` = P4 gate hashes); s1/s2 hashes reported, nan=0 |

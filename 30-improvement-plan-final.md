@@ -104,6 +104,71 @@ not complete, and neither are P6/P7, so this active plan must **not** move to
 `archive/`. P6's rAF hygiene can be applied during the P5 integration, but its
 smoothness acceptance must be measured against the repaired visual baseline.
 
+### Evidence-gate status and sandbox capabilities (2026-09-12, second update)
+
+**Third visual capture analyzed — still headless, still invalid for the gate.**
+`archive/30-02-log-69292b4-bench.html.txt` came from the *repaired* page
+(isolation, tracers column, draw sweep, auto@60 rows all present) but:
+- **no device header** — it was not saved via the done/copy control (rule 5:
+  every reported number carries its device string);
+- **full SwiftShader submission-time signature**: draw = 0.00 ms in every row,
+  tracers = 0.00, whole draw sweep = 0.00, 0.10 ms / 10 000-fps low-work rows;
+  the larger frame-ms rows (L7 implicit ×128 ≈ 241 ms) are the documented
+  ~300-finish backpressure cliff, not execution timing.
+- Cross-capture explicit ×128 frame ms: L5 3.60/3.90/3.80, L6 16.60/18.00/17.10,
+  L7 37.00/38.60/36.70 across `9755c73` → `6b92890` → `69292b4` — ±8% across the
+  entire P0–P4 change set, i.e. one headless regime, not a trend. Full analysis
+  in `docs/BENCH.md` → Historical visual logs. It stays in `archive/` as
+  history, like 30-00/30-01.
+
+**Hardening landed this checkpoint (evidence-chain repairs):**
+1. `bench.html` **stops all simulation work when a run ends**: the planet is
+   disposed and the GL context is dropped, so the GPU process stops burning
+   CPU on the queued-frame backlog (owner-reported; on software GL
+   `gl.finish()` doesn't block, so the backlog otherwise drains long after
+   "done"). Re-runs swap in a fresh canvas/context (headless Chromium never
+   delivers `webglcontextrestored`, verified by probe — a restoreContext-based
+   design dead-locked re-runs). Device strings are captured at start, so the
+   copy button survives teardown. Verified: smoke test green + two-run probe
+   (run → teardown → re-run → copy intact, no JS errors).
+2. `bench.html` **detects software renderers** (renderer string match) and
+   marks both the status line and the copied payload with
+   `# WARNING: SOFTWARE RENDERER — submission-time numbers, NOT GPU
+   wall-clock`. A fourth headless capture is now self-identifying.
+3. `harness/probe_webgpu.js` (new): Phase-5 readiness check —
+   `navigator.gpu` + adapter + end-to-end compute dispatch.
+
+**Sandbox WebGPU finding:** Chromium 152 headless (the `@sparticuz/chromium`
+build, `--enable-unsafe-swiftshader` set) exposes **no `navigator.gpu`** even
+with WebGPU feature flags — the build ships no WebGPU implementation. So P5's
+parity harness and acceptance (L7 WebGPU ≤ 0.5× L7 WebGL) are not runnable in
+the sandbox; Phase 5 implementation+verification must happen on a
+WebGPU-capable browser (owner machine). `docs/BENCH.md` → "WebGPU
+availability" records the probe + result.
+
+**Gate re-validation at this checkpoint:** `BASELINES_DIR=baselines-swvk
+SCHEMES="0 1 2" ./gate.sh p4-teardown-check` — s0 L5/L6/L7 IDENTICAL to the
+committed swvk baselines (hashes match the P4 gate exactly:
+`f3f718e5`/`50cbc2ae`/`23806737`), s1/s2 nan=0. The bench.html changes touch
+no simulation math.
+
+**Decision.** The Phase-5 evidence gate remains open, and it is now clear it
+can only close on owner hardware — the sandbox has neither a GPU nor WebGPU.
+Owner action checklist (in order):
+1. **GPU machine:** open `planet/bench.html` in a normal Chrome (verify
+   `chrome://gpu` shows hardware WebGL), run the default L5/L6/L7 × 10,128
+   matrix, press *copy to clipboard*, repeat ×3, archive each payload as
+   `harness/logs/climate-p4-visual-{1,2,3}-<gpu>.txt`. A valid capture has a
+   `# renderer:` header and **no** `# WARNING: SOFTWARE RENDERER` line.
+2. **Same machine:** `node harness/probe_webgpu.js` (or any Chrome with
+   WebGPU) to confirm P5's harness target exists.
+3. Then **Phase 5 starts** (P5.1…): its code and parity harness are written
+   against that browser; sandbox CI keeps running `gate.sh` + backend bench
+   for the WebGL reference engine meanwhile.
+
+Until 1–2 land, sandbox-side work is limited to evidence-chain repairs like
+this checkpoint's — no further phase implementation is measurable here.
+
 ### Phase 0 — Instrument & baseline (0.5–1 d) `[R]`+`[A]`
 - **P0.1** `[R]` Pass-level timing in `bench.html` via a `Planet.prototype.trace`
   toggle (ocean / air / cplO / cplA / proj / ice / smooth / vflow / flow / draw),

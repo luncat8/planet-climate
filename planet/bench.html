@@ -101,6 +101,10 @@
       <code>gl.finish()</code> doesn't block there, so this page would report submission cost, not GPU time.
       For headless numbers use <code>harness/bench_backend.js</code> (forced differencing — see
       <code>docs/BENCH.md</code>).
+      <br><b>When a run ends the page stops all simulation work:</b> the planet is disposed and the
+      GL context is dropped, so the GPU process can't keep burning CPU on queued frames (the canvas
+      goes blank on purpose). The copied report keeps the device strings captured at start; press
+      <b>Run benchmark</b> to rebuild and measure again.
     </div>
   </div>
 </div>
@@ -121,6 +125,12 @@
   var copyStatusEl = document.getElementById('copyStatus');
   var planet = null;
   var benchRunning = false;
+  // Renderer/vendor strings captured when the context is created. A finished
+  // run tears the context down (see teardown), so the copy button must not
+  // depend on a live GL context.
+  var deviceInfo = { renderer: 'unavailable', vendor: 'unavailable' };
+  var contextLostByUs = false;
+  var contextCreated = false;
 
   // ?fast=1 shrinks warmup/sample counts — for a quick correctness pass on slow
   // (software) renderers; real GPU runs should omit it for stable medians.
@@ -150,17 +160,27 @@
   // Keep a device/config header with copied results. It makes an owner-GPU log
   // auditable and prevents headless SwiftShader output being mistaken for GPU
   // wall-clock evidence.
-  function resultText() {
+  function captureDeviceInfo() {
     var gl = planet && planet.gl;
-    var renderer = 'unavailable';
-    var vendor = 'unavailable';
-    if (gl) {
+    if (!gl) return;
+    try {
       var debug = gl.getExtension('WEBGL_debug_renderer_info');
-      renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-      vendor = debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
-    }
+      deviceInfo.renderer = debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+      deviceInfo.vendor = debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+    } catch (e) {}
+    // Software renderers (headless SwiftShader, llvmpipe) execute async and
+    // gl.finish() doesn't block there: every number this page produces is
+    // submission cost, not GPU wall-clock. Flag it in the UI and in the
+    // copied payload so a headless capture can't be mistaken for GPU evidence
+    // (three archived logs already carried this signature unnoticed).
+    deviceInfo.software = /swiftshader|llvmpipe|softpipe|software/i.test(
+      deviceInfo.renderer + ' ' + deviceInfo.vendor);
+  }
+  function resultText() {
+    var renderer = deviceInfo.renderer;
+    var vendor = deviceInfo.vendor;
     var clean = function (s) { return String(s || '').replace(/[\r\n]+/g, ' '); };
-    return [
+    var head = [
       '# Planet visual benchmark',
       '# completed UTC: ' + new Date().toISOString(),
       '# renderer: ' + clean(renderer),
@@ -170,7 +190,13 @@
       '# input: levels=' + document.getElementById('levels').value +
         '; substeps=' + document.getElementById('subs').value +
         '; particles(k)=' + document.getElementById('parts').value +
-        '; particlesB(k)=' + document.getElementById('partsB').value,
+        '; particlesB(k)=' + document.getElementById('partsB').value
+    ];
+    if (deviceInfo.software) head.push(
+      '# WARNING: SOFTWARE RENDERER — submission-time numbers, NOT GPU wall-clock ' +
+      '(gl.finish() does not block on software GL). Headless evidence belongs to ' +
+      'harness/bench_backend.js (forced differencing); see docs/BENCH.md.');
+    return head.concat([
       '',
       tableTSV('tbl'),
       '',
@@ -181,7 +207,7 @@
       'Draw sweep (ms)',
       '',
       tableTSV('tbl3')
-    ].join('\n');
+    ]).join('\n');
   }
 
   function fallbackCopy(text) {
@@ -214,6 +240,47 @@
     }
     copyStatusEl.textContent = copied ? 'Copied.' : 'Copy failed; select the tables manually.';
     copyBtn.disabled = false;
+  }
+
+  // A finished run loses the GL context (teardown below) so nothing keeps
+  // burning CPU. Headless Chromium never delivers webglcontextrestored, so a
+  // re-run doesn't wait for a restore: it swaps in a fresh canvas and builds
+  // a brand-new context on it (also covers out-of-band losses, e.g. a driver
+  // reset, after the first context existed). First run is a no-op so the
+  // Planet constructor's context attributes apply untouched.
+  function ensureLiveContext() {
+    if (!contextCreated) return Promise.resolve();
+    var gl = null;
+    try { gl = canvas.getContext('webgl2'); } catch (e) {}
+    if (gl && !gl.isContextLost()) { contextLostByUs = false; return Promise.resolve(); }
+    var fresh = document.createElement('canvas');
+    fresh.id = canvas.id;
+    fresh.width = canvas.width;
+    fresh.height = canvas.height;
+    fresh.className = canvas.className;
+    canvas.replaceWith(fresh);
+    canvas = fresh;
+    contextLostByUs = false;
+    return Promise.resolve();
+  }
+
+  /* Stop ALL simulation + GPU work when the run ends. With autoStart:false the
+     page submits no further frames itself, but on software renderers
+     (SwiftShader) gl.finish() doesn't block, so the timed samples queue a deep
+     backlog of commands that the GPU process keeps grinding through long after
+     "done" — burning CPU. Disposing the planet and losing the context drops
+     that queue. Run benchmark swaps in a fresh canvas/context and rebuilds
+     (see ensureLiveContext). */
+  function teardown() {
+    if (!planet) return;
+    planet.params.running = false;
+    var gl = planet.gl;
+    try { planet.dispose(); } catch (e) {}
+    try {
+      var lc = gl.getExtension('WEBGL_lose_context');
+      if (lc) { lc.loseContext(); contextLostByUs = true; }
+    } catch (e) {}
+    planet = null;
   }
 
   // One whole-system frame. The benchmark creates Planet with autoStart:false,
@@ -302,7 +369,12 @@
     try {
     // Do not start Planet's interactive rAF loop: it would submit extra frames
     // between timed samples and make the visual matrix non-comparable.
-    if (!planet) planet = new Planet(canvas, levels[0] || 5, { autoStart: false });
+    if (!planet) {
+      await ensureLiveContext();   // re-runs: fresh canvas if teardown lost it
+      planet = new Planet(canvas, levels[0] || 5, { autoStart: false });
+      contextCreated = true;
+      captureDeviceInfo();         // survives teardown() for resultText()
+    }
     planet.params.flowParticles = parts;
 
     for (var li = 0; li < levels.length; li++) {
@@ -469,12 +541,16 @@
         tbody.appendChild(tr);
       });
     })();
-    setStatus('Done. Higher “max fps” is better; ≥60 rows are highlighted.');
+    setStatus('Done. Higher “max fps” is better; ≥60 rows are highlighted.' +
+      (deviceInfo.software
+        ? ' ⚠ SOFTWARE RENDERER detected — these numbers are submission cost, not GPU wall-clock; use harness/bench_backend.js for headless evidence.'
+        : ''));
     completeEl.hidden = false;
     } catch (e) {
       completeEl.hidden = true;
       setStatus('Benchmark error: ' + (e && e.message ? e.message : e));
     } finally {
+      teardown();                  // stop the sim + drop any queued GPU work
       runBtn.disabled = false;
       benchRunning = false;
     }
