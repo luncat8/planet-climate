@@ -171,23 +171,39 @@ press **Run** to re-run. **Real GPU required for evidence** — under headless
 SwiftShader, `finish()` doesn't block (see above), so the page would measure
 submission cost, not GPU time. For headless numbers use the backend bench.
 
-**Reading the numbers (don't repeat the 30-0x misclassification).**
-`performance.now()` is clamped to **0.1 ms resolution** on any page that is not
-cross-origin isolated (Chrome ≥ 91; a `file://` page never is). Every frame-ms
-median this page prints is a multiple of 0.1, so **0.00 ms / 0.10 ms / "10 000
-fps" rows are the timer tick floor, not a platform signature** — a real GPU
-produces them exactly like software GL whenever work is under the tick.
-Empirically (owner RTX rig, four captures) some small-batch rows additionally
-*under-report*: `gl.finish()` on this driver evidently returns before execution
-completes for small batches (L7 explicit ×10 reads 0.30 ms where the ×128 slope
-predicts ~3.4 ms; L6 explicit ×10 reads 0.10 where the slope predicts ~1.5),
-so:
+**How every number on the page is measured (batch-averaged, since the 30-04
+analysis).** `performance.now()` is clamped to **0.1 ms resolution** on any page
+that is not cross-origin isolated (Chrome ≥ 91; a `file://` page never is —
+measured in this sandbox: smallest positive delta over 200 000 consecutive reads
+= 0.09999999986 ms, `crossOriginIsolated = false`). The page therefore never
+times a single call. Each measurement is a **batch**: n calls, one
+`gl.finish()`, value = span/n, with n grown on a ×4 ladder until the batch spans
+≥ 100 timer ticks (≥ 10 ms on a 0.1 ms clock ⇒ ≤ 1 % quantization error). The
+copied log states the resolution it measured (`# timer:`) and the protocol
+(`# method:`); the `n/batch` column is the n used; `*` marks a value whose batch
+hit the n cap before spanning the target (error > 1 %) and is therefore a
+ceiling, not a magnitude. Sub-tick *values* are legitimate now — the batch span,
+not the tick, sets the error bar — so a 0.021 ms draw measured over a 10 ms
+batch is a real number.
+
+Batching also fixes a second, independent defect the earlier captures show: with
+one call in flight, `gl.finish()` on the owner driver returns before execution
+completes for small batches, so **×10 rows under-reported by 1.7×–12.2×**
+against the ×128 slope (L6 explicit 0.11 ms measured vs 1.34 predicted; L7
+explicit 0.26 vs 2.95). With n calls queued, the final `finish()` has to absorb
+the whole backlog, so span/n converges on the real throughput cost.
+
+**Reading the pre-batching captures (`30-00`…`30-04`)** — they were produced by
+the single-shot page, so:
 
 - read **per-step cost from the ×128 rows** (or the auto-fit slope), never from
   a ×10 row;
-- `draw ms`, `tracers ms`, and draw-sweep values of `0.00` mean **"< ~0.1 ms"**;
+- `draw ms`, `tracers ms`, and draw-sweep values of `0.00`/`0.02` mean
+  **"< ~0.1 ms"**, i.e. unresolved — not "free";
 - the software-renderer indicator is the `# renderer:` string / the
-  `# WARNING: SOFTWARE RENDERER` line — **never** the row values.
+  `# WARNING: SOFTWARE RENDERER` line — **never** the row values (the 0.00 /
+  0.10 ms / "10 000 fps" rows are the timer floor, which a real GPU produces
+  exactly like software GL).
 
 The benchmark constructs `Planet` with `autoStart:false`: it owns all simulated
 frames and its explicit `frame()` is the only work submitted while a sample is
@@ -214,14 +230,19 @@ headless capture can never be mistaken for GPU wall-clock evidence.
 
 - **Levels** / **Substeps** / **Particles(k)** — the matrix to sweep.
 - For every `level × scheme × substeps` it times the full frame
-  (`substeps × step()` + `stepSmooth`+`stepVFlow`+`stepFlow` + `render`) with a
-  `gl.finish()` per frame, plus a per-level **draw-only** figure (globe +
-  tracers, no stepping).
+  (`substeps × step()` + `stepSmooth`+`stepVFlow`+`stepFlow` + `render`) as a
+  batch (n frames, one `gl.finish()` + 1 px forcing readback, value = span/n),
+  plus a per-level **draw-only** figure (globe + tracers, no stepping).
 - **Per-pass breakdown table** (P0.1): each level at explicit × first-substeps,
-  split by pass via `Planet.trace` (median of 5 time-boxed rounds). `draw` is
-  the draw-only measurement (the draw path doesn't go through the traced
-  helper). Pass timers serialize with `finish()`, so the sum slightly overstates
-  a real overlapped frame.
+  each pass timed in **batch isolation** (n repeats of that one stepper, one
+  finish + readback, n ≤ 32) from a `serializeState()` snapshot restored before
+  every batch, so no pass is timed on fields a previous isolated pass wrecked.
+  `step` is one whole `step()` the same way; **`closure`** = Σ(ocean, air, cplO,
+  cplA, ice) / `step` and must be ≈ 1 — the `40-00`/`40-01` captures show what
+  it looks like when it is not (0.00–0.86). `Planet.trace` is still in the
+  engine for ad-hoc work but the benches no longer use it: one `finish()` per
+  pass per frame quantizes every pass to the tick and produces absorber
+  artifacts (`ice` reading cheaper at L7 than L5).
 
 **Columns**
 
@@ -231,13 +252,15 @@ headless capture can never be mistaken for GPU wall-clock evidence.
 - `max fps` — `1000 / frame ms`, compute-limited. On a vsync display the GUI
   still caps at the refresh rate (usually 60).
 
-Sampling is time-boxed (~1.2 s/config, capped at 90 frames) so cheap configs get
-a stable median while a very heavy one (e.g. L7 ×128 implicit) still returns in
-bounded time. A `?fast=1` URL flag shrinks the sample counts for a quick pass on
+Sampling is time-boxed (~1.2 s/config, ≥ 3 batches, ≤ 24) so cheap configs get a
+stable median while a very heavy one (e.g. L7 ×128 implicit) still returns in
+bounded time; the calibration batch that sizes n is a warm-up and is **not**
+sampled. **Runs** (default 1) repeats the whole matrix and reports each cell's
+median — rule 3's 2 % test needs 3. A `?fast=1` URL flag shrinks the sample counts for a quick pass on
 slow/software renderers; `?noauto=1` suppresses the auto-run (used by the smoke
 test).
 
-#### Owner-GPU visual logs (`archive/30-00` … `30-03`) — corrected analysis (2026-09-12)
+#### Owner-GPU visual logs (`archive/30-00` … `40-01`) — corrected analysis (2026-09-12)
 
 **Correction of record.** An earlier analysis pass classified all archived
 visual captures as headless SwiftShader output carrying a "submission-time
@@ -256,22 +279,155 @@ headless Chromium 152 build). The "signature" reasoning was unsound end to end:
   SwiftShader-specific behavior documented in the *backend* section; applying
   it to owner-GPU captures was unfounded.
 
-The four logs are valid owner-GPU evidence, subject to the reading rules above:
+The seven logs are owner-GPU evidence, subject to the reading rules above:
 
 | capture | commit | page state | contents |
 |---|---|---|---|
 | `30-00` | `9755c73` | pre-P0 (live rAF loop during sampling) | matrix |
 | `30-01` | `6b92890` | P4 | matrix, auto rows, tracers column |
 | `30-02` | `69292b4` | post-P4 + teardown | + draw sweep, per-pass |
-| `30-03` | this tree | post-P4 (repaired page) | full matrix; owner trimmed header "noise" (the `# renderer:` line went with it — owner confirms same RTX GPU) |
+| `30-03` | `3e8e57b` | post-P4 (repaired page), **single-shot timing** | full matrix; owner trimmed header "noise" (the `# renderer:` line went with it — owner confirms same RTX GPU) |
+| `30-04` | `3e8e57b` | same page, re-run, **single-shot** | full matrix; timer *not* 0.1 ms-clamped (analysis below); `harness/logs/climate-p4-visual-2-rtx.txt` |
+| `40-00` | this tree | **batch-averaged**, served over http | full matrix, `crossOriginIsolated=true`, timer 0.005 ms; `harness/logs/climate-p5-visual-1-rtx-http.txt` |
+| `40-01` | this tree | **batch-averaged**, `file://` | same machine/input, `crossOriginIsolated=false`, timer 0.100 ms; `harness/logs/climate-p5-visual-2-rtx-file.txt` |
 
-`30-03` is the reference capture, archived verbatim as
+`30-03` is the reference capture for the pre-batching page, archived verbatim as
 `harness/logs/climate-p4-visual-1-rtx.txt` (rule 4 layout). Future captures
 should keep the `# renderer:` header (rule 5) and, where a < 2 % claim must be
-adjudicated (rule 3), repeat ×3 and use the median.
+adjudicated (rule 3), set **Runs = 3** and use the median.
 
-**What the owner GPU measures.** Per-step costs from the ×128 rows (linear-in-
-substeps fits; all four captures agree within ±8 %):
+#### Capture `30-04` — the sub-millisecond measurement defect (2026-09-12)
+
+`archive/30-04-log-bench.html.txt` is a second full-matrix capture from the same
+machine (Chrome 151, dpr 1.25), taken with the single-shot page. Analysed cell by
+cell it confirms the ×128 physics numbers and shows that **everything under
+~0.3 ms in those logs is measurement, not physics** — the finding that produced
+the batch-averaged protocol above.
+
+**1. `30-04`'s timer was finer than 0.1 ms; `30-03`'s was not.** In `30-03`,
+**24/24** frame-ms and draw-ms cells are exact multiples of 0.1 ms — the
+signature of the clamp. In `30-04` only **2/24** are (0.12, 0.11, 0.26, 5.28,
+0.02 …). A median of clamped deltas cannot be 0.12, so that run's
+`performance.now()` was not 0.1 ms-clamped; `40-00` later showed how (serving the
+page over http makes it cross-origin isolated: 0.005 ms). Which of the old
+captures were clamped is therefore unknowable from the logs — read the numbers,
+not the assumption.
+
+**2. The ×10 rows under-reported by 1.7×–12.2×** — a second defect, independent
+of the clamp. Each ×10 row against `subs × (frame₁₂₈/128)`:
+
+| config | ×10 measured | ×10 from the ×128 slope | under-report |
+|---|---:|---:|---:|
+| L5 explicit | 0.12 ms | 0.41 ms | 3.4× |
+| L5 implicit | 0.67 ms | 1.15 ms | 1.7× |
+| L6 explicit | 0.11 ms | 1.34 ms | **12.2×** |
+| L6 implicit | 0.70 ms | 3.07 ms | 4.4× |
+| L7 explicit | 0.26 ms | 2.95 ms | **11.3×** |
+| L7 implicit | 23.31 ms | 19.02 ms | 0.8× |
+
+A 10× error is not 0.1 ms rounding: with one frame in flight, `finish()` returned
+early and the row measured submission. The error vanishes exactly where a frame
+is long enough to fill the queue (L7 implicit, 23 ms) — the condition batching
+now creates deliberately. **Fixed:** in `40-00`/`40-01` the same rows read
+0.738–0.800 (L5 explicit ×10) and 3.79–5.99 (L7 explicit ×10), i.e. slightly
+*above* the pure-slope prediction, which is the correct shape (the slope omits
+the per-frame flow + draw overhead).
+
+**3. The ×128 rows reproduce; the cheapest of them does not.**
+
+| config | `30-03` | `30-04` | Δ |
+|---|---:|---:|---:|
+| L5 explicit ×128 | 4.00 ms | 5.28 ms | **+32.0 %** |
+| L5 implicit ×128 | 14.90 ms | 14.78 ms | −0.8 % |
+| L6 explicit ×128 | 17.00 ms | 17.16 ms | +0.9 % |
+| L6 implicit ×128 | 39.20 ms | 39.30 ms | +0.3 % |
+| L7 explicit ×128 | 37.20 ms | 37.73 ms | +1.4 % |
+| L7 implicit ×128 | 244.00 ms | 243.46 ms | −0.2 % |
+
+Five of six agree inside ±1.4 %; the cheapest heavy row (4–5 ms) swings +32 %.
+Variance is worst where the frame is shortest — exactly where rule 3's 2 % test
+lives (⇒ carry-over **C2**, `Runs = 3`).
+
+**4. Every sub-tick cell was unresolved, and two acceptances were closed on such
+cells.** Frame rows under 0.35 ms (L5/L6/L7 explicit ×10) print "8696 / 9091 /
+3922 max fps" — timer artifacts. `draw ms` read 0.02 at *every* level, the whole
+P4.1 sweep 0.01–0.05 ms, tracers 0.02 (16 k) / 0.04 (64 k). A 460×460 globe +
+cloud shell + 32 k tracer draw in 0.02 ms is not credible, and `s15 − s0` — the
+delta P4.1 exists to isolate — was the difference of two quantized numbers.
+**P4's and P3's "floor documented" closures rest on cells the timer could not
+resolve** ⇒ carry-over **C1**.
+
+**5. The `Planet.trace` per-pass table did not close.** Σ(dynamics passes)
+against the frame it decomposes (explicit ×10): `30-03` 0.312 vs 0.10 (L5),
+0.393 vs 0.10 (L6), 0.593 vs 0.30 (L7); `30-04` 0.294 vs 0.12, 0.401 vs 0.11,
+0.495 vs 0.26. Closure 1.9–3.9×, and `ice` read 0.037–0.053 ms at L7 against
+0.141–0.149 ms at L5 — a pass touching 16× the cells cannot get 4× cheaper. That
+is the absorber artifact of a `finish()` per pass ⇒ carry-over **C6**.
+
+#### Captures `40-00` / `40-01` — the batched page on the owner GPU (2026-09-12)
+
+Two runs of the batch-averaged page, same machine, same input
+(`levels=5,6,7; substeps=10,128; particles 16/64 k`), differing only in origin:
+`40-00` served over **http** (`crossOriginIsolated=true`, timer **0.0050 ms**),
+`40-01` from **`file://`** (`crossOriginIsolated=false`, timer **0.1000 ms**).
+That pair is the cleanest available instrument check: same GPU, two timer
+resolutions 20× apart.
+
+**What the fix bought.**
+
+- **The clamp is escapable, and the page now says which one you got.** Serving
+  the page over http with cross-origin isolation gives a 5 µs timer; `file://`
+  gives 0.1 ms. Both headers record it, so no future log has to be guessed at.
+- **The ×10 under-report is gone.** 8 of 12 frame rows agree between the two
+  runs within 8 %, including all four L5/L6 ×128 rows (0.96–1.03×) — and the
+  ×10 rows now sit *above* the ×128 slope instead of 3–12× below it.
+- **Sub-tick columns carry real values.** `draw ms` = 0.069–0.172, tracers
+  0.095–0.754 (16 k) / 0.072–0.674 (64 k), draw-sweep cells 0.021–0.687 with
+  n = 256–1024. No 0.00 column anywhere.
+
+**What is still broken (found by these two runs, fixed in code afterwards).**
+
+- **The per-pass breakdown does not measure passes.** `ocean` reads
+  0.001–0.029 ms at L7 — impossible for a 163,842-cell pass with ~50 dependent
+  `texelFetch`es per cell — while `step` reads **17.15 ms** at L7 in `40-00`
+  where the whole ×10 frame is 5.99 ms (10 steps cannot cost 171 ms). Closure:
+  0.74 / 0.86 / **0.00** (`40-00`), 0.28 / 0.06 / 0.11 (`40-01`). Two causes,
+  both now fixed: (a) `gl.finish()` does not force a batch of *one small pass*,
+  so every batch ends with a 1 px `readPixels` on **all** renderers (the
+  `bench_backend.js` forcing trick); (b) repeating one stepper alone drives the
+  fields off the manifold, so every later pass was timed on garbage — each pass
+  is now re-timed from a `serializeState()` snapshot restored per batch, with
+  n capped at 32.
+- **The draw sweep does not reproduce.** Same config, two runs: L5 m13 s0
+  0.021 vs 0.125 ms (6×), L6 m18 s0 0.227 vs 0.064 (0.28×), and the s15−s0
+  tracer delta flips sign at L5/L6/L7 m13 (+0.056/−0.049, +0.060/−0.046,
+  +0.509/−0.082). Same cause as (a) — unsynchronized batches — so C1 stays open
+  until a forced-completion run reproduces.
+- **Two frame rows are physically impossible.** Implicit must cost more than
+  explicit (it adds the Jacobi solve); `40-01` reports L7 ×128 explicit 85.93 ms
+  vs implicit **50.38 ms**, and `40-00` reports L6 ×10 explicit 5.33 ms vs
+  implicit 3.27 ms. L7 ×128 also disagrees 1.4–2.4× between the runs
+  (explicit 61.27/85.93, implicit 119.25/50.38) and no longer matches the
+  single-shot captures at all (37.2–37.7 / 243.5–244.0). Suspected cause,
+  **not verified**: at L7 nothing is equilibrated — `planet/planet_state.js` is
+  not tracked in this repository and, even where present, only applies at L5 —
+  so L7 is measured on a freely drifting state whose cost depends on how much
+  simulation ran beforehand. ⇒ carry-over **C8**.
+- **Header bug (cosmetic, fixed):** the optional `tracers ms @Bk` header was
+  inserted before `mh.lastChild`, which is the trailing whitespace *text node*,
+  so it landed after `n/batch` while the cells stayed in
+  (tracers, tracers@B, n) order. Both logs carry a note; `40-00`'s
+  "0.205 0.237 16" is 16 k = 0.205 ms, 64 k = 0.237 ms, n = 16.
+
+**Still standing from all seven captures:** L5/L6 ×128 physics costs (5.7–5.9
+explicit, 14.8–15.3 implicit at L5; 17.2–17.3 explicit, 38.9–39.4 implicit at
+L6), the implicit/explicit ratio (2.3–2.7×), and P2's auto@60 acceptance
+(L6 auto→122/53, L7 auto→32/8, all ≥ 60 fps).
+
+**What the owner GPU measures.** Per-step costs from the ×128 rows of the
+single-shot captures `30-00`…`30-04` (linear-in-substeps fits; those four agree
+within ±8 %). The batched captures `40-00`/`40-01` reproduce L5/L6 to within
+4 % but not L7 — see the `40-00`/`40-01` section before reusing L7 numbers:
 
 | level | scheme | frame ms @×128 (4 captures) | ms/step | ns/cell |
 |---|---|---|---:|---:|
@@ -538,14 +694,18 @@ degrading to 0.84 (shared-CPU neighbor) — the run was discarded for steps;
 flow numbers stayed clean (short level-independent batches cross-validate
 across levels).
 
-Acceptance: gate `p3-final` s0/s1/s2 all unchanged ✓. **Owner-measured
-(2026-09-12, capture 30-03): closes as *floor documented*.** On the owner GPU
-both tracers columns (16k and 64k, all levels) read < the 0.1 ms timer tick —
-the whole flow-update + tracer-draw half is under-tick, so "L7 tracers −25 %"
-and "64k ≤ 2× 16k" are unmeasurable there (the −33 % flow-update CPU-relative
-gain from P3.3a stands as the portable evidence). No P0.6-style revision
-needed: the predicted 64k super-scaling is real but lives entirely below the
-tick.
+Acceptance: gate `p3-final` s0/s1/s2 all unchanged ✓. **Re-opened 2026-09-12.**
+The "closes as *floor documented*" verdict (capture `30-03`: both tracers
+columns < the 0.1 ms tick) was reached on cells the timer could not resolve, and
+`40-00`/`40-01` show the half is not under-tick at all — tracers read
+0.095–0.754 ms at 16 k and 0.072–0.674 ms at 64 k once batched. The two
+acceptance tests ("L7 tracers ≥ 25 % reduced", "64k ≤ 2× 16k") are measurable
+but not yet measured on a run whose batches are forced to complete: in
+`40-00` 64 k < 16 k at L5/L6/L7 (0.237 vs 0.205, 0.074 vs 0.151, 0.674 vs
+0.402 — the last one *super*-linear the wrong way), which is the
+unsynchronized-batch artifact, not physics. Carry-over **C1** in
+`40-improvement-plan-webgpu.md`. The −33 % flow-update CPU-relative gain from
+P3.3a stands as the portable evidence.
 
 ---
 
@@ -602,11 +762,13 @@ identical, tracer dots visibly sparser, no artifacts. Gate `p4-final` s0
 IDENTICAL all levels (`f3f718e5`/`50cbc2ae`/`23806737`, nan 0) — no sim math
 touched. `bench-swvk.json` untouched per the step-math-only rule.
 
-Acceptance: **MET (2026-09-12, owner GPU, capture 30-03) — via the documented
-floor.** The whole P4.1 sweep (modes 13/0/18 × streamline 0/15, all levels)
-reads < the 0.1 ms timer tick, as does `draw ms` everywhere: the render path is
-under-tick on the owner GPU, so "L7 draw ≥ 20 % reduced" is unmeasurable — the
-floor branch of the acceptance applies, and L6 draw is trivially within 2 %.
+Acceptance: **re-opened 2026-09-12** (it had been closed as *MET via the
+documented floor* on capture `30-03`). The floor was a timer artifact: batched,
+the same sweep reads 0.021–0.687 ms (`40-00`) and 0.021–0.547 ms (`40-01`), and
+`draw ms` 0.069–0.172 ms. So "L7 draw ≥ 20 % reduced" *is* measurable — but the
+two runs do not yet agree (L5 m13 s0 0.021 vs 0.125 ms; the s15−s0 tracer delta
+flips sign at all three levels), because those captures ran before batches were
+forced to complete. Carry-over **C1**.
 The P4.3 bake / P4.2 stride remain correctness-proven (18-config pixel matrix
 above); their wall-clock value is bounded above by "< 0.1 ms total draw" —
 which was the point (draw was never the expensive half). Analytic expectation
@@ -622,13 +784,23 @@ disputed ×128 reference figure is reconciled (see the visual section).
 
 ## Sandbox note
 
-`bench.html` is GPU-oriented; under headless SwiftShader its absolute timings are
-submission-cost vapor (see driver artifacts). The page is smoke-tested headless
-with `node harness/bench_visual_smoke.js` after `harness/setup_chrome.sh`:
-`?fast=1&noauto=1`, a scripted matrix, the `done` control, and the complete
-copied payload must populate without JS/GL errors. This is a functional test,
-not a source of performance numbers. All committed headless numbers come from
-`bench_backend.js` (forced differencing, closure-checked).
+`bench.html` is GPU-oriented. Since the batch rewrite it is **less** vapor under
+headless SwiftShader than it used to be: every batch ends in a 1 px forcing
+readback, so spans now track real software-GL execution and the page reproduces
+physical ordering (smoke config L5 ×1: explicit 110.2 ms < implicit 135.1 ms,
+where the single-shot page reported 0.100 / 0.100 — one tick, no information).
+It still is not the headless number source: no differencing, no closure check
+against `bench_backend.js`, and a 2-CPU box. `bench_backend.js` (forced
+differencing, closure-checked) remains the committed headless evidence.
+
+The page is smoke-tested headless with `node harness/bench_visual_smoke.js`
+after `harness/setup_chrome.sh`: `?fast=1&noauto=1`, a scripted matrix, the
+`done` control, and the complete copied payload must populate without JS/GL
+errors, **and** the log must state the measured timer resolution and the
+batch-averaged method, every draw-sweep cell must resolve (value > 0, n ≥ 1),
+and at least one measurement must have batched (max n > 1). That last assertion
+is the regression guard for the sub-ms defect: the pre-fix page passed the
+functional part while printing 0.00 for the entire draw column.
 
 ---
 
@@ -657,3 +829,4 @@ Committed-state gate runs (rule 1 evidence; scheme 0 = regression-gated vs
 |---|---|---|---|
 | 2026-09-12 | `p4-teardown-check` | post-P4 + bench.html teardown/warning (no sim-math change) | s0 L5/L6/L7 **IDENTICAL** (`f3f718e5`/`50cbc2ae`/`23806737` = P4 gate hashes); s1/s2 hashes reported, nan=0 |
 | 2026-09-12 | `p4-evidence-fix` | owner-GPU log correction (docs + bench.html text/comments + `harness/logs/climate-p4-visual-1-rtx.txt`; no engine code) | s0 L5/L6/L7 **IDENTICAL** (`f3f718e5`/`50cbc2ae`/`23806737`); s1/s2 reported, nan=0. Visual smoke test green |
+| 2026-09-12 | `bench-timing-fix` | batch-averaged timing + forcing readback + batch-isolation breakdown + `Runs` median-of-N (`planet/bench.html`, `harness/bench_visual_smoke.js`; no engine/shader change) | s0 L5/L6/L7 **IDENTICAL** (`f3f718e5`/`50cbc2ae`/`23806737`, nan=0), `GATE_EXIT=0`. Visual smoke test green: `ERRORS []`, timer resolution reported, max n/batch 4, all six draw-sweep cells resolved, explicit 164.8 ms < implicit 168.9 ms |

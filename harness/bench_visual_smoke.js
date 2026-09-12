@@ -56,6 +56,29 @@ const url='file://'+path.resolve('../planet/bench.html')+'?fast=1&noauto=1';
   const fallback=await page.evaluate(()=>window.__benchFallbackClipboard || '');
   if (fallback.indexOf('# Planet visual benchmark') !== 0 || fallback.indexOf('Draw sweep (ms)') < 0)
     throw new Error('clipboard permission fallback is incomplete');
+  /* Batch-timing protocol (the sub-ms fix). Chrome >= 91 clamps
+     performance.now() to 0.1 ms on a non-cross-origin-isolated page, so a
+     single-shot sample of a sub-tick frame quantized to 0.00/0.10 ms (the
+     archived 30-03 draw column was 0.00 at every level). The page must now
+     report the resolution it measured and resolve cheap work by batching:
+     every draw-sweep cell needs a real value (> 0) taken over a batch of
+     n > 1 calls. */
+  if (!/# timer: performance\.now\(\) resolution \d+(\.\d+)? ms \(crossOriginIsolated=(true|false)/.test(copied))
+    throw new Error('copied log does not report the measured timer resolution');
+  if (copied.indexOf('# method: batch-averaged') < 0)
+    throw new Error('copied log does not state the batch-averaged method');
+  const sweep=await page.evaluate(()=>[...document.querySelectorAll('#tbl3 tbody tr')]
+    .map(tr=>[...tr.children].map(td=>td.textContent)));
+  if (!sweep.length) throw new Error('draw sweep table is empty');
+  const bad=sweep.filter(c=>!(parseFloat(c[3])>0)||!(parseInt(c[4],10)>=1));
+  if (bad.length)
+    throw new Error('draw sweep rows not resolved (value>0, n>=1): '+JSON.stringify(bad));
+  const maxN=await page.evaluate(()=>window.__benchMaxN);
+  if (!(maxN>1))
+    throw new Error('no measurement batched (max n = '+maxN+'); sub-tick work would be unresolved');
+  const res=await page.evaluate(()=>window.__benchTimerRes);
+  console.log('TIMER resolution ' + res + ' ms; max n/batch ' + maxN +
+    '; draw sweep n ' + sweep.map(c=>c[4]).join(',') + '; draw ms ' + sweep.map(c=>c[3]).join(','));
   console.log('STATUS', await page.evaluate(()=>document.getElementById('status').textContent));
   console.log('COPY', completion.label + '; ' + copied.split('\n').slice(0,3).join(' | '));
   console.log('ROWS ('+rows.length+'):\n'+rows.join('\n'));

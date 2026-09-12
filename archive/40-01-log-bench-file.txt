@@ -1,0 +1,69 @@
+# timer: performance.now() resolution 0.1000 ms (crossOriginIsolated=false, origin file:)
+# method: batch-averaged — every value is (batch span)/n with n grown on a x4 ladder so a batch spans >= 10.0 ms (>= 100 timer ticks, <= 1 % quantization); median over the time-boxed batches; one gl.finish() per batch. n/batch column = n; * marks a value whose batch hit the n cap (error > 1 %).
+# input: levels=5,6,7; substeps=10,128; particles(k)=16; particlesB(k)=64; runs=1
+# browser: Chrome 151, devicePixelRatio 1.25 (same machine as 40-00)
+
+level	scheme	substeps	cells	frame ms	draw ms	max fps	days/s	tracers ms	n/batch	tracers ms @64k
+L5	explicit	10	10,242	0.800	0.172	1250	8.681	0.095	0.072	16
+L5	explicit	128	10,242	5.70	0.172	175	15.595	0.095	0.072	4
+L5	implicit	10	10,242	1.34	0.172	744	5.168	0.095	0.072	16
+L5	implicit	128	10,242	15.30	0.172	65	5.810	0.095	0.072	1
+L6	explicit	10	40,962	1.71	0.069	586	4.070	0.311	0.250	64
+L6	explicit	128	40,962	17.28	0.069	58	5.146	0.311	0.250	4
+L6	implicit	10	40,962	3.26	0.069	307	2.129	0.311	0.250	16
+L6	implicit	128	40,962	38.90	0.069	26	2.285	0.311	0.250	4
+L7	explicit	10	163,842	3.79	0.169	264	1.832	0.754	0.429	64
+L7	explicit	128	163,842	85.93	0.169	12	1.034	0.754	0.429	4
+L7	implicit	10	163,842	15.79	0.169	63	0.440	0.754	0.429	16
+L7	implicit	128	163,842	50.38	0.169	20	1.765	0.754	0.429	4
+L5	explicit	auto→128		5.70		175	5.333			
+L5	implicit	auto→128		15.30		65	5.333			
+L6	explicit	auto→123		16.62		60	5.125			
+L6	implicit	auto→54		16.55		60	2.250			
+L7	explicit	auto→23		16.01		62	0.958			
+L7	implicit	auto→13		16.67		60	0.541			
+
+Per-pass breakdown (ms / frame)
+
+pass	L5	L6	L7
+ocean	0.007	0.002	0.019
+air	0.001	0.001	0.029
+cplO	0.002	0.002	0.014
+cplA	0.002	0.002	0.002
+ice	0.002	0.031	0.002
+step	0.054	0.636	0.636
+smooth	0.006	0.064	0.076
+vflow	0.006	0.063	0.150
+flow	0.025	0.018	0.444
+draw	0.063	0.046	0.049
+closure	0.28	0.06	0.11
+
+Draw sweep (ms)
+
+level	mode	streamline	draw ms	n/batch
+L5	m13	s0	0.125	256
+L5	m13	s15	0.076	256
+L5	m0	s0	0.096	1024
+L5	m0	s15	0.075	1024
+L5	m18	s0	0.109	1024
+L5	m18	s15	0.052	1024
+L6	m13	s0	0.188	256
+L6	m13	s15	0.142	256
+L6	m0	s0	0.171	256
+L6	m0	s15	0.144	256
+L6	m18	s0	0.064	1024
+L6	m18	s15	0.138	1024
+L7	m13	s0	0.103	1024
+L7	m13	s15	0.021	1024
+L7	m0	s0	0.356	1024
+L7	m0	s15	0.547	1024
+L7	m18	s0	0.359	1024
+L7	m18	s15	0.520	1024
+
+# note (added when archiving): the pasted header row reads
+# "… tracers ms | n/batch | tracers ms @64k" but the data cells are in the order
+# (tracers ms, tracers ms @64k, n/batch) — e.g. "0.205 0.237 16" is
+# 16 k = 0.205 ms, 64 k = 0.237 ms, n = 16. Cause: the optional column was
+# inserted with insertBefore(th, mh.lastChild) and lastChild is the trailing
+# whitespace text node, so the header landed after n/batch. Fixed in bench.html
+# after this capture; values above are unaffected.

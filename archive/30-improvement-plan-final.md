@@ -365,3 +365,41 @@ Owner-GPU visual logs):
 | L6 regression during work | 2 % hard floor (rule 3), per-phase bench before merge |
 | P0.6 hypothesis wrong (L7 16× not cache-cliff) | P0.6 is framed as a hypothesis; the ms/cell table decides; the WebGPU port (P5) is the fix under either diagnosis, P1–P4 scale accordingly |
 | Scope creep | Phase 8 explicitly optional; Phases 0–4 are days and already buy ≥ 30 fps at L7 via auto substeps alone |
+
+---
+
+## Archived 2026-09-12 — closure note
+
+This plan is complete for the scope it owns and is archived. The clause above
+("this active plan must **not** move to `archive/`") was conditioned on Phases
+5–7 living here; they have been split out, so the condition is discharged:
+
+**Done in this plan (P0–P4).** Instrumentation (P0.1–P0.6, incl. the missing L7
+gate baseline), the stall/dead-pass work (P1.1–P1.5), adaptive substeps
+(P2, acceptance **met** on owner captures), tracers (P3) and render (P4) —
+the last two correctness-proven and pixel-checked, with their wall-clock
+acceptances **re-opened** rather than closed (see below). Evidence:
+`docs/BENCH.md` phase logs + `harness/logs/climate-p4-visual-*.txt`.
+
+**Moved to `40-improvement-plan-webgpu.md`.** Phase 5 (WebGPU port, P5.1–P5.6),
+Phase 6 (smoothness), Phase 7 (docs + equilibrium soak), Phase 8 (stretch), the
+rules, both cross-borrow lists, and the risk table. Rule 3 is re-based there to
+its measurable form ("L6 within 2 % of the committed owner-GPU ×128 baseline,
+median-of-3") and a new rule 6 forbids sub-tick evidence.
+
+**Finished in the last session under this plan (instrumentation repair).** The
+final owner captures (`archive/30-04`, then `40-00`/`40-01` on the repaired
+page) showed the visual bench could not support any claim below ~0.3 ms:
+`performance.now()` is clamped to 0.1 ms on a non-cross-origin-isolated page,
+×10 rows under-reported by 1.7–12.2× against the ×128 slope, and one `finish()`
+per pass made the breakdown fail closure by 1.9–3.9×. `planet/bench.html` now
+measures every value as a **batch** (n calls, one finish + 1 px forcing
+readback, value = span/n, n grown to span ≥ 100 timer ticks), reports the timer
+resolution and n it used, restores a state snapshot before each isolated pass,
+prints a `closure` row, and supports `Runs` median-of-N. `harness/
+bench_visual_smoke.js` asserts all of it.
+
+**Consequence for two acceptances in this plan.** P3's and P4's "closed as
+*floor documented*" verdicts were reached on cells under the timer tick and are
+**withdrawn**; both are measurable now and are tracked as carry-overs **C1**
+(needs one owner run on the current page) and **C6**/**C8** in plan 40.

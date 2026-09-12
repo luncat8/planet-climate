@@ -56,6 +56,7 @@
       <label class="f">Substeps <input id="subs" type="text" value="10,128"></label>
       <label class="f">Particles(k) <input id="parts" type="text" value="16"></label>
       <label class="f">Particles B(k) <input id="partsB" type="text" value="64" title="Second particle count for the tracers-ms comparison column (empty = off)"></label>
+      <label class="f">Runs <input id="runs" type="text" value="1" title="Repeat the whole matrix N times and report the median of each cell (plan rule 3: 2 % claims need median-of-3)"></label>
       <button id="run">Run benchmark</button>
     </div>
     <div class="status" id="status">Ready.</div>
@@ -63,27 +64,30 @@
       <thead><tr id="mhead">
         <th>level</th><th>scheme</th><th>substeps</th><th>cells</th>
         <th>frame ms</th><th>draw ms</th><th class="fps">max fps</th><th>days/s</th>
-        <th>tracers ms</th>
+        <th>tracers ms</th><th>n/batch</th>
       </tr></thead>
       <tbody></tbody>
     </table>
     <h1 style="margin-top:22px">Per-pass breakdown (ms / frame)</h1>
-    <p class="sub">Same frame as above at <b>explicit × first-substeps</b>, split by pass via
-      <code>Planet.trace</code> (median of 5 time-boxed rounds). <code>draw</code> is the draw-only
-      measurement (the draw path doesn't go through the traced helper). Pass timers serialize with
-      <code>gl.finish()</code>, so the sum slightly overstates a real overlapped frame.</p>
+    <p class="sub">Same config as above at <b>explicit × first-substeps</b>. Each pass is timed in
+      <b>batch isolation</b> — N repeats of that one stepper with a single <code>gl.finish()</code>,
+      value = span/N — the same protocol as <code>harness/bench_backend.js</code>. <code>step</code> is
+      one whole <code>step()</code> (ocean+air+couple+ice) timed the same way, and
+      <code>closure</code> = Σ(dynamics passes) / <code>step</code>: a value near 1.00 means the
+      breakdown accounts for the step; far from 1 means a pass is unaccounted for or a batch
+      under-spanned. <code>draw</code> is the draw-only measurement.</p>
     <table id="tbl2">
       <thead><tr id="bdhead"><th>pass</th></tr></thead>
       <tbody></tbody>
     </table>
     <h1 style="margin-top:22px">Draw sweep (ms)</h1>
     <p class="sub">Draw-only cost across display <b>modes</b> &times; <b>streamline</b> masks
-      (P4.1): each cell is <code>stepVFlow + render</code>, warmed, median of a ~350 ms window.
-      Mode 13 = deep-ocean speed (default view), 0 = low-air T, 18 = ocean vertical flux
+      (P4.1): each cell is <code>stepVFlow + render</code>, warmed, batch-averaged like everything
+      else. Mode 13 = deep-ocean speed (default view), 0 = low-air T, 18 = ocean vertical flux
       (vflow-reading bake path). Compare <b>s15 &minus; s0</b> for the tracer-draw cost and
       <b>L7 vs L6</b> for the P4.2/P4.3 render work (&frac12;-rate tracers, baked 1-ring).</p>
     <table id="tbl3">
-      <thead><tr><th>level</th><th>mode</th><th>streamline</th><th>draw ms</th></tr></thead>
+      <thead><tr><th>level</th><th>mode</th><th>streamline</th><th>draw ms</th><th>n/batch</th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="note">
@@ -99,15 +103,23 @@
       <br><b>Draw sweep</b> (P4.1) isolates tracer-draw cost (s15−s0) and the L7 render path per mode.
       <br>For headless numbers use <code>harness/bench_backend.js</code> (forced differencing — see
       <code>docs/BENCH.md</code>).
-      <br><b>Reading sub-tick rows:</b> this page's <code>performance.now()</code> is clamped to
-      0.1 ms (Chrome restricts timers to 100 µs on pages that are not cross-origin isolated —
-      a <code>file://</code> page never is). Any median of 0.00/0.10 ms (&ldquo;10000 fps&rdquo;) means
-      <i>&ldquo;under the timer tick&rdquo;</i> on <b>any</b> machine, GPU included — and on some
-      drivers small batches read even lower than their true cost because <code>gl.finish()</code>
-      returns before execution for sub-millisecond work. Read per-step cost from the
-      &times;128 rows (or the auto-fit slope), not from a &times;10 row; read 0.00 as
-      &ldquo;&lt; ~0.1 ms&rdquo;. What identifies software GL is the <code># renderer:</code> header
-      (and the WARNING line it triggers), never the row values.
+      <br><b>No number on this page rests on a sub-tick timer delta.</b> Chrome ≥ 91 clamps
+      <code>performance.now()</code> to <b>0.1 ms</b> on any page that is not cross-origin isolated —
+      a <code>file://</code> page never is — and Firefox/Safari clamp to 1 ms there. So the old
+      single-shot sample (<code>t0; frame(); finish(); t1</code>) quantized everything under a tick to
+      0.00/0.10 ms: the archived <code>30-03</code> draw column read 0.00 at every level and its
+      &times;10 rows read 0.10 ms where the &times;128 slope says 1.5–3.4 ms. Every measurement here is
+      instead a <b>batch</b>: N calls, one <code>gl.finish()</code>, value = span/N, with N grown until
+      the batch spans ≥ 100 timer ticks (≤ 1 % quantization error) — the same trick the backend bench
+      uses. Batching also keeps the GPU queue full, so a driver whose <code>finish()</code> returns
+      early for tiny batches can no longer under-report a &times;10 row by 10×. <b>n/batch</b> is the N
+      used; <code># timer</code> in the copied log is the measured resolution. If a value is still
+      printed as <code>&lt;res</code> the batch could not be grown enough to resolve it — read it as a
+      ceiling, never as a magnitude.
+      <br>A <code>*</code> on a value means its batch hit the n cap before spanning the
+      target, so its error bar is wider than 1 % (the copied log counts them).
+      <br><b>Runs</b> repeats the whole matrix and reports each cell's median — plan rule 3
+      (“L6 within 2 % of the committed baseline”) needs median-of-3, single runs vary ±5–8 %.
       <br><b>When a run ends the page stops all simulation work:</b> the planet is disposed and the
       GL context is dropped, so the GPU process can't keep burning CPU on queued frames (the canvas
       goes blank on purpose). The copied report keeps the device strings captured at start; press
@@ -155,6 +167,180 @@
   function median(a) { a = a.slice().sort(function (x, y) { return x - y; }); return a[a.length >> 1]; }
   function fpsClass(f) { return f >= 58 ? 'g' : f >= 30 ? 'y' : 'r'; }
 
+  /* ---- timer floor + batch-averaged timing --------------------------------
+     Chrome >= 91 clamps performance.now() to 0.1 ms on any page that is not
+     cross-origin isolated (a file:// page never is; Firefox/Safari clamp to
+     1 ms there). The old protocol timed ONE call:
+
+         t0 = now(); fn(); gl.finish(); dt = now() - t0;
+
+     so every config faster than a tick quantized to 0.00/0.10 ms — the whole
+     30-03 draw column read 0.00, the x10 frame rows read 0.10 where the x128
+     slope says 1.5-3.4 ms, and the tracers difference (rOn - rOff) was the
+     difference of two quantized numbers. P3/P4 "floor documented" acceptances
+     were closed on exactly those sub-tick cells.
+
+     Fix: never time one call. Time a BATCH of N calls with ONE gl.finish() and
+     report span/N, growing N until the batch spans >= 100 timer ticks
+     (<= 1 % quantization error). This is the visual-bench twin of the backend
+     bench's forced differencing. It also fixes the second, independent defect
+     recorded in docs/BENCH.md: a driver whose finish() returns before execution
+     completes for small batches under-reported x10 rows ~10x, because the queue
+     was never full — with N calls in flight the final finish() has to absorb the
+     whole backlog, so span/N converges on the real throughput cost. One finish
+     per batch (instead of one per frame, or one per pass per frame as
+     Planet.trace does) also stays clear of the ~300-finish SwiftShader
+     backpressure cliff documented in the backend section. */
+  var timerRes = 0.1;   // measured at startup by measureTimerRes()
+  function measureTimerRes() {
+    var best = Infinity;
+    for (var i = 0; i < 200000; i++) {
+      var a = performance.now(), d = performance.now() - a;
+      if (d > 0 && d < best) best = d;
+    }
+    timerRes = isFinite(best) && best > 0 ? best : 0.1;
+    window.__benchTimerRes = timerRes;   // smoke-test hook (harness/bench_visual_smoke.js)
+    Object.defineProperty(window, '__benchMaxN', { configurable: true,
+      get: function () { return maxNUsed; } });
+    return timerRes;
+  }
+  // Minimum batch span: 100 ticks, and never below a few ms of real work.
+  // A value reported as span/n carries a quantization error of <= timerRes/n
+  // = timerRes/span, so this bound is what makes every number on the page
+  // <= 1 % timer error — including values far below one tick.
+  function minSpan() { return Math.max((FAST ? 25 : 100) * timerRes, FAST ? 2 : 8); }
+  /* Batch cap. On a real GPU finish() blocks, so a batch's span tracks its true
+     cost and n converges in a few ladder steps. On software GL finish() does
+     NOT block, so the span tracks submission only: an n sized from it queues a
+     huge backlog that the software rasterizer grinds through for minutes (a
+     first cut of this page hung the renderer that way). Software numbers are
+     vapor by policy — the header says so — so cap n hard there and keep the
+     page responsive instead of chasing a span target that can't be met. */
+  function maxBatchN() {
+    if (deviceInfo.software) return FAST ? 16 : 64;
+    return FAST ? 4000 : 20000;
+  }
+  /* Heavy measurements (a whole frame, one step, one dynamics pass) queue
+     ~cells x passes work per call. On a real GPU finish() absorbs that, so
+     batching them is correct (and n converges to 1 anyway). On software GL the
+     same batch trips the documented >~10M-queued-cell-pass backpressure cliff
+     (docs/BENCH.md): measured with n=16 the L5 explicit x10 row read 1463 ms
+     against 669 ms for x128 — an inversion the cliff explains and the driver
+     cannot. So there, heavy measurements stay at n=1: their numbers are
+     submission-cost vapor by policy either way, and this keeps them from
+     getting *worse*. Cheap measurements (draw, flow) still batch, which is
+     what resolves the sub-tick draw/tracer columns. */
+  function heavyCap() { return deviceInfo.software ? 1 : maxBatchN(); }
+  /* Total calls per measurement. On software GL a batch's span tracks
+     submission, not execution, so the span target alone cannot bound the work:
+     n x batches has to be capped or the page queues minutes of rasterization
+     (measured: a ~500-call measurement protocol turned the 20-call one into a
+     >90 s run). Real GPUs block in finish(), so the time-box governs there. */
+  function maxCalls() { return FAST ? 64 : 4096; }
+  var unresolved = 0;   // batches that hit the n cap before spanning minSpan()
+  var maxNUsed = 1;     // largest batch used this run (proves batching engaged)
+
+  /* End every batch with a 1px readback of the default framebuffer: gl.finish()
+     alone does not make a batch of small GPU work measurable.
+
+     Software renderers: finish() does not block at all — measured here, one L5
+     step reads 0.070 ms against bench_backend.js's forced-differencing
+     10.56 ms (150x under), and one measurement's queued work leaks into the
+     next measurement's finish() (a 46 s "frame" row was measured sitting
+     behind a batched draw sweep).
+
+     Real GPUs: they block for a whole frame, but NOT for a batch of one small
+     pass. The owner captures 40-00/40-01 (RTX, Chrome 151) prove it: with
+     finish() only, the isolated `ocean` pass reads 0.001-0.029 ms at L7 — a
+     163,842-cell pass with ~50 dependent texelFetches per cell cannot run in
+     1 us — and the draw sweep failed to reproduce between two runs of the same
+     config (L5 m13 s0: 0.021 vs 0.125 ms; the s15-s0 tracer delta flipped
+     sign). This is the forcing readback bench_backend.js already relies on.
+
+     Cost is one extra sync per BATCH, not per call: ~0.1 ms against an 8-10 ms
+     batch target (< 1.3 %), and amortized over n calls it is far below the
+     value being measured. */
+  var forcePx = null;
+  function forceCompletion(gl) {
+    try {
+      if (!forcePx) forcePx = new Uint8Array(4);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, forcePx);
+    } catch (e) {}
+  }
+
+  // One batch: N calls, ONE finish (+ the software drain). Returns span in ms.
+  function timedBatch(fn, N) {
+    var gl = planet.gl;
+    var t0 = performance.now();
+    for (var i = 0; i < N; i++) fn(planet);
+    gl.finish();
+    forceCompletion(gl);
+    return performance.now() - t0;
+  }
+
+  /* Batch-averaged measurement. Returns { ms, n, span, batches }:
+       ms      — median over batches of (batch span / n)
+       n       — calls per batch (grown so a batch spans >= minSpan())
+       span    — span of the first full-size batch (auditing aid)
+       batches — number of batches sampled
+     Time-boxed: keeps sampling until ~budgetMs of GPU work, min 3 batches, so
+     a cheap config gets many batches for a stable median while a very heavy
+     one (L7 x128 implicit, ~244 ms/frame) still returns in bounded time. */
+  async function measure(fn, warm, budgetMs, opt) {
+    opt = opt || {};
+    var gl = planet.gl;
+    if (opt.reset) opt.reset();
+    for (var i = 0; i < warm; i++) fn(planet);
+    gl.finish();
+    forceCompletion(gl);
+    // capN bounds how far one isolated pass may drift the state within a batch;
+    // it applies to heavy passes too (n is still capped by the span target).
+    var NMAX = Math.min(opt.heavy ? heavyCap() : maxBatchN(), opt.capN || Infinity);
+    var target = minSpan();
+    var HARDWALL = FAST ? 1000 : 4000;   // never grow into a batch slower than this
+    var n = 1, span = timedBatch(fn, 1);
+    /* Grow the batch on a ×4 ladder until it spans the target. A ladder (rather
+       than one jump to the predicted n) bounds the overshoot to ~4× the last
+       sub-target batch, so a mispredicted cost cannot turn into a
+       minutes-long batch; the wall guard stops growth outright on a batch that
+       is already expensive. */
+    while (span < target && n < NMAX && span < HARDWALL) {
+      var next = Math.min(NMAX, n * 4);
+      if (next <= n) break;
+      n = next;
+      span = timedBatch(fn, n);
+    }
+    /* The calibration batch is a warm-up, not a sample: on the owner GPU the
+       first batch of a heavy config ran up to 34x off the rest (40-00 read
+       `step` = 17.15 ms at L7 where the whole x10 frame is 5.99 ms), so keeping
+       it in a 3-sample median would let a cold batch decide the value. */
+    var t = [], total = 0;
+    var MAXB = opt.reset ? (FAST ? 2 : 3) : (FAST ? 8 : 24);
+    var MINB = FAST ? 2 : 3, MAXCALLS = maxCalls();
+    while ((total < budgetMs || t.length < MINB) && t.length < MAXB && n * (t.length + 1) <= MAXCALLS) {
+      if (opt.reset) opt.reset();     // bounded state drift for isolated passes
+      var s = timedBatch(fn, n);
+      t.push(s / n); total += s;
+      if ((t.length & 3) === 0) await nextFrame();   // keep the tab responsive
+    }
+    if (!t.length) t = [span / n];
+    if (n > maxNUsed) maxNUsed = n;        // smoke-test hook (window.__benchMaxN)
+    var resolved = span >= 0.5 * target;   // n hit the cap before spanning target
+    if (!resolved) unresolved++;
+    return { ms: median(t), n: n, span: span, batches: t.length, resolved: resolved };
+  }
+
+  // Format a measured ms value. Sub-tick values are legitimate here: the batch
+  // span (not the tick) sets the error bar, so 0.021 ms measured over a 10 ms
+  // batch is a real number (<= 1 % error), not a floor artifact. Only a batch
+  // that could not be grown to a full span gets a marker, via fmtMsU().
+  function fmtMs(v) {
+    if (!(v > 0)) return '0.000';
+    return v < 1 ? v.toFixed(3) : v.toFixed(2);
+  }
+  function fmtMsU(v, m) { return fmtMs(v) + (m && m.resolved === false ? '*' : ''); }
+
   function tableTSV(id) {
     var table = document.getElementById(id);
     return Array.prototype.map.call(table.rows, function (row) {
@@ -196,11 +382,21 @@
       '# vendor: ' + clean(vendor),
       '# devicePixelRatio: ' + (window.devicePixelRatio || 1),
       '# browser: ' + clean(navigator.userAgent),
+      '# timer: performance.now() resolution ' + timerRes.toFixed(4) + ' ms (crossOriginIsolated=' +
+        (self.crossOriginIsolated === true) + ', origin ' + location.protocol + ')',
+      '# method: batch-averaged — every value is (batch span)/n with n grown on a x4 ladder so a ' +
+        'batch spans >= ' + minSpan().toFixed(1) + ' ms (>= 100 timer ticks, <= 1 % quantization); ' +
+        'median over the time-boxed batches; one gl.finish() per batch. n/batch column = n; ' +
+        '* marks a value whose batch hit the n cap (error > 1 %).',
       '# input: levels=' + document.getElementById('levels').value +
         '; substeps=' + document.getElementById('subs').value +
         '; particles(k)=' + document.getElementById('parts').value +
-        '; particlesB(k)=' + document.getElementById('partsB').value
+        '; particlesB(k)=' + document.getElementById('partsB').value +
+        '; runs=' + document.getElementById('runs').value
     ];
+    if (unresolved) head.push(
+      '# WARNING: ' + unresolved + ' measurement(s) hit the batch cap before spanning ' +
+      minSpan().toFixed(1) + ' ms (marked *); their quantization error exceeds 1 %.');
     if (deviceInfo.software) head.push(
       '# WARNING: SOFTWARE RENDERER — submission-time numbers, NOT GPU wall-clock ' +
       '(gl.finish() does not block on software GL). Headless evidence belongs to ' +
@@ -303,49 +499,51 @@
   }
   function drawOnly(p) { p.stepVFlow(); p.render(); }
 
-  async function measure(fn, warm, budgetMs) {
-    var gl = planet.gl;
-    for (var i = 0; i < warm; i++) fn(planet);
-    gl.finish();
-    /* Time-boxed: keep sampling until ~budgetMs elapse (min 3 samples), so a
-       cheap config gets many samples for a stable median while a very heavy one
-       (e.g. L7 ×128) still returns after a bounded time instead of hanging. */
-    var t = [], total = 0, MAXN = FAST ? 20 : 90;
-    while ((total < budgetMs || t.length < 3) && t.length < MAXN) {
-      var t0 = performance.now();
-      fn(planet); gl.finish();
-      var dt = performance.now() - t0;
-      t.push(dt); total += dt;
-      if ((t.length & 7) === 0) await nextFrame();   // keep the tab responsive
+  /* Per-pass ms/frame (P0.1), measured the way harness/bench_backend.js does
+     it: each pass in BATCH ISOLATION (N repeats of that one stepper + one
+     finish, value = span/N) rather than through Planet.trace. trace() wraps a
+     finish() around every pass of every frame — thousands of finishes, which
+     quantizes each pass to the timer tick and on SwiftShader trips the
+     documented ~300-finish backpressure cliff (a pre-batching sandbox run read
+     ice = 327 ms/frame at L5, where the whole frame is ~4 ms). Isolated
+     batches cost one finish each. `step` (one whole step()) and `closure`
+     (= Σ dynamics passes / step) come along as the self-check the backend
+     bench uses. Serialized finishes still overstate a real overlapped frame. */
+  async function breakdown(schemeV, subsN) {
+    var dtF = planet.params.dt * subsN;
+    var passes = [
+      ['ocean', function (q) { q.stepOceanB(); }, 1],
+      ['ocean', function (q) { q.stepOcean(); }, 0],
+      ['air', function (q) { q.stepAir(); }, 1],
+      ['cplO', function (q) { q.coupleOcean(); }, 1],
+      ['cplA', function (q) { q.coupleAir(); }, 1],
+      ['ice', function (q) { q.stepIce(); }, 1],
+      ['step', function (q) { q.step(); }, 1],
+      ['smooth', function (q) { q.stepSmooth(); }, 0],
+      ['vflow', function (q) { q.stepVFlow(); }, 0],
+      ['flow', function (q) { q.stepFlow(dtF); }, 0],
+      ['draw', function (q) { q.render(); }, 0]
+    ];
+    /* Repeat each pass from the SAME state. Running one stepper alone hundreds
+       of times drives the fields off the manifold (an ocean pass with no
+       coupling or air), and every later pass is then timed on garbage — that
+       is what made 40-00 report `step` = 17.15 ms at L7 against a 5.99 ms
+       whole frame, and `closure` = 0.00. serializeState()/applyState() is the
+       engine's own snapshot path; one restore per batch keeps drift inside a
+       batch and costs ~1 s/level at L7. */
+    var snap = null;
+    try { snap = planet.serializeState(); } catch (e) {}
+    function restore() { if (snap) { try { planet.applyState(snap); } catch (e) {} } }
+    var out = {};
+    for (var i = 0; i < passes.length; i++) {
+      if (passes[i][0] === 'ocean' && passes[i][2] !== (schemeV === 2 ? 1 : 0)) continue;
+      var m = await measure(passes[i][1], FAST ? 1 : 2, FAST ? 250 : 700,
+                            { heavy: passes[i][2] === 1, capN: 32, reset: restore });
+      out[passes[i][0]] = m.ms;
     }
-    return median(t);
-  }
-
-  // Per-pass ms/frame via Planet.trace (P0.1): finish-serialized timers around
-  // every engine pass while running whole frames. Median of N rounds; each
-  // round time-boxed like measure(). Real-GPU-only (see note above).
-  async function breakdown() {
-    for (var i = 0; i < 3; i++) frame(planet);
-    planet.gl.finish();
-    var N = FAST ? 2 : 5, rounds = [];
-    for (var r = 0; r < N; r++) {
-      planet.traceStart();
-      var n = 0, t0 = performance.now(), budget = FAST ? 150 : 400;
-      while (performance.now() - t0 < budget || n < 2) { frame(planet); n++; }
-      var t = planet.traceStop(), row = {};
-      for (var k in t) row[k] = t[k] / n;
-      rounds.push(row);
-      await nextFrame();
-    }
-    var keys = {};
-    rounds.forEach(function (rw) { for (var k in rw) keys[k] = 1; });
-    var med = {};
-    for (var k in keys) {
-      var a = rounds.map(function (rw) { return rw[k] || 0; })
-                    .sort(function (x, y) { return x - y; });
-      med[k] = a[a.length >> 1];
-    }
-    return med;
+    var dyn = out.ocean + out.air + out.cplO + out.cplA + out.ice;
+    out.closure = out.step > 0 ? dyn / out.step : 0;
+    return out;
   }
 
   async function run() {
@@ -355,27 +553,38 @@
     completeEl.hidden = true;
     copyStatusEl.textContent = '';
     tbody.innerHTML = '';
-    var autoPts = {};   // P2.2: "level|scheme" -> [{subs, frameMs}] for the auto@60 fit
-    var dtByLevel = {};
     document.querySelector('#tbl2 tbody').innerHTML = '';
     document.querySelector('#tbl3 tbody').innerHTML = '';
     document.getElementById('bdhead').innerHTML = '<th>pass</th>';
-    var bdowns = [];
     var levels = document.getElementById('levels').value.split(',').map(function (s) { return +s.trim(); }).filter(Boolean);
     var subs = document.getElementById('subs').value.split(',').map(function (s) { return +s.trim(); }).filter(Boolean);
     var parts = +document.getElementById('parts').value || 16;
     var partsB = parseInt(document.getElementById('partsB').value, 10);
     if (!(partsB > 0) || partsB === parts) partsB = 0;   // 0 = compare off
+    var runs = Math.max(1, parseInt(document.getElementById('runs').value, 10) || 1);
     var mh = document.getElementById('mhead');
-    while (mh.children.length > 9) mh.removeChild(mh.lastChild);   // reset re-runs
+    while (mh.children.length > 10) mh.removeChild(mh.lastChild);   // reset re-runs
     if (partsB) {
       var thb = document.createElement('th');
       thb.textContent = 'tracers ms @' + partsB + 'k';
-      mh.appendChild(thb);
+      // children[], not lastChild: lastChild is the trailing whitespace TEXT
+      // node, which put this header after n/batch while the cells stayed in
+      // (tracers, tracers@B, n) order — the 40-00/40-01 logs have that
+      // mismatch and carry a note saying so.
+      mh.insertBefore(thb, mh.children[mh.children.length - 1]);
     }
     var schemes = [{ name: 'explicit', v: 0 }, { name: 'implicit', v: 2 }];
 
+    // Median-of-runs accumulators (plan rule 3). Key -> array of measurements.
+    var acc = {}, meta = {};
+    function add(key, v) { (acc[key] = acc[key] || []).push(v); }
+    function med(key) { var a = acc[key]; return a && a.length ? median(a) : 0; }
+    var cellsByLevel = {}, dtByLevel = {};
+    var bdSeen = {};   // pass keys actually measured, in first-seen order
+
     try {
+    unresolved = 0; maxNUsed = 1;
+    measureTimerRes();
     // Do not start Planet's interactive rAF loop: it would submit extra frames
     // between timed samples and make the visual matrix non-comparable.
     if (!planet) {
@@ -386,9 +595,10 @@
     }
     planet.params.flowParticles = parts;
 
+    for (var r = 0; r < runs; r++) {
     for (var li = 0; li < levels.length; li++) {
       var level = levels[li];
-      setStatus('Building level ' + level + '…');
+      setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') + 'Building level ' + level + '…');
       await nextFrame();
       planet.build(level);
       planet.params.flowParticles = parts;
@@ -401,27 +611,26 @@
       planet.params.running = true;
       planet.params.mode = 13;            // an ocean-current view so tracers draw
       planet.params.streamline = 15;      // all four sublayer bits -> both pools drawn
-      var cells = planet.grid.V;
+      cellsByLevel[level] = planet.grid.V;
       dtByLevel[level] = planet.params.dt;
 
       // draw-only cost (independent of scheme/substeps) once per level
-      setStatus('L' + level + ': measuring draw…');
-      var drawMs = await measure(drawOnly, FAST ? 2 : 6, FAST ? 250 : 800);
+      setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') + 'L' + level + ': measuring draw…');
+      var dRaw = await measure(drawOnly, FAST ? 2 : 6, FAST ? 250 : 800);
+      add('draw|' + level, dRaw.ms);
+      meta['draw|' + level] = dRaw;
 
       /* P4.1 draw sweep: mode x streamline draw-only matrix (warmed medians).
          Restores the default view (mode 13, all streamlines) afterwards. */
-      setStatus('L' + level + ': draw sweep…');
+      setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') + 'L' + level + ': draw sweep…');
       var sweepModes = [13, 0, 18], sweepMasks = [0, 15];
-      var tb3 = document.querySelector('#tbl3 tbody');
       for (var mi = 0; mi < sweepModes.length; mi++) {
         for (var qi = 0; qi < sweepMasks.length; qi++) {
           planet.params.mode = sweepModes[mi];
           planet.params.streamline = sweepMasks[qi];
-          var swMs = await measure(drawOnly, FAST ? 2 : 3, FAST ? 150 : 350);
-          var swTr = document.createElement('tr');
-          swTr.innerHTML = '<td>L' + level + '</td><td>m' + sweepModes[mi] +
-            '</td><td>s' + sweepMasks[qi] + '</td><td>' + swMs.toFixed(2) + '</td>';
-          tb3.appendChild(swTr);
+          var sw = await measure(drawOnly, FAST ? 2 : 3, FAST ? 150 : 350);
+          var swKey = 'sw|' + level + '|' + sweepModes[mi] + '|' + sweepMasks[qi];
+          add(swKey, sw.ms); meta[swKey] = sw;
         }
       }
       planet.params.mode = 13;
@@ -440,16 +649,15 @@
         var rOn = await measure(renderOn, FAST ? 2 : 4, FAST ? 200 : 600);
         var rOff = await measure(renderOff, FAST ? 2 : 4, FAST ? 200 : 600);
         planet.params.streamline = 15;
-        return upd + Math.max(0, rOn - rOff);
+        return upd.ms + Math.max(0, rOn.ms - rOff.ms);
       }
-      setStatus('L' + level + ': measuring tracers…');
-      var trMs = await tracersMs();
-      var trMsB = 0;
+      setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') + 'L' + level + ': measuring tracers…');
+      add('tr|' + level, await tracersMs());
       if (partsB) {
         planet.params.flowParticles = partsB;
         planet.rebuildPools();
-        setStatus('L' + level + ': measuring tracers @' + partsB + 'k…');
-        trMsB = await tracersMs();
+        setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') + 'L' + level + ': measuring tracers @' + partsB + 'k…');
+        add('trB|' + level, await tracersMs());
         planet.params.flowParticles = parts;
         planet.rebuildPools();
       }
@@ -457,100 +665,136 @@
       // per-pass breakdown at explicit × first substeps value
       planet.params.oceanScheme = 0;
       planet.params.substeps = subs[0];
-      setStatus('L' + level + ': pass breakdown…');
-      var bd = await breakdown();
-      bdowns.push({ level: level, med: bd, drawMs: drawMs });
+      setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') + 'L' + level + ': pass breakdown…');
+      var bd = await breakdown(0, subs[0]);
+      for (var bk in bd) { add('bd|' + level + '|' + bk, bd[bk]); if (!bdSeen[bk]) bdSeen[bk] = 1; }
 
       for (var si = 0; si < schemes.length; si++) {
         for (var bi = 0; bi < subs.length; bi++) {
           planet.params.oceanScheme = schemes[si].v;
           planet.params.substeps = subs[bi];
-          setStatus('L' + level + ' ' + schemes[si].name + ' ×' + subs[bi] + '…');
+          setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') +
+            'L' + level + ' ' + schemes[si].name + ' ×' + subs[bi] + '…');
           await nextFrame();
-          var frameMs = await measure(frame, FAST ? 2 : 6, FAST ? 300 : 1200);
-          var fps = 1000 / frameMs;
-          var dps = subs[bi] * planet.params.dt * fps / 86400;   // P2.3 honesty
-          var tr = document.createElement('tr');
-          if (frameMs <= 16.7) tr.className = 'hd60';
-          tr.innerHTML =
-            '<td>L' + level + '</td>' +
-            '<td>' + schemes[si].name + '</td>' +
-            '<td>' + subs[bi] + '</td>' +
-            '<td>' + cells.toLocaleString() + '</td>' +
-            '<td>' + frameMs.toFixed(2) + '</td>' +
-            '<td>' + drawMs.toFixed(2) + '</td>' +
-            '<td class="fps ' + fpsClass(fps) + '">' + fps.toFixed(0) + '</td>' +
-            '<td>' + dps.toFixed(3) + '</td>' +
-            '<td>' + trMs.toFixed(2) + '</td>' +
-            (partsB ? '<td>' + trMsB.toFixed(2) + '</td>' : '');
-          tbody.appendChild(tr);
-          var akey = level + '|' + schemes[si].name;
-          (autoPts[akey] = autoPts[akey] || []).push({ subs: subs[bi], frameMs: frameMs });
+          var fm = await measure(frame, FAST ? 2 : 6, FAST ? 300 : 1200, { heavy: true });
+          var fkey = 'fr|' + level + '|' + si + '|' + bi;
+          add(fkey, fm.ms); meta[fkey] = fm;
         }
       }
     }
-    // render the per-pass breakdown table (union of pass keys, fixed order first)
+    }   // runs
+
+    /* ---- render (medians across runs) ---- */
+    for (var li2 = 0; li2 < levels.length; li2++) {
+      var lvl = levels[li2];
+      for (var si2 = 0; si2 < schemes.length; si2++) {
+        for (var bi2 = 0; bi2 < subs.length; bi2++) {
+          var fkey2 = 'fr|' + lvl + '|' + si2 + '|' + bi2;
+          var frameMs = med(fkey2);
+          var fps = frameMs > 0 ? 1000 / frameMs : 0;
+          var dps = subs[bi2] * (dtByLevel[lvl] || 60) * fps / 86400;   // P2.3 honesty
+          var tr = document.createElement('tr');
+          if (frameMs > 0 && frameMs <= 16.7) tr.className = 'hd60';
+          tr.innerHTML =
+            '<td>L' + lvl + '</td>' +
+            '<td>' + schemes[si2].name + '</td>' +
+            '<td>' + subs[bi2] + '</td>' +
+            '<td>' + (cellsByLevel[lvl] || 0).toLocaleString() + '</td>' +
+            '<td>' + fmtMsU(frameMs, meta[fkey2]) + '</td>' +
+            '<td>' + fmtMsU(med('draw|' + lvl), meta['draw|' + lvl]) + '</td>' +
+            '<td class="fps ' + fpsClass(fps) + '">' + fps.toFixed(0) + '</td>' +
+            '<td>' + dps.toFixed(3) + '</td>' +
+            '<td>' + fmtMs(med('tr|' + lvl)) + '</td>' +
+            (partsB ? '<td>' + fmtMsU(med('trB|' + lvl)) + '</td>' : '') +
+            '<td>' + (meta[fkey2] ? meta[fkey2].n : '') + '</td>';
+          tbody.appendChild(tr);
+        }
+      }
+    }
+
+    // per-pass breakdown table (union of pass keys, fixed order first)
     (function () {
-      var order = ['ocean', 'air', 'cplO', 'cplA', 'proj', 'ice',
-                   'smooth', 'vflow', 'flow', 'reduce', 'draw', 'blend'];
-      var seen = {};
-      bdowns.forEach(function (b) { for (var k in b.med) seen[k] = 1; });
-      var keys = order.filter(function (k) { return seen[k]; });
-      for (var k in seen) if (order.indexOf(k) < 0) keys.push(k);
+      var order = ['ocean', 'air', 'cplO', 'cplA', 'proj', 'ice', 'step',
+                   'smooth', 'vflow', 'flow', 'reduce', 'draw', 'blend', 'closure'];
+      var keys = order.filter(function (k) { return bdSeen[k]; });
+      for (var k in bdSeen) if (order.indexOf(k) < 0) keys.push(k);
       var head = document.getElementById('bdhead');
-      bdowns.forEach(function (b) {
+      levels.forEach(function (lv) {
         var th = document.createElement('th');
-        th.textContent = 'L' + b.level;
+        th.textContent = 'L' + lv;
         head.appendChild(th);
       });
       var tb = document.querySelector('#tbl2 tbody');
       keys.forEach(function (k) {
         var tr = document.createElement('tr');
         var html = '<td>' + k + '</td>';
-        bdowns.forEach(function (b) {
-          html += '<td>' + (b.med[k] || 0).toFixed(3) + '</td>';
+        levels.forEach(function (lv) {
+          var v = med('bd|' + lv + '|' + k);
+          html += '<td>' + (k === 'closure' ? v.toFixed(2) : fmtMs(v)) + '</td>';
         });
         tr.innerHTML = html;
         tb.appendChild(tr);
       });
-      var trd = document.createElement('tr');
-      var htmld = '<td>draw</td>';
-      bdowns.forEach(function (b) { htmld += '<td>' + b.drawMs.toFixed(3) + '</td>'; });
-      trd.innerHTML = htmld;
-      tb.appendChild(trd);
     })();
+
     /* P2.2 auto@60 rows: fit frame(subs) = base + subs*stepMs through the two
        extreme subs points, then autoN = largest n with base + n*stepMs <= 16.7
        (clamped to 1..128, the UI slider range). Needs >= 2 subs values. */
     (function () {
-      Object.keys(autoPts).forEach(function (akey) {
-        var pts = autoPts[akey].slice().sort(function (a, b) { return a.subs - b.subs; });
-        if (pts.length < 2) return;
-        var lo = pts[0], hi = pts[pts.length - 1];
-        if (hi.subs === lo.subs) return;
-        var parts = akey.split('|'), level = +parts[0], scheme = parts[1];
-        var stepMs = (hi.frameMs - lo.frameMs) / (hi.subs - lo.subs);
-        var base = Math.max(0, lo.frameMs - lo.subs * stepMs);
-        var autoN = stepMs > 0 ? Math.max(1, Math.min(128, Math.floor((16.7 - base) / stepMs))) : 128;
-        var frameEst = base + autoN * stepMs, fpsEst = 1000 / frameEst;
-        var dps = autoN * (dtByLevel[level] || 60) * Math.min(fpsEst, 60) / 86400;
-        var tr = document.createElement('tr');
-        if (frameEst <= 16.7) tr.className = 'hd60';
-        tr.innerHTML =
-          '<td>L' + level + '</td>' +
-          '<td>' + scheme + '</td>' +
-          '<td>auto&rarr;' + autoN + '</td>' +
-          '<td></td>' +
-          '<td>' + frameEst.toFixed(2) + '</td>' +
-          '<td></td>' +
-          '<td class="fps ' + fpsClass(fpsEst) + '">' + fpsEst.toFixed(0) + '</td>' +
-          '<td>' + dps.toFixed(3) + '</td>' +
-          '<td></td>' +
-          (partsB ? '<td></td>' : '');
-        tbody.appendChild(tr);
+      if (subs.length < 2) return;
+      levels.forEach(function (lv) {
+        schemes.forEach(function (sc, sIdx) {
+          var pts = subs.map(function (s, bIdx) {
+            return { subs: s, frameMs: med('fr|' + lv + '|' + sIdx + '|' + bIdx) };
+          }).filter(function (p) { return p.frameMs > 0; })
+            .sort(function (a, b) { return a.subs - b.subs; });
+          if (pts.length < 2) return;
+          var lo = pts[0], hi = pts[pts.length - 1];
+          if (hi.subs === lo.subs) return;
+          var stepMs = (hi.frameMs - lo.frameMs) / (hi.subs - lo.subs);
+          var base = Math.max(0, lo.frameMs - lo.subs * stepMs);
+          var autoN = stepMs > 0 ? Math.max(1, Math.min(128, Math.floor((16.7 - base) / stepMs))) : 128;
+          var frameEst = base + autoN * stepMs, fpsEst = 1000 / frameEst;
+          var dps = autoN * (dtByLevel[lv] || 60) * Math.min(fpsEst, 60) / 86400;
+          var tr = document.createElement('tr');
+          if (frameEst <= 16.7) tr.className = 'hd60';
+          tr.innerHTML =
+            '<td>L' + lv + '</td>' +
+            '<td>' + sc.name + '</td>' +
+            '<td>auto&rarr;' + autoN + '</td>' +
+            '<td></td>' +
+            '<td>' + fmtMs(frameEst) + '</td>' +
+            '<td></td>' +
+            '<td class="fps ' + fpsClass(fpsEst) + '">' + fpsEst.toFixed(0) + '</td>' +
+            '<td>' + dps.toFixed(3) + '</td>' +
+            '<td></td>' +
+            (partsB ? '<td></td>' : '') +
+            '<td></td>';
+          tbody.appendChild(tr);
+        });
       });
     })();
+
+    // draw sweep table
+    (function () {
+      var tb3 = document.querySelector('#tbl3 tbody');
+      var sweepModes = [13, 0, 18], sweepMasks = [0, 15];
+      levels.forEach(function (lv) {
+        sweepModes.forEach(function (m) {
+          sweepMasks.forEach(function (q) {
+            var key = 'sw|' + lv + '|' + m + '|' + q;
+            if (!acc[key]) return;
+            var tr = document.createElement('tr');
+            tr.innerHTML = '<td>L' + lv + '</td><td>m' + m + '</td><td>s' + q + '</td>' +
+              '<td>' + fmtMsU(med(key), meta[key]) + '</td><td>' + (meta[key] ? meta[key].n : '') + '</td>';
+            tb3.appendChild(tr);
+          });
+        });
+      });
+    })();
+
     setStatus('Done. Higher “max fps” is better; ≥60 rows are highlighted.' +
+      (runs > 1 ? ' Median of ' + runs + ' runs.' : '') +
       (deviceInfo.software
         ? ' ⚠ SOFTWARE RENDERER detected — these numbers are submission cost, not GPU wall-clock; use harness/bench_backend.js for headless evidence.'
         : ''));
