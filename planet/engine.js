@@ -666,6 +666,9 @@ Planet.prototype.serializeState = function () {
 Planet.prototype.applyState = function (st) {
   this._bakeKey = null;   // P4.3: externally supplied fields
   if (!st || st.level === undefined) throw new Error('invalid state object');
+  /* Obsolete saves (single substepsAuto checkbox) are discarded, not
+     migrated — checked before touching the grid. */
+  assertSaveParamsCurrent(st.params);
   this.globals = null; this.lastGlobalsT = null;   // P1.2: drop held globals
   if (st.level !== this.grid.level)
     throw new Error('save is level ' + st.level + ', current grid is level ' + this.grid.level);
@@ -678,7 +681,7 @@ Planet.prototype.applyState = function (st) {
     for (var k = 0; k < n; k++) { ice[k * 4] = a3[k * 4 + 2] || 0; ice[k * 4 + 1] = a3[k * 4 + 3] || 0; }
   }
   this.writeTex(this.ice[0], ice); this.writeTex(this.ice[1], ice); this.iceIdx = 0;
-  this.params = paramsWithMigration(st.params);
+  this.params = mergeParams(st.params);
   this.bounds = Object.assign({}, st.bounds || {});
   this.simTime = st.simTime || 0;
   this.stepCount = st.stepCount || 0;

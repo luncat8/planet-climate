@@ -882,7 +882,11 @@ function boot() {
     }
     if (!loadedState && ui.persistedSettings) {
       try {
-        p.params = paramsWithMigration(ui.persistedSettings.params);
+        /* A settings block persisted by a pre-split build carries the obsolete
+           substepsAuto key; discard it (fall back to defaults) like a corrupt
+           one rather than migrating it. */
+        assertSaveParamsCurrent(ui.persistedSettings.params);
+        p.params = mergeParams(ui.persistedSettings.params);
         p.bounds = Object.assign({}, ui.persistedSettings.bounds || {});
         p.simTime = ui.persistedSettings.simTime || 0;
       } catch (e) { /* ignore corrupt settings */ }

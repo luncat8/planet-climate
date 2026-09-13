@@ -479,21 +479,26 @@ function defaultParams() {
   return o;
 }
 
-/* Merge a saved/persisted parameter object over the current defaults and
-   migrate the old single auto checkbox. A saved `substepsAuto: 0` must not
-   silently turn into the new default safety brake being enabled, while new
-   saves should not retain the obsolete key. */
-function paramsWithMigration(src) {
+/* Save-file compatibility policy. Saves written before the adaptive-substeps
+   split carry the single `substepsAuto` checkbox. We do NOT migrate those
+   saves: silently turning a saved auto=off into the default safety brake on
+   (or vice versa) would change the loaded run's behaviour without saying so.
+   Such saves are discarded — applyState() and the settings loader catch this. */
+function assertSaveParamsCurrent(src) {
+  src = src || {};
+  if (src.substepsAuto !== undefined)
+    throw new Error('obsolete save (pre-adaptive-substeps "substepsAuto" key) — load a newer save or start fresh');
+}
+
+/* Merge a saved/persisted parameter object over the current defaults.
+   Callers must pass assertSaveParamsCurrent(src) first; obsolete saves are
+   rejected, never migrated. */
+function mergeParams(src) {
   var o = defaultParams();
   src = src || {};
-  /* Preserve unknown legacy keys just as the old Object.assign() loader did;
-     they are harmless until a future engine gives one meaning. */
+  /* Preserve unknown keys just as the old Object.assign() loader did; they
+     are harmless until a future engine gives one meaning. */
   Object.keys(src).forEach(function (k) { o[k] = src[k]; });
-  if (src.substepsAutoDown === undefined && src.substepsAuto !== undefined)
-    o.substepsAutoDown = src.substepsAuto;
-  if (src.substepsAutoUp === undefined && src.substepsAuto !== undefined)
-    o.substepsAutoUp = 0;
-  delete o.substepsAuto;
   return o;
 }
 
@@ -540,8 +545,10 @@ function normalizePreset(src) {
   return migrateKeys(src);
 }
 
-/* Backwards compatibility: the old single `omega` drove BOTH the Coriolis term
-   and the sub-solar point, so an old preset/save maps onto both new keys. */
+/* Preset conversion (presets only — saves are rejected, see
+   assertSaveParamsCurrent): the old single `omega` drove BOTH the Coriolis
+   term and the sub-solar point, and the old single `substepsAuto` checkbox
+   maps onto the down-control (up stays off). */
 function migrateKeys(m) {
   if (!m || (m.omega === undefined && m.substepsAuto === undefined)) return m;
   var out = {}, k;

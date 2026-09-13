@@ -72,11 +72,26 @@ p = controller({ substeps: 8, substepsAutoDown: 1, substepsAutoUp: 1 });
 p.effSubsteps(); p.fps = 40; p.updateAutoSubsteps();
 check('both enabled prioritizes the 50 fps safety brake', p.autoN < 8, p.autoN);
 
-check('old saved auto=false migrates to down=false',
-  ctx.paramsWithMigration({ substepsAuto: 0 }).substepsAutoDown === 0);
-check('old saved auto=true migrates to down=true and up=false', (() => {
-  const q = ctx.paramsWithMigration({ substepsAuto: 1 });
-  return q.substepsAutoDown === 1 && q.substepsAutoUp === 0;
+/* Presets (partial maps) are converted on load; obsolete saves are rejected. */
+check('old preset auto=false converts to down=false, up=false', (() => {
+  const m = ctx.normalizePreset({ substepsAuto: 0 });
+  return m.substepsAutoDown === 0 && m.substepsAutoUp === 0 && m.substepsAuto === undefined;
+})());
+check('old preset auto=true converts to down=true, up=false', (() => {
+  const m = ctx.normalizePreset({ substepsAuto: 1 });
+  return m.substepsAutoDown === 1 && m.substepsAutoUp === 0 && m.substepsAuto === undefined;
+})());
+check('explicit down/up preset keys survive conversion untouched', (() => {
+  const m = ctx.normalizePreset({ substepsAuto: 0, substepsAutoUp: 1 });
+  return m.substepsAutoDown === 0 && m.substepsAutoUp === 1 && m.substepsAuto === undefined;
+})());
+check('old save with substepsAuto is rejected', (() => {
+  try { ctx.assertSaveParamsCurrent({ substeps: 8, substepsAuto: 0 }); return false; }
+  catch (e) { return /substepsAuto/.test(e.message); }
+})());
+check('current save params pass the obsolete-key check', (() => {
+  try { ctx.assertSaveParamsCurrent(ctx.defaultParams()); return true; }
+  catch (e) { return false; }
 })());
 
 console.log('\n' + passes + ' passed, ' + fails + ' failed');
