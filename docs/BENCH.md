@@ -256,7 +256,13 @@ Sampling is time-boxed (~1.2 s/config, ≥ 3 batches, ≤ 24) so cheap configs g
 stable median while a very heavy one (e.g. L7 ×128 implicit) still returns in
 bounded time; the calibration batch that sizes n is a warm-up and is **not**
 sampled. **Runs** (default 1) repeats the whole matrix and reports each cell's
-median — rule 3's 2 % test needs 3. A `?fast=1` URL flag shrinks the sample counts for a quick pass on
+median — rule 3's 2 % test needs 3. **Spin-up (days)** (default 0) runs that
+many simulated days per level *before* any measurement (C8: only L5 loads the
+bundled equilibrium, so L6/L7 otherwise time a freely drifting state; the
+value travels in the `# input:` header). The page also rejects physically
+impossible rows: any level/substeps pair where **implicit < explicit** is
+annotated `# INVALID ROW (rejected as evidence)` in the copied log and warned
+in the status line. A `?fast=1` URL flag shrinks the sample counts for a quick pass on
 slow/software renderers; `?noauto=1` suppresses the auto-run (used by the smoke
 test).
 
@@ -411,8 +417,10 @@ resolutions 20× apart.
   single-shot captures at all (37.2–37.7 / 243.5–244.0). Suspected cause,
   **not verified**: at L7 nothing is equilibrated — `planet/planet_state.js` is
   not tracked in this repository and, even where present, only applies at L5 —
-  so L7 is measured on a freely drifting state whose cost depends on how much
-  simulation ran beforehand. ⇒ carry-over **C8**.
+so L7 is measured on a freely drifting state whose cost depends on how much
+simulation ran beforehand. ⇒ carry-over **C8** (since 2026-09-13: the page has
+a `Spin-up (days)` field and flags implicit < explicit rows as
+`# INVALID ROW` in the copied log).
 - **Header bug (cosmetic, fixed):** the optional `tracers ms @Bk` header was
   inserted before `mh.lastChild`, which is the trailing whitespace *text node*,
   so it landed after `n/batch` while the cells stayed in

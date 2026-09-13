@@ -57,6 +57,7 @@
       <label class="f">Particles(k) <input id="parts" type="text" value="16"></label>
       <label class="f">Particles B(k) <input id="partsB" type="text" value="64" title="Second particle count for the tracers-ms comparison column (empty = off)"></label>
       <label class="f">Runs <input id="runs" type="text" value="1" title="Repeat the whole matrix N times and report the median of each cell (plan rule 3: 2 % claims need median-of-3)"></label>
+      <label class="f">Spin-up (days) <input id="spinup" type="text" value="0" title="Simulated days to run BEFORE measuring each level (plan C8: only L5 loads the bundled equilibrium, so L6/L7 are timed on freely drifting states — spin them up first so L7 numbers are reproducible). 0 = no spin-up."></label>
       <button id="run">Run benchmark</button>
     </div>
     <div class="status" id="status">Ready.</div>
@@ -239,6 +240,7 @@
   function maxCalls() { return FAST ? 64 : 4096; }
   var unresolved = 0;   // batches that hit the n cap before spanning minSpan()
   var maxNUsed = 1;     // largest batch used this run (proves batching engaged)
+  var invalidRows = []; // C8: physically impossible matrix rows (implicit < explicit)
 
   /* End every batch with a 1px readback of the default framebuffer: gl.finish()
      alone does not make a batch of small GPU work measurable.
@@ -392,8 +394,12 @@
         '; substeps=' + document.getElementById('subs').value +
         '; particles(k)=' + document.getElementById('parts').value +
         '; particlesB(k)=' + document.getElementById('partsB').value +
-        '; runs=' + document.getElementById('runs').value
+        '; runs=' + document.getElementById('runs').value +
+        '; spinup(days)=' + document.getElementById('spinup').value
     ];
+    if (invalidRows.length) invalidRows.forEach(function (row) {
+      head.push('# INVALID ROW (rejected as evidence): ' + row);
+    });
     if (unresolved) head.push(
       '# WARNING: ' + unresolved + ' measurement(s) hit the batch cap before spanning ' +
       minSpan().toFixed(1) + ' ms (marked *); their quantization error exceeds 1 %.');
@@ -562,6 +568,7 @@
     var partsB = parseInt(document.getElementById('partsB').value, 10);
     if (!(partsB > 0) || partsB === parts) partsB = 0;   // 0 = compare off
     var runs = Math.max(1, parseInt(document.getElementById('runs').value, 10) || 1);
+    var spinDays = Math.max(0, parseFloat(document.getElementById('spinup').value) || 0);
     var mh = document.getElementById('mhead');
     while (mh.children.length > 10) mh.removeChild(mh.lastChild);   // reset re-runs
     if (partsB) {
@@ -613,6 +620,26 @@
       planet.params.streamline = 15;      // all four sublayer bits -> both pools drawn
       cellsByLevel[level] = planet.grid.V;
       dtByLevel[level] = planet.params.dt;
+
+      /* C8: documented spin-up. Only L5 loads the bundled equilibrium; L6/L7
+         start from a fresh init and their per-step cost depends on how much
+         simulation ran before timing (30-05-01 measured L7 implicit BELOW
+         explicit — a drifting-state artifact). Running a fixed number of
+         simulated days first makes the state, and its cost, reproducible.
+         Counted as warm-up, never sampled. */
+      if (spinDays > 0) {
+        var N = Math.round(spinDays * 86400 / (planet.params.dt || 60));
+        var done = 0;
+        setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') +
+          'L' + level + ': spin-up ' + spinDays + ' d (' + N.toLocaleString() + ' steps)…');
+        await nextFrame();
+        while (done < N) {
+          var chunk = Math.min(1000, N - done);
+          for (var sp = 0; sp < chunk; sp++) planet.step();
+          done += chunk;
+          if (done < N) await nextFrame();
+        }
+      }
 
       // draw-only cost (independent of scheme/substeps) once per level
       setStatus((runs > 1 ? 'Run ' + (r + 1) + '/' + runs + ' — ' : '') + 'L' + level + ': measuring draw…');
@@ -683,6 +710,23 @@
       }
     }
     }   // runs
+
+    /* C8 guard: implicit adds the Jacobi solve on top of everything explicit
+       does, so at equal level/substeps it can never be faster than explicit.
+       A row where it is measures a drifting, non-equilibrated state (30-05-01:
+       L7 implicit 50.38 ms < explicit 85.93 ms) — invalid evidence. Flag it in
+       the copied log so a log reader rejects it instead of averaging it in. */
+    invalidRows = [];
+    for (var li3 = 0; li3 < levels.length; li3++) {
+      for (var bi3 = 0; bi3 < subs.length; bi3++) {
+        var eMs = med('fr|' + levels[li3] + '|0|' + bi3);
+        var iMs = med('fr|' + levels[li3] + '|1|' + bi3);
+        if (eMs > 0 && iMs > 0 && iMs < eMs)
+          invalidRows.push('L' + levels[li3] + ' x' + subs[bi3] + ' — implicit ' +
+            iMs.toFixed(2) + ' ms < explicit ' + eMs.toFixed(2) +
+            ' ms (impossible; non-equilibrated state or artifact — see plan C8, spin up the level)');
+      }
+    }
 
     /* ---- render (medians across runs) ---- */
     for (var li2 = 0; li2 < levels.length; li2++) {
@@ -795,6 +839,7 @@
 
     setStatus('Done. Higher “max fps” is better; ≥60 rows are highlighted.' +
       (runs > 1 ? ' Median of ' + runs + ' runs.' : '') +
+      (invalidRows.length ? ' ⚠ ' + invalidRows.length + ' impossible row(s) (implicit < explicit) — flagged in the copied log, do not use them as evidence.' : '') +
       (deviceInfo.software
         ? ' ⚠ SOFTWARE RENDERER detected — these numbers are submission cost, not GPU wall-clock; use harness/bench_backend.js for headless evidence.'
         : ''));

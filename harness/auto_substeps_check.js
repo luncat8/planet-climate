@@ -72,18 +72,28 @@ p = controller({ substeps: 8, substepsAutoDown: 1, substepsAutoUp: 1 });
 p.effSubsteps(); p.fps = 40; p.updateAutoSubsteps();
 check('both enabled prioritizes the 50 fps safety brake', p.autoN < 8, p.autoN);
 
-/* Presets (partial maps) are converted on load; obsolete saves are rejected. */
+/* Presets (partial maps) are converted on load; obsolete saves are rejected.
+   Conversion emits { v } entries (applyPreset ignores raw values). */
+const pv = e => (e && typeof e === 'object') ? e.v : e;
 check('old preset auto=false converts to down=false, up=false', (() => {
   const m = ctx.normalizePreset({ substepsAuto: 0 });
-  return m.substepsAutoDown === 0 && m.substepsAutoUp === 0 && m.substepsAuto === undefined;
+  return pv(m.substepsAutoDown) === 0 && pv(m.substepsAutoUp) === 0 && m.substepsAuto === undefined;
 })());
 check('old preset auto=true converts to down=true, up=false', (() => {
   const m = ctx.normalizePreset({ substepsAuto: 1 });
-  return m.substepsAutoDown === 1 && m.substepsAutoUp === 0 && m.substepsAuto === undefined;
+  return pv(m.substepsAutoDown) === 1 && pv(m.substepsAutoUp) === 0 && m.substepsAuto === undefined;
+})());
+check('exported {v} form of an old preset converts too', (() => {
+  const m = ctx.normalizePreset({ substepsAuto: { v: 0 } });
+  return pv(m.substepsAutoDown) === 0 && pv(m.substepsAutoUp) === 0 && m.substepsAuto === undefined;
+})());
+check('array form of an old preset converts too', (() => {
+  const m = ctx.normalizePreset([{ key: 'substepsAuto', v: 1 }, { key: 'solar', v: 1500 }]);
+  return pv(m.substepsAutoDown) === 1 && pv(m.substepsAutoUp) === 0 && m.solar && m.solar.v === 1500;
 })());
 check('explicit down/up preset keys survive conversion untouched', (() => {
   const m = ctx.normalizePreset({ substepsAuto: 0, substepsAutoUp: 1 });
-  return m.substepsAutoDown === 0 && m.substepsAutoUp === 1 && m.substepsAuto === undefined;
+  return pv(m.substepsAutoDown) === 0 && pv(m.substepsAutoUp) === 1 && m.substepsAuto === undefined;
 })());
 check('old save with substepsAuto is rejected', (() => {
   try { ctx.assertSaveParamsCurrent({ substeps: 8, substepsAuto: 0 }); return false; }

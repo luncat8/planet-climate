@@ -50,8 +50,78 @@ on the `@sparticuz/chromium` 152 build).
 | **C4** | **P0.5** owner toggle matrix | Never run: substeps 1 vs 8, flow on/off, co2 on/off, scheme 0 vs 2, globe vs equirect as visual-bench row pairs. | One owner run; record beside the backend table it is meant to cross-check. |
 | **C5** | Owner-driver **L7 gate baseline** | `harness/baselines/` holds `L5.json` and `L6.json` only (the SwiftShader dir has all three). | One `gate.sh` run on the owner driver with `BASELINES_DIR=baselines`. |
 | **C6** | Per-pass attribution | `Planet.trace` failed closure by 1.9–3.9× and reported `ice` *cheaper* at L7 than L5 (absorber artifact of one `finish()` per pass). The first fix (batch isolation) failed too, and `30-05-00`/`30-05-01` prove it: `ocean` read 0.001–0.029 ms at L7 (impossible) while `step` read 17.15 ms where the whole ×10 frame is 5.99 ms — closure 0.00–0.86. Now fixed in code: a 1 px forcing readback ends every batch on **all** renderers, and each pass is re-timed from a `serializeState()` snapshot restored per batch (n ≤ 32). | One owner run; the acceptance is `closure` ≈ 1.00 ± 0.1 at every level, and no pass below the tick reported as a magnitude. |
-| **C8** | **L7 visual numbers do not reproduce** | `30-05-00` vs `30-05-01`, same machine and input: L7 explicit ×128 = 61.27 vs 85.93 ms, L7 implicit ×128 = 119.25 vs **50.38** ms — and 50.38 < 85.93 is impossible, since implicit adds the Jacobi solve to everything explicit does. Both also sit far from the single-shot captures (37.2–37.7 / 243.5–244.0). Suspected, **not verified**: nothing equilibrates L7 — `planet/planet_state.js` is not tracked in this repository and, where present, only applies at L5 — so L7 is measured on a freely drifting state whose cost depends on how much simulation ran first. | Either `node harness/mksave.js --level=7` and apply it at L7, or add a documented spin-up before L7 measurement; then `Runs = 3`. An L7 row where implicit < explicit is invalid evidence and must be rejected by the log reader. |
+| **C8** | **L7 visual numbers do not reproduce** | `30-05-00` vs `30-05-01`, same machine and input: L7 explicit ×128 = 61.27 vs 85.93 ms, L7 implicit ×128 = 119.25 vs **50.38** ms — and 50.38 < 85.93 is impossible, since implicit adds the Jacobi solve to everything explicit does. Both also sit far from the single-shot captures (37.2–37.7 / 243.5–244.0). Suspected, **not verified**: nothing equilibrates L7 — `planet/planet_state.js` is not tracked in this repository and, where present, only applies at L5 — so L7 is measured on a freely drifting state whose cost depends on how much simulation ran first. | **In code now (2026-09-13):** the page has a **Spin-up (days)** field (per-level simulated days run before measurement, recorded in the `# input:` header) and the log reader flags any implicit < explicit row as `# INVALID ROW (rejected as evidence)`. Owner: one run `Levels=7; Substeps=128; Runs=3; Spin-up=20` (repeat at 40 d if 20 d does not stabilize the rows). Alternative: `node harness/mksave.js --level=7` writes a bundled L7 equilibrium that both pages load automatically (slower — headless CPU, ~1–2 h for 20 d at L7; on the owner GPU the in-page spin-up is seconds-to-a-minute). An L7 row where implicit < explicit is invalid evidence — now auto-flagged by the page. |
 | **C7** | ~~Forced-completion batches for the visual bench~~ **done** | Every batch now ends in a 1 px `readPixels` on **every** renderer (the owner captures proved a real GPU does not force a batch of one small pass either). The sandbox smoke run went from "explicit 0.100 / implicit 0.100 ms — one tick, no information" to explicit 110.2 ms < implicit 135.1 ms, the physically correct order. | Nothing required. `bench_backend.js` stays the committed headless evidence because it additionally differences two batch sizes and closure-checks. |
+
+### 2.1 Owner runbook — what to actually run, what to send back (2026-09-13)
+
+Everything runs on the **owner machine** (RTX GPU + Chrome). Send the **complete
+copied log** each time (the `# renderer:` / `# timer:` headers travel with it —
+rule 5); single numbers from a screenshot are not evidence.
+
+**One capture pair closes C1 + C2 + C6 (+ C8).** `planet/bench.html` in Chrome:
+
+| field | value |
+|---|---|
+| Levels | `5,6,7` |
+| Substeps | `10,128` |
+| Particles(k) | `16` |
+| Particles B(k) | `64` |
+| Runs | `3` |
+| Spin-up (days) | `20` |
+
+Run → wait for **done** → **copy to clipboard** → save as
+`harness/logs/climate-p5-visual-<n>-rtx.txt`. Then press **Run benchmark** again
+and copy the second log (the "two repeats agree" acceptance is a property of the
+*pair*, not one run).
+
+What gets read off that pair:
+
+- **C2** — the ×128 rows (median-of-3) are the committed rule-3 baseline: L6
+  explicit ≈ 17.0–17.3 ms / implicit ≈ 39.0–39.4 ms are the expected anchors;
+  the median must settle them to ±2 %.
+- **C6** — per-pass table: `closure` ≈ 1.00 ± 0.1 at L5/L6/L7; `ice` at L7 must
+  not be cheaper than at L5; sub-tick passes show `*` (ceiling) and are never
+  quoted as magnitudes.
+- **C1** — tracers columns: **64 k ≤ 2× 16 k** at every level; `s15−s0` draw
+  deltas keep their sign across both logs (they flipped in 30-05-00/01); L7 draw
+  ≥ 20 % below pre-P4 **or** a real floor (0.07–0.17 ms draw on a ~17 ms frame
+  is already a floor argument). The reduction-vs-baseline half needs one extra
+  run on the pre-P3/P4 tree (the 30-xx-era commits, if still available) — same
+  fields, `Runs = 3`; without it, P3/P4 close on 64 k/16 k + floor + repeatability
+  and the %-reduction claim stays CPU-relative (P3.3a: flow −33 %).
+- **C8** — L7 rows agree within a few % across the two logs and implicit ≥
+  explicit (the page flags the opposite as `# INVALID ROW` and warns in the
+  status line — such a log is rejected, not averaged). If 20 d does not
+  stabilize L7, send a third log at `Spin-up = 40`.
+
+**C3 — one GUI reading (2 min, closes the disputed reference).** `planet/index.html`
+(main app), switch to **level 6**, Ocean scheme = **Implicit**, Substeps/frame =
+**128**, let it settle ~30 s, read the fps in the stats bar. Repeat with scheme =
+**Explicit**. Send: both HUD values + the display refresh rate (Windows → display
+settings). This adjudicates the owner reference "L6 implicit ×128 = 60 fps"
+against the four measured captures (39.2–41.7 ms ≈ 25 fps); one of the two is
+wrong and `docs/BENCH.md` gets corrected accordingly.
+
+**C4 — toggle matrix (P0.5).** Two parts:
+
+1. `bench.html`, `Levels = 6`, `Substeps = 1,8`, `Runs = 1` → the substeps
+   1-vs-8 pair for both schemes (the page always sweeps explicit + implicit).
+2. Main app at L6, fps HUD per pair: streamline off vs on (16 k particles),
+   CO₂ carbon cycle off vs on, globe vs equirect view.
+
+Send the copied bench log + the three HUD pairs. Expected from the backend
+table: scheme 0 vs 2 ≈ 2.2–2.5× on the physics share; flow-off removes a
+level-independent flow cost; co2-on adds one 4-px readback per sim-day.
+
+**C5 — one command (independent, any time).** `cd harness && ./setup_chrome.sh`
+(if not done) then `./gate.sh owner-l7`. First run **creates**
+`baselines/L7.json`; L5/L6 should print `IDENTICAL` against the committed owner
+baselines (otherwise the owner driver changed and all three need re-basing).
+Send the console output + the new `harness/baselines/L7.json`.
+
+Order: C5 any time → C3 (minutes) → C4 → the big C1/C2/C6/C8 capture pair last,
+after all page changes land, so one capture set closes four items.
 
 ## 3. Phase 5 — WebGPU port (3–5 d)
 

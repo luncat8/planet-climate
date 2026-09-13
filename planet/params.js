@@ -548,18 +548,25 @@ function normalizePreset(src) {
 /* Preset conversion (presets only — saves are rejected, see
    assertSaveParamsCurrent): the old single `omega` drove BOTH the Coriolis
    term and the sub-solar point, and the old single `substepsAuto` checkbox
-   maps onto the down-control (up stays off). */
+   maps onto the down-control (up stays off). Entries are emitted as proper
+   `{ v }` preset entries in both cases — applyPreset ignores raw values, so
+   copying the source verbatim would have silently dropped the converted keys. */
+function presetValueOf(x) {
+  return (x && typeof x === 'object' && x.v !== undefined) ? x.v : x;
+}
 function migrateKeys(m) {
   if (!m || (m.omega === undefined && m.substepsAuto === undefined)) return m;
   var out = {}, k;
   for (k in m) if (k !== 'omega' && k !== 'substepsAuto') out[k] = m[k];
   if (m.omega !== undefined) {
-    if (out.omegaSpin === undefined) out.omegaSpin = m.omega;
-    if (out.omegaOrbit === undefined) out.omegaOrbit = m.omega;
+    var w = presetValueOf(m.omega);
+    if (out.omegaSpin === undefined) out.omegaSpin = { v: w };
+    if (out.omegaOrbit === undefined) out.omegaOrbit = { v: w };
   }
   if (m.substepsAuto !== undefined) {
-    if (out.substepsAutoDown === undefined) out.substepsAutoDown = m.substepsAuto;
-    if (out.substepsAutoUp === undefined) out.substepsAutoUp = 0;
+    var a = presetValueOf(m.substepsAuto);
+    if (out.substepsAutoDown === undefined) out.substepsAutoDown = { v: a };
+    if (out.substepsAutoUp === undefined) out.substepsAutoUp = { v: 0 };
   }
   return out;
 }
